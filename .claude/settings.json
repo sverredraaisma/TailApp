@@ -1,0 +1,50 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./vendor/bin/phpunit:*)",
+      "WebFetch(domain:www.planaday.nl)",
+      "Bash(php:*)",
+      "Bash(npm run:*)",
+      "Bash(docker compose:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git commit:*)",
+      "Bash(git checkout:*)",
+      "Bash(git add:*)",
+      "Bash(git branch:*)",
+      "Bash(git push:*)",
+      "Bash(git pull:*)",
+      "Bash(gh pr:*)",
+      "Bash(glab mr:*)",
+      "Bash(composer:*)",
+      "Bash(grep:*)",
+      "Bash(ls:*)",
+      "Bash(wc:*)",
+      "Bash(sort:*)",
+      "Bash(tail:*)",
+      "Bash(jq:*)"
+    ],
+    "deny": [
+      "Read(**/.env*)",
+      "Edit(**/.env*)",
+      "Write(**/.env*)",
+      "Read(**/.ssh/**)",
+      "Read(**/.gnupg/**)",
+      "Read(/etc/**)",
+      "Read(/root/**)",
+      "Edit(**/.ssh/**)",
+      "Edit(**/.gnupg/**)",
+      "Edit(/etc/**)",
+      "Edit(/root/**)",
+      "Write(**/.ssh/**)",
+      "Write(**/.gnupg/**)",
+      "Write(/etc/**)",
+      "Write(/root/**)",
+      "Write(**/config/**)"
+    ]
+  },
+  "enabledPlugins": {
+    "skill-creator@claude-plugins-official": true
+  }
+}
