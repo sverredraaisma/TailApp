@@ -23,7 +23,8 @@
       "Bash(wc:*)",
       "Bash(sort:*)",
       "Bash(tail:*)",
-      "Bash(jq:*)"
+      "Bash(jq:*)",
+      "Read(C:/Users/Sverr/CLionProjects/TailFirmware/**/*)"
     ],
     "deny": [
       "Read(**/.env*)",

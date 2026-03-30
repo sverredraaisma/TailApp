@@ -39,7 +39,6 @@ fun TailAppTheme(
 
     MaterialTheme(
         colorScheme = colorScheme,
-        typography = Typography,
         content = content
     )
 }

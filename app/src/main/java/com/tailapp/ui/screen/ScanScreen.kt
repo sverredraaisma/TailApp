@@ -4,20 +4,24 @@ import android.Manifest
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -35,17 +39,25 @@ fun ScanScreen(
     viewModel: ScanViewModel,
     onDeviceSelected: (String) -> Unit
 ) {
-    val devices by viewModel.scannedDevices.collectAsStateWithLifecycle()
+    val devices by viewModel.devices.collectAsStateWithLifecycle()
     val isScanning by viewModel.isScanning.collectAsStateWithLifecycle()
     var permissionsGranted by remember { mutableStateOf(false) }
+
+    val permissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
+    } else {
+        arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
+    }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { results ->
         permissionsGranted = results.values.all { it }
-        if (permissionsGranted) {
-            viewModel.startScan()
-        }
+        if (permissionsGranted) viewModel.startScan()
+    }
+
+    LaunchedEffect(Unit) {
+        permissionLauncher.launch(permissions)
     }
 
     DisposableEffect(Unit) {
@@ -54,45 +66,71 @@ fun ScanScreen(
 
     Scaffold(
         topBar = {
-            TopAppBar(title = { Text("TailApp - Scan") })
+            TopAppBar(
+                title = { Text("TailApp") },
+                actions = {
+                    if (isScanning) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.padding(end = 16.dp),
+                            strokeWidth = 2.dp
+                        )
+                    } else {
+                        TextButton(onClick = {
+                            if (permissionsGranted) {
+                                viewModel.startScan()
+                            } else {
+                                permissionLauncher.launch(permissions)
+                            }
+                        }) {
+                            Text("Scan")
+                        }
+                    }
+                }
+            )
         }
     ) { padding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding)
-                .padding(horizontal = 16.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Button(
-                onClick = {
-                    if (isScanning) {
-                        viewModel.stopScan()
-                    } else {
-                        val permissions = buildList {
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                                add(Manifest.permission.BLUETOOTH_SCAN)
-                                add(Manifest.permission.BLUETOOTH_CONNECT)
-                            }
-                            add(Manifest.permission.ACCESS_FINE_LOCATION)
-                        }
-                        permissionLauncher.launch(permissions.toTypedArray())
-                    }
-                },
-                modifier = Modifier.padding(vertical = 8.dp)
+        if (!permissionsGranted && !isScanning) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding),
+                contentAlignment = Alignment.Center
             ) {
-                Text(if (isScanning) "Stop Scan" else "Start Scan")
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        text = "Bluetooth permissions required",
+                        style = MaterialTheme.typography.bodyLarge
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    TextButton(onClick = { permissionLauncher.launch(permissions) }) {
+                        Text("Grant Permissions")
+                    }
+                }
             }
-
+        } else if (devices.isEmpty() && isScanning) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "Scanning for devices...",
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        } else {
             LazyColumn(
-                contentPadding = PaddingValues(vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
             ) {
                 items(devices, key = { it.address }) { device ->
                     DeviceListItem(
                         device = device,
                         onClick = {
-                            viewModel.stopScan()
+                            viewModel.connect(device.address)
                             onDeviceSelected(device.address)
                         }
                     )
