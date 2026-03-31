@@ -2,6 +2,8 @@ package com.tailapp.audio
 
 import kotlin.math.PI
 import kotlin.math.cos
+import kotlin.math.exp
+import kotlin.math.ln
 import kotlin.math.sqrt
 
 data class FftResult(
@@ -50,16 +52,20 @@ class FftProcessor {
         val rms = sqrt(sumSquares / (endBin - startBin)).toFloat()
 
         // Adaptive normalization
-        runningPeakAmplitude += (rms - (runningPeakAmplitude / 2)) * normalizationSpeed
+        runningPeakAmplitude += (rms - (runningPeakAmplitude / 3)) * normalizationSpeed
         if (runningPeakAmplitude < 1f) runningPeakAmplitude = 1f
         val normalizedLoudness = (rms / runningPeakAmplitude * 255f).toInt().coerceIn(0, 255)
 
+        // Map output bins to FFT bins on a logarithmic frequency scale
         val outputBins = ByteArray(numBins)
-        val binsPerOutput = (endBin - startBin).toFloat() / numBins
+        val logStart = ln(freqRangeStart.toDouble())
+        val logEnd = ln(freqRangeEnd.toDouble())
 
         for (i in 0 until numBins) {
-            val from = (startBin + (i * binsPerOutput).toInt()).coerceIn(startBin, endBin - 1)
-            val to = (startBin + ((i + 1) * binsPerOutput).toInt()).coerceIn(from + 1, endBin)
+            val freqFrom = exp(logStart + (logEnd - logStart) * i / numBins)
+            val freqTo = exp(logStart + (logEnd - logStart) * (i + 1) / numBins)
+            val from = (freqFrom / freqPerBin).toInt().coerceIn(startBin, endBin - 1)
+            val to = (freqTo / freqPerBin).toInt().coerceIn(from + 1, endBin)
             var sum = 0f
             for (j in from until to) sum += magnitudes[j]
             val avg = sum / (to - from)
