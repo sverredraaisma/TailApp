@@ -13,9 +13,10 @@ import kotlin.math.abs
  * that prediction towards onsets that land near it. That is enough to track
  * steady dance music well and to recover from a tempo change within a few bars.
  * It is *not* the particle-filter cascade BeatNet uses, which reasons over many
- * competing hypotheses at once and handles rubato and sparse percussion far
- * better; that decoder is the intended replacement, and it slots in here without
- * touching anything upstream because [ActivationSource] is the seam.
+ * competing hypotheses at once; that decoder now exists alongside it as
+ * [ParticleFilterBeatDecoder], behind the shared [BeatDecoder] contract. This one
+ * remains the default — see `BeatDecoderComparisonTest` for the measured
+ * head-to-head that says why.
  *
  * **Beats are emitted slightly early, with their true timestamp.** Lighting has
  * to cross a BLE link and a 30 fps render loop, so a beat discovered at the
@@ -25,13 +26,16 @@ import kotlin.math.abs
  * actually lands, and a negative trigger offset can genuinely fire before it.
  *
  * Pure and synchronous: [process] is the whole API, and every test drives it
- * frame by frame with no dispatcher in sight.
+ * frame by frame with no dispatcher in sight. It comes in the two forms
+ * [BeatDecoder] requires — the one-argument form runs the frame through the
+ * [ActivationSource] this tracker owns, the two-argument form takes an activation
+ * computed elsewhere so two decoders can be driven from one curve.
  */
 class BeatTracker(
     private val config: FeatureConfig = FeatureConfig(),
     private val activationSource: ActivationSource = SpectralFluxActivationSource(config),
     private val tempo: TempoEstimator = TempoEstimator(config)
-) {
+) : BeatDecoder {
     private val framesPerSecond = config.framesPerSecond
     private val hopNanos: Long = (1_000_000_000.0 / framesPerSecond).toLong()
     private val lookaheadFrames = LOOKAHEAD_SECONDS * framesPerSecond
@@ -81,28 +85,34 @@ class BeatTracker(
     private class PendingBeat(val frame: Double, val position: Int)
 
     /** Current tempo estimate in BPM, or 0 before the tracker has locked on. */
-    val bpm: Float get() = tempo.bpm
+    override val bpm: Float get() = tempo.bpm
 
     /** `0..1`, combining tempo-peak sharpness with how well the phase is holding. */
-    val confidence: Float
+    override val confidence: Float
         get() = if (!hasPhase) 0f else (tempo.confidence * phaseQuality()).coerceIn(0f, 1f)
 
     /** Wall-clock time of the next predicted beat, or null when not locked on. */
-    val nextBeatTimestampNanos: Long?
+    override val nextBeatTimestampNanos: Long?
         get() = if (!hasPhase) null else frameToNanos(nextBeatFrame)
 
     /**
-     * Feeds one feature frame.
+     * Feeds one feature frame, computing its activation with the tracker's own
+     * [ActivationSource].
+     */
+    override fun process(frame: FeatureFrame): List<BeatEvent> =
+        process(frame, activationSource.activation(frame))
+
+    /**
+     * Feeds one feature frame together with a pre-computed activation.
      *
      * @return the beats this frame produced — usually empty, occasionally one,
      *   and more than one only when the frame rate stumbled badly enough that a
      *   predicted beat was skipped over.
      */
-    fun process(frame: FeatureFrame): List<BeatEvent> {
+    override fun process(frame: FeatureFrame, activation: BeatActivation): List<BeatEvent> {
         frameIndex++
         lastTimestampNanos = frame.timestampNanos
 
-        val activation = activationSource.activation(frame)
         tempo.update(activation.beat)
         val slot = (frameIndex % ACTIVATION_HISTORY).toInt()
         activationHistory[slot] = activation.beat
@@ -136,7 +146,7 @@ class BeatTracker(
         return emitDueBeats()
     }
 
-    fun reset() {
+    override fun reset() {
         activationSource.reset()
         tempo.reset()
         frameIndex = 0
