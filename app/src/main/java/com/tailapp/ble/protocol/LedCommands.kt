@@ -47,4 +47,19 @@ object LedCommands {
 
     fun setLayerEnabled(layer: Byte, enabled: Boolean): ByteArray =
         byteArrayOf(0x07, layer, if (enabled) 1 else 0)
+
+    /**
+     * `0x08` Begin image upload (protocol v1).
+     *
+     * Clears the firmware staging buffer and arms a length + CRC-32 check that is
+     * verified at [finalizeImage]. On mismatch the image is rejected and FF09
+     * reports `BAD_STATE`.
+     */
+    fun beginImage(totalLength: Int, crc32: Int): ByteArray {
+        val buf = ByteBuffer.allocate(7).order(ByteOrder.LITTLE_ENDIAN)
+        buf.put(0x08)
+        buf.putShort(totalLength.toShort())
+        buf.putInt(crc32)
+        return buf.array()
+    }
 }

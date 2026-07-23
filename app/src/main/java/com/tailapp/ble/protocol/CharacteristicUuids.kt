@@ -12,6 +12,10 @@ object CharacteristicUuids {
     val SYSTEM_CONFIG: UUID   = UUID.fromString("0000FF06-0000-1000-8000-00805F9B34FB")
     val SYSTEM_EVENTS: UUID   = UUID.fromString("0000FF07-0000-1000-8000-00805F9B34FB")
     val PROFILE_MGMT: UUID    = UUID.fromString("0000FF08-0000-1000-8000-00805F9B34FB")
+    val CMD_RESULT: UUID      = UUID.fromString("0000FF09-0000-1000-8000-00805F9B34FB")
 
     val CCCD: UUID = UUID.fromString("00002902-0000-1000-8000-00805F9B34FB")
+
+    /** Low byte of a characteristic UUID — how FF09 identifies the written characteristic. */
+    fun shortId(uuid: UUID): Byte = ((uuid.mostSignificantBits shr 32) and 0xFF).toByte()
 }

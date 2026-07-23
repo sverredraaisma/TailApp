@@ -1,17 +1,18 @@
 package com.tailapp.ble
 
 import android.annotation.SuppressLint
+import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCallback
 import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
+import android.bluetooth.BluetoothStatusCodes
 import android.content.Context
 import android.os.Build
 import android.util.Log
 import com.tailapp.ble.protocol.CharacteristicUuids
-import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -25,17 +26,13 @@ import kotlinx.coroutines.withTimeoutOrNull
 import java.util.UUID
 import kotlin.coroutines.resume
 
-data class CharacteristicUpdate(
-    val uuid: UUID,
-    val value: ByteArray
-)
-
 @SuppressLint("MissingPermission")
-class BleConnectionManager(private val context: Context) {
+class BleConnectionManager(private val context: Context) : BleTransport {
 
     companion object {
         private const val TAG = "BleConnMgr"
         private const val GATT_TIMEOUT_MS = 5000L
+        private const val DEFAULT_MTU = 23
     }
 
     private val bluetoothManager =
@@ -46,13 +43,15 @@ class BleConnectionManager(private val context: Context) {
     private val mutex = Mutex()
 
     private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
-    val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
+    override val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
 
-    private val _characteristicUpdate = MutableSharedFlow<CharacteristicUpdate>(extraBufferCapacity = 16)
-    val characteristicUpdate: SharedFlow<CharacteristicUpdate> = _characteristicUpdate.asSharedFlow()
+    // Motion state notifies at ~20 Hz; keep enough slack that a briefly-busy
+    // collector doesn't drop LED/system/ACK notifications behind it.
+    private val _characteristicUpdate = MutableSharedFlow<CharacteristicUpdate>(extraBufferCapacity = 64)
+    override val characteristicUpdate: SharedFlow<CharacteristicUpdate> = _characteristicUpdate.asSharedFlow()
 
-    private val _negotiatedMtu = MutableStateFlow(23)
-    val negotiatedMtu: StateFlow<Int> = _negotiatedMtu.asStateFlow()
+    private val _negotiatedMtu = MutableStateFlow(DEFAULT_MTU)
+    override val negotiatedMtu: StateFlow<Int> = _negotiatedMtu.asStateFlow()
 
     @Volatile private var writeCompletion: ((Boolean) -> Unit)? = null
     @Volatile private var readCompletion: ((ByteArray?) -> Unit)? = null
@@ -64,31 +63,36 @@ class BleConnectionManager(private val context: Context) {
 
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
             Log.d(TAG, "onConnectionStateChange: status=$status newState=$newState")
+            // A non-success status means the link failed (e.g. 133 GATT_ERROR); the
+            // stack may still report STATE_CONNECTED, so treat it as a teardown.
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                Log.w(TAG, "onConnectionStateChange: GATT error status=$status, tearing down")
+                teardown(gatt)
+                return
+            }
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> {
                     // Set gatt BEFORE emitting CONNECTED so it's available when onConnected() runs
                     this@BleConnectionManager.gatt = gatt
                     _connectionState.value = ConnectionState.CONNECTED
                 }
-                BluetoothProfile.STATE_DISCONNECTED -> {
-                    _connectionState.value = ConnectionState.DISCONNECTED
-                    gatt.close()
-                    this@BleConnectionManager.gatt = null
-                }
+                BluetoothProfile.STATE_DISCONNECTED -> teardown(gatt)
             }
         }
 
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
             Log.d(TAG, "onServicesDiscovered: status=$status")
-            servicesDiscoveredCompletion?.invoke(status == BluetoothGatt.GATT_SUCCESS)
+            val completion = servicesDiscoveredCompletion
             servicesDiscoveredCompletion = null
+            completion?.invoke(status == BluetoothGatt.GATT_SUCCESS)
         }
 
         override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
             Log.d(TAG, "onMtuChanged: mtu=$mtu status=$status")
-            _negotiatedMtu.value = mtu
-            mtuCompletion?.invoke(mtu)
+            if (status == BluetoothGatt.GATT_SUCCESS) _negotiatedMtu.value = mtu
+            val completion = mtuCompletion
             mtuCompletion = null
+            completion?.invoke(_negotiatedMtu.value)
         }
 
         @Deprecated("Deprecated in API 33")
@@ -97,13 +101,13 @@ class BleConnectionManager(private val context: Context) {
             characteristic: BluetoothGattCharacteristic,
             status: Int
         ) {
-            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
-                Log.d(TAG, "onCharacteristicRead(deprecated): uuid=${characteristic.uuid} status=$status len=${characteristic.value?.size}")
-                readCompletion?.invoke(
-                    if (status == BluetoothGatt.GATT_SUCCESS) characteristic.value else null
-                )
-                readCompletion = null
-            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) return
+            @Suppress("DEPRECATION")
+            val value = characteristic.value
+            Log.d(TAG, "onCharacteristicRead(deprecated): uuid=${characteristic.uuid} status=$status len=${value?.size}")
+            val completion = readCompletion
+            readCompletion = null
+            completion?.invoke(if (status == BluetoothGatt.GATT_SUCCESS) value?.copyOf() else null)
         }
 
         override fun onCharacteristicRead(
@@ -113,19 +117,20 @@ class BleConnectionManager(private val context: Context) {
             status: Int
         ) {
             Log.d(TAG, "onCharacteristicRead: uuid=${characteristic.uuid} status=$status len=${value.size}")
-            readCompletion?.invoke(if (status == BluetoothGatt.GATT_SUCCESS) value else null)
+            val completion = readCompletion
             readCompletion = null
+            completion?.invoke(if (status == BluetoothGatt.GATT_SUCCESS) value.copyOf() else null)
         }
 
-        @Deprecated("Deprecated in API 33")
         override fun onCharacteristicWrite(
             gatt: BluetoothGatt,
             characteristic: BluetoothGattCharacteristic,
             status: Int
         ) {
             Log.d(TAG, "onCharacteristicWrite: uuid=${characteristic.uuid} status=$status")
-            writeCompletion?.invoke(status == BluetoothGatt.GATT_SUCCESS)
+            val completion = writeCompletion
             writeCompletion = null
+            completion?.invoke(status == BluetoothGatt.GATT_SUCCESS)
         }
 
         override fun onDescriptorWrite(
@@ -134,8 +139,9 @@ class BleConnectionManager(private val context: Context) {
             status: Int
         ) {
             Log.d(TAG, "onDescriptorWrite: uuid=${descriptor.characteristic.uuid} status=$status")
-            descriptorWriteCompletion?.invoke(status == BluetoothGatt.GATT_SUCCESS)
+            val completion = descriptorWriteCompletion
             descriptorWriteCompletion = null
+            completion?.invoke(status == BluetoothGatt.GATT_SUCCESS)
         }
 
         @Deprecated("Deprecated in API 33")
@@ -143,11 +149,10 @@ class BleConnectionManager(private val context: Context) {
             gatt: BluetoothGatt,
             characteristic: BluetoothGattCharacteristic
         ) {
-            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
-                _characteristicUpdate.tryEmit(
-                    CharacteristicUpdate(characteristic.uuid, characteristic.value.copyOf())
-                )
-            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) return
+            @Suppress("DEPRECATION")
+            val value = characteristic.value ?: return
+            emitUpdate(characteristic.uuid, value.copyOf())
         }
 
         override fun onCharacteristicChanged(
@@ -155,23 +160,73 @@ class BleConnectionManager(private val context: Context) {
             characteristic: BluetoothGattCharacteristic,
             value: ByteArray
         ) {
-            _characteristicUpdate.tryEmit(
-                CharacteristicUpdate(characteristic.uuid, value.copyOf())
-            )
+            emitUpdate(characteristic.uuid, value.copyOf())
         }
     }
 
-    fun connect(address: String) {
-        val device = bluetoothAdapter.getRemoteDevice(address) ?: return
+    private fun emitUpdate(uuid: UUID, value: ByteArray) {
+        if (!_characteristicUpdate.tryEmit(CharacteristicUpdate(uuid, value))) {
+            Log.w(TAG, "emitUpdate: dropped notification for $uuid (buffer full)")
+        }
+    }
+
+    /**
+     * Release the GATT client and unblock anything waiting on a callback.
+     * Without this, an in-flight read/write would sit for the full 5 s timeout
+     * after the link drops.
+     */
+    private fun teardown(gatt: BluetoothGatt) {
+        _connectionState.value = ConnectionState.DISCONNECTED
+        gatt.close()
+        if (this.gatt === gatt) this.gatt = null
+        _negotiatedMtu.value = DEFAULT_MTU
+        failPendingOperations()
+    }
+
+    private fun failPendingOperations() {
+        readCompletion?.also { readCompletion = null }?.invoke(null)
+        writeCompletion?.also { writeCompletion = null }?.invoke(false)
+        descriptorWriteCompletion?.also { descriptorWriteCompletion = null }?.invoke(false)
+        servicesDiscoveredCompletion?.also { servicesDiscoveredCompletion = null }?.invoke(false)
+        mtuCompletion?.also { mtuCompletion = null }?.invoke(_negotiatedMtu.value)
+    }
+
+    override fun connect(address: String) {
+        val adapter = bluetoothAdapter
+        if (adapter == null) {
+            Log.e(TAG, "connect: no Bluetooth adapter")
+            _connectionState.value = ConnectionState.DISCONNECTED
+            return
+        }
+        // getRemoteDevice throws on a malformed address rather than returning null.
+        val device = try {
+            adapter.getRemoteDevice(address)
+        } catch (e: IllegalArgumentException) {
+            Log.e(TAG, "connect: invalid address '$address'", e)
+            _connectionState.value = ConnectionState.DISCONNECTED
+            return
+        }
         _connectionState.value = ConnectionState.CONNECTING
-        device.connectGatt(context, false, gattCallback, 2 /* TRANSPORT_LE */)
+        // Keep the handle so disconnect() works while the link is still being set up.
+        gatt = device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
     }
 
-    fun disconnect() {
-        gatt?.disconnect()
+    override fun disconnect() {
+        val current = gatt
+        if (current == null) {
+            _connectionState.value = ConnectionState.DISCONNECTED
+            return
+        }
+        if (_connectionState.value == ConnectionState.CONNECTING) {
+            // No STATE_DISCONNECTED callback arrives for a connection that never
+            // completed, so close here instead of leaking the client.
+            teardown(current)
+            return
+        }
+        current.disconnect()
     }
 
-    suspend fun requestMtu(mtu: Int): Int {
+    override suspend fun requestMtu(mtu: Int): Int {
         return withTimeoutOrNull(GATT_TIMEOUT_MS) {
             suspendCancellableCoroutine { cont ->
                 mtuCompletion = { cont.resume(it) }
@@ -189,7 +244,7 @@ class BleConnectionManager(private val context: Context) {
         }
     }
 
-    suspend fun discoverServices(): Boolean {
+    override suspend fun discoverServices(): Boolean {
         return withTimeoutOrNull(GATT_TIMEOUT_MS) {
             suspendCancellableCoroutine { cont ->
                 servicesDiscoveredCompletion = { cont.resume(it) }
@@ -207,7 +262,7 @@ class BleConnectionManager(private val context: Context) {
         }
     }
 
-    suspend fun readCharacteristic(uuid: UUID): ByteArray? = mutex.withLock {
+    override suspend fun readCharacteristic(uuid: UUID): ByteArray? = mutex.withLock {
         withTimeoutOrNull(GATT_TIMEOUT_MS) {
             suspendCancellableCoroutine { cont ->
                 val characteristic = findCharacteristic(uuid)
@@ -232,7 +287,7 @@ class BleConnectionManager(private val context: Context) {
         }
     }
 
-    suspend fun writeCharacteristic(uuid: UUID, data: ByteArray): Boolean = mutex.withLock {
+    override suspend fun writeCharacteristic(uuid: UUID, data: ByteArray): Boolean = mutex.withLock {
         withTimeoutOrNull(GATT_TIMEOUT_MS) {
             suspendCancellableCoroutine { cont ->
                 val characteristic = findCharacteristic(uuid)
@@ -248,7 +303,7 @@ class BleConnectionManager(private val context: Context) {
                         characteristic,
                         data,
                         BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-                    ) == BluetoothGatt.GATT_SUCCESS
+                    ) == BluetoothStatusCodes.SUCCESS
                 } else {
                     @Suppress("DEPRECATION")
                     characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
@@ -274,7 +329,7 @@ class BleConnectionManager(private val context: Context) {
      * Write Without Response — bypasses the mutex since it doesn't require a GATT response.
      * Used for FFT streaming (FF05) at 30fps without blocking command writes.
      */
-    fun writeWithoutResponse(uuid: UUID, data: ByteArray) {
+    override fun writeWithoutResponse(uuid: UUID, data: ByteArray) {
         val characteristic = findCharacteristic(uuid) ?: return
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             gatt?.writeCharacteristic(
@@ -292,7 +347,7 @@ class BleConnectionManager(private val context: Context) {
         }
     }
 
-    suspend fun enableNotifications(uuid: UUID): Boolean = mutex.withLock {
+    override suspend fun enableNotifications(uuid: UUID): Boolean = mutex.withLock {
         val characteristic = findCharacteristic(uuid)
         if (characteristic == null) {
             Log.w(TAG, "enableNotifications: characteristic $uuid not found")
@@ -312,7 +367,7 @@ class BleConnectionManager(private val context: Context) {
                 cont.invokeOnCancellation { descriptorWriteCompletion = null }
                 val started = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     val result = gatt?.writeDescriptor(descriptor, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
-                    result == BluetoothGatt.GATT_SUCCESS
+                    result == BluetoothStatusCodes.SUCCESS
                 } else {
                     @Suppress("DEPRECATION")
                     descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE

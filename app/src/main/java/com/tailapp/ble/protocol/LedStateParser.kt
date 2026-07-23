@@ -7,7 +7,7 @@ import java.nio.ByteOrder
 
 object LedStateParser {
 
-    private const val LAYER_SIZE = 39 // 7 bytes header + 8 * 4 bytes params
+    private const val LAYER_SIZE = Protocol.LED_LAYER_SIZE // 7 header bytes + 8 * 4 param bytes
 
     fun parse(data: ByteArray): LedState? {
         if (data.isEmpty()) return null

@@ -1,5 +1,7 @@
 package com.tailapp.model
 
+import com.tailapp.ble.protocol.Protocol
+
 enum class LedEffect(val id: Byte, val displayName: String, val params: List<ParamMetadata>) {
     RAINBOW(
         0x00, "Rainbow", listOf(
@@ -78,6 +80,25 @@ data class LayerConfig(
 ) {
     val effect: LedEffect? get() = LedEffect.fromId(effectId)
     val blend: BlendMode? get() = BlendMode.fromId(blendMode)
+
+    /**
+     * True for a slot the firmware has cleared. `LCMD_REMOVE_LAYER` does *not*
+     * shift the remaining layers down — it stamps `effect_id = 0xFF` and leaves
+     * `num_layers` alone — so layer indices stay stable across a removal.
+     */
+    val isEmpty: Boolean get() = effectId == Protocol.EMPTY_EFFECT_ID
+
+    companion object {
+        /** The placeholder a removed slot reads back as. */
+        fun empty(): LayerConfig = LayerConfig(
+            effectId = Protocol.EMPTY_EFFECT_ID,
+            blendMode = 0,
+            enabled = false,
+            flipX = false, flipY = false,
+            mirrorX = false, mirrorY = false,
+            params = List(8) { 0f }
+        )
+    }
 }
 
 data class LedState(
@@ -86,4 +107,18 @@ data class LedState(
     val layers: List<LayerConfig>
 ) {
     val totalLeds: Int get() = ledsPerRing.sum()
+
+    /** Layer indices that currently hold an effect, in slot order. */
+    val occupiedLayerIndices: List<Int>
+        get() = layers.indices.filter { !layers[it].isEmpty }
+
+    /**
+     * First slot a new layer can be written to, or null when the stack is full.
+     * Reuses a cleared slot before extending the stack.
+     */
+    fun firstFreeLayerIndex(maxLayers: Int): Int? {
+        val reusable = layers.indexOfFirst { it.isEmpty }
+        if (reusable >= 0) return reusable
+        return layers.size.takeIf { it < maxLayers }
+    }
 }

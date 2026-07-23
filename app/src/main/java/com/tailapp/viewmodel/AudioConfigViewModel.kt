@@ -1,8 +1,8 @@
 package com.tailapp.viewmodel
 
-import android.content.Context
 import android.content.SharedPreferences
 import androidx.lifecycle.ViewModel
+import com.tailapp.audio.FftProcessor
 import com.tailapp.audio.FftStreamManager
 import com.tailapp.model.DeviceState
 import com.tailapp.repository.DeviceRepository
@@ -33,6 +33,10 @@ class AudioConfigViewModel(
     val isStreaming: StateFlow<Boolean> =
         fftStreamManager?.isStreaming ?: MutableStateFlow(false)
 
+    /** Non-null when the microphone could not be opened. */
+    val streamError: StateFlow<String?> =
+        fftStreamManager?.error ?: MutableStateFlow(null)
+
     init {
         // Initialize from persisted prefs, falling back to processor state, falling back to defaults
         val processor = fftStreamManager?.fftProcessor
@@ -59,9 +63,10 @@ class AudioConfigViewModel(
     }
 
     fun setNumBins(value: Int) {
-        _numBins.value = value
-        fftStreamManager?.fftProcessor?.numBins = value
-        prefs?.edit()?.putInt(KEY_NUM_BINS, value)?.apply()
+        val clamped = value.coerceIn(FftProcessor.MIN_BINS, FftProcessor.MAX_BINS)
+        _numBins.value = clamped
+        fftStreamManager?.fftProcessor?.numBins = clamped
+        prefs?.edit()?.putInt(KEY_NUM_BINS, clamped)?.apply()
     }
 
     fun setNormalizationSpeed(value: Float) {
@@ -84,6 +89,10 @@ class AudioConfigViewModel(
 
     fun toggleStream() {
         fftStreamManager?.toggle()
+    }
+
+    fun clearStreamError() {
+        fftStreamManager?.clearError()
     }
 
     companion object {

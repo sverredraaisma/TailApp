@@ -14,6 +14,9 @@ class ScanViewModel(
     val devices: StateFlow<List<BleDevice>> = bleScanner.devices
     val isScanning: StateFlow<Boolean> = bleScanner.isScanning
 
+    /** Non-null when a scan could not be started or the system aborted it. */
+    val scanError: StateFlow<String?> = bleScanner.scanError
+
     fun startScan() = bleScanner.startScan()
     fun stopScan() = bleScanner.stopScan()
 

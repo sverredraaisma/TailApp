@@ -17,22 +17,17 @@ import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
-
 import androidx.compose.material3.ExperimentalMaterial3Api
-
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -44,6 +39,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.tailapp.model.MotionPattern
+import com.tailapp.model.ServoConfig
+import com.tailapp.ui.components.DebouncedSlider
 import com.tailapp.ui.components.EffectParameterSlider
 import com.tailapp.viewmodel.MotionConfigViewModel
 
@@ -55,6 +52,9 @@ fun MotionConfigScreen(
 ) {
     val state by viewModel.deviceState.collectAsStateWithLifecycle()
     val motionState = state.motionState
+    val capabilities = state.capabilities
+    // Offer only the patterns the connected firmware reports.
+    val availablePatterns = capabilities.patterns.ifEmpty { MotionPattern.entries }
 
     Scaffold(
         topBar = {
@@ -81,7 +81,7 @@ fun MotionConfigScreen(
                     Text("Motion Pattern", style = MaterialTheme.typography.titleMedium)
                     Spacer(Modifier.height(8.dp))
                     Row {
-                        MotionPattern.entries.forEach { pattern ->
+                        availablePatterns.forEach { pattern ->
                             FilterChip(
                                 selected = motionState?.activePatternId == pattern.id,
                                 onClick = { viewModel.selectPattern(pattern.id) },
@@ -101,7 +101,10 @@ fun MotionConfigScreen(
                 if (activePattern != null) {
                     Card(modifier = Modifier.fillMaxWidth()) {
                         Column(modifier = Modifier.padding(16.dp)) {
-                            Text("${activePattern.displayName} Parameters", style = MaterialTheme.typography.titleMedium)
+                            Text(
+                                "${activePattern.displayName} Parameters",
+                                style = MaterialTheme.typography.titleMedium
+                            )
                             Spacer(Modifier.height(8.dp))
                             activePattern.params.forEach { param ->
                                 EffectParameterSlider(
@@ -116,66 +119,70 @@ fun MotionConfigScreen(
 
                 Spacer(Modifier.height(16.dp))
 
-                // Encoder Positions
+                // Live telemetry (FF02 notifies at ~20 Hz)
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Column(modifier = Modifier.padding(16.dp)) {
                         Text("Current Positions", style = MaterialTheme.typography.titleMedium)
                         Spacer(Modifier.height(8.dp))
                         motionState.encoderPositions.forEachIndexed { i, pos ->
-                            Text("Encoder $i: ${"%.1f".format(pos)}\u00B0")
+                            Text("Encoder $i: ${"%.1f".format(pos)}°")
                         }
+                        Spacer(Modifier.height(8.dp))
+                        Text("Gravity", style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            "X %.2f · Y %.2f · Z %.2f g".format(
+                                motionState.gravityX, motionState.gravityY, motionState.gravityZ
+                            ),
+                            style = MaterialTheme.typography.bodySmall
+                        )
                     }
                 }
 
                 Spacer(Modifier.height(16.dp))
 
-                // Axis Limits
+                // Axis Limits — debounced so dragging doesn't flood the GATT queue.
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Column(modifier = Modifier.padding(16.dp)) {
                         Text("Axis Limits", style = MaterialTheme.typography.titleMedium)
                         Spacer(Modifier.height(8.dp))
 
-                        Text("X Axis: ${"%.0f".format(motionState.xAxisMin)}\u00B0 to ${"%.0f".format(motionState.xAxisMax)}\u00B0")
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text("Min", modifier = Modifier.padding(end = 8.dp))
-                            Slider(
-                                value = motionState.xAxisMin,
-                                onValueChange = { viewModel.setAxisLimits(0, it, motionState.xAxisMax) },
-                                valueRange = -180f..0f,
-                                modifier = Modifier.weight(1f)
-                            )
-                        }
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text("Max", modifier = Modifier.padding(end = 8.dp))
-                            Slider(
-                                value = motionState.xAxisMax,
-                                onValueChange = { viewModel.setAxisLimits(0, motionState.xAxisMin, it) },
-                                valueRange = 0f..180f,
-                                modifier = Modifier.weight(1f)
-                            )
-                        }
+                        Text("X Axis", style = MaterialTheme.typography.bodyMedium)
+                        DebouncedSlider(
+                            label = "Min",
+                            value = motionState.xAxisMin,
+                            onValueChange = { viewModel.setAxisLimits(0, it, motionState.xAxisMax) },
+                            valueRange = -180f..0f,
+                            unit = "°",
+                            valueFormat = "%.0f"
+                        )
+                        DebouncedSlider(
+                            label = "Max",
+                            value = motionState.xAxisMax,
+                            onValueChange = { viewModel.setAxisLimits(0, motionState.xAxisMin, it) },
+                            valueRange = 0f..180f,
+                            unit = "°",
+                            valueFormat = "%.0f"
+                        )
 
                         Spacer(Modifier.height(8.dp))
 
-                        Text("Y Axis: ${"%.0f".format(motionState.yAxisMin)}\u00B0 to ${"%.0f".format(motionState.yAxisMax)}\u00B0")
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text("Min", modifier = Modifier.padding(end = 8.dp))
-                            Slider(
-                                value = motionState.yAxisMin,
-                                onValueChange = { viewModel.setAxisLimits(1, it, motionState.yAxisMax) },
-                                valueRange = -180f..0f,
-                                modifier = Modifier.weight(1f)
-                            )
-                        }
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text("Max", modifier = Modifier.padding(end = 8.dp))
-                            Slider(
-                                value = motionState.yAxisMax,
-                                onValueChange = { viewModel.setAxisLimits(1, motionState.yAxisMin, it) },
-                                valueRange = 0f..180f,
-                                modifier = Modifier.weight(1f)
-                            )
-                        }
+                        Text("Y Axis", style = MaterialTheme.typography.bodyMedium)
+                        DebouncedSlider(
+                            label = "Min",
+                            value = motionState.yAxisMin,
+                            onValueChange = { viewModel.setAxisLimits(1, it, motionState.yAxisMax) },
+                            valueRange = -180f..0f,
+                            unit = "°",
+                            valueFormat = "%.0f"
+                        )
+                        DebouncedSlider(
+                            label = "Max",
+                            value = motionState.yAxisMax,
+                            onValueChange = { viewModel.setAxisLimits(1, motionState.yAxisMin, it) },
+                            valueRange = 0f..180f,
+                            unit = "°",
+                            valueFormat = "%.0f"
+                        )
                     }
                 }
             }
@@ -188,126 +195,45 @@ fun MotionConfigScreen(
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Column(modifier = Modifier.padding(16.dp)) {
                         Text("Servo Configuration", style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            "Changes apply immediately — no reboot needed.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                         Spacer(Modifier.height(8.dp))
 
                         systemInfo.servos.forEachIndexed { i, servo ->
-                            var expanded by remember { mutableStateOf(false) }
+                            ServoConfigRow(index = i, servo = servo, viewModel = viewModel)
+                            if (i < systemInfo.servos.lastIndex) HorizontalDivider()
+                        }
+                    }
+                }
 
+                Spacer(Modifier.height(16.dp))
+
+                // IMU tap detection
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text("Tap Detection", style = MaterialTheme.typography.titleMedium)
+                        Spacer(Modifier.height(8.dp))
+                        systemInfo.imus.forEachIndexed { i, imu ->
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Text(
-                                    "Servo $i",
-                                    style = MaterialTheme.typography.bodyLarge,
-                                    modifier = Modifier.weight(1f)
-                                )
-                                Text(
-                                    "${if (servo.axis == 0) "X" else "Y"}-${if (servo.half == 0) "First" else "Second"}${if (servo.invert) " (inv)" else ""}",
-                                    style = MaterialTheme.typography.bodySmall
-                                )
-                                IconButton(onClick = { expanded = !expanded }) {
-                                    Icon(
-                                        if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                                        "Expand"
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(if (i == 0) "Base IMU" else "Tip IMU")
+                                    Text(
+                                        "Mux channel ${imu.muxChannel}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
                                 }
+                                Switch(
+                                    checked = imu.tapEnabled,
+                                    onCheckedChange = { viewModel.setImuTap(i.toByte(), it) }
+                                )
                             }
-
-                            AnimatedVisibility(visible = expanded) {
-                                Column(modifier = Modifier.padding(start = 16.dp)) {
-                                    // Axis
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Text("Axis: ", modifier = Modifier.padding(end = 8.dp))
-                                        FilterChip(
-                                            selected = servo.axis == 0,
-                                            onClick = {
-                                                viewModel.setServoConfig(
-                                                    i.toByte(), 0, servo.half.toByte(),
-                                                    if (servo.invert) 1 else 0
-                                                )
-                                            },
-                                            label = { Text("X") },
-                                            modifier = Modifier.padding(end = 4.dp)
-                                        )
-                                        FilterChip(
-                                            selected = servo.axis == 1,
-                                            onClick = {
-                                                viewModel.setServoConfig(
-                                                    i.toByte(), 1, servo.half.toByte(),
-                                                    if (servo.invert) 1 else 0
-                                                )
-                                            },
-                                            label = { Text("Y") }
-                                        )
-                                    }
-                                    // Half
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Text("Half: ", modifier = Modifier.padding(end = 8.dp))
-                                        FilterChip(
-                                            selected = servo.half == 0,
-                                            onClick = {
-                                                viewModel.setServoConfig(
-                                                    i.toByte(), servo.axis.toByte(), 0,
-                                                    if (servo.invert) 1 else 0
-                                                )
-                                            },
-                                            label = { Text("First") },
-                                            modifier = Modifier.padding(end = 4.dp)
-                                        )
-                                        FilterChip(
-                                            selected = servo.half == 1,
-                                            onClick = {
-                                                viewModel.setServoConfig(
-                                                    i.toByte(), servo.axis.toByte(), 1,
-                                                    if (servo.invert) 1 else 0
-                                                )
-                                            },
-                                            label = { Text("Second") }
-                                        )
-                                    }
-                                    // Invert
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Text("Invert: ", modifier = Modifier.padding(end = 8.dp))
-                                        Switch(
-                                            checked = servo.invert,
-                                            onCheckedChange = {
-                                                viewModel.setServoConfig(
-                                                    i.toByte(), servo.axis.toByte(),
-                                                    servo.half.toByte(), if (it) 1 else 0
-                                                )
-                                            }
-                                        )
-                                    }
-                                    // PID Gains
-                                    Text("PID Gains", style = MaterialTheme.typography.bodyMedium)
-                                    Text("Kp: ${"%.2f".format(servo.pid.kp)}")
-                                    Slider(
-                                        value = servo.pid.kp,
-                                        onValueChange = {
-                                            viewModel.setPidGains(i.toByte(), it, servo.pid.ki, servo.pid.kd)
-                                        },
-                                        valueRange = 0f..10f
-                                    )
-                                    Text("Ki: ${"%.3f".format(servo.pid.ki)}")
-                                    Slider(
-                                        value = servo.pid.ki,
-                                        onValueChange = {
-                                            viewModel.setPidGains(i.toByte(), servo.pid.kp, it, servo.pid.kd)
-                                        },
-                                        valueRange = 0f..1f
-                                    )
-                                    Text("Kd: ${"%.2f".format(servo.pid.kd)}")
-                                    Slider(
-                                        value = servo.pid.kd,
-                                        onValueChange = {
-                                            viewModel.setPidGains(i.toByte(), servo.pid.kp, servo.pid.ki, it)
-                                        },
-                                        valueRange = 0f..5f
-                                    )
-                                }
-                            }
-                            if (i < systemInfo.servos.lastIndex) HorizontalDivider()
                         }
                     }
                 }
@@ -338,6 +264,132 @@ fun MotionConfigScreen(
                     }
                 )
             }
+        }
+    }
+}
+
+@Composable
+private fun ServoConfigRow(
+    index: Int,
+    servo: ServoConfig,
+    viewModel: MotionConfigViewModel
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val invertByte: Byte = if (servo.invert) 1 else 0
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            "Servo $index",
+            style = MaterialTheme.typography.bodyLarge,
+            modifier = Modifier.weight(1f)
+        )
+        Text(
+            "${if (servo.axis == 0) "X" else "Y"}-${if (servo.half == 0) "First" else "Second"}" +
+                (if (servo.invert) " (inv)" else "") + " · mux ${servo.muxChannel}",
+            style = MaterialTheme.typography.bodySmall
+        )
+        IconButton(onClick = { expanded = !expanded }) {
+            Icon(
+                if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                "Expand"
+            )
+        }
+    }
+
+    AnimatedVisibility(visible = expanded) {
+        Column(modifier = Modifier.padding(start = 16.dp)) {
+            // Axis
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Axis: ", modifier = Modifier.padding(end = 8.dp))
+                FilterChip(
+                    selected = servo.axis == 0,
+                    onClick = {
+                        viewModel.setServoConfig(index.toByte(), 0, servo.half.toByte(), invertByte)
+                    },
+                    label = { Text("X") },
+                    modifier = Modifier.padding(end = 4.dp)
+                )
+                FilterChip(
+                    selected = servo.axis == 1,
+                    onClick = {
+                        viewModel.setServoConfig(index.toByte(), 1, servo.half.toByte(), invertByte)
+                    },
+                    label = { Text("Y") }
+                )
+            }
+            // Half
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Half: ", modifier = Modifier.padding(end = 8.dp))
+                FilterChip(
+                    selected = servo.half == 0,
+                    onClick = {
+                        viewModel.setServoConfig(index.toByte(), servo.axis.toByte(), 0, invertByte)
+                    },
+                    label = { Text("First") },
+                    modifier = Modifier.padding(end = 4.dp)
+                )
+                FilterChip(
+                    selected = servo.half == 1,
+                    onClick = {
+                        viewModel.setServoConfig(index.toByte(), servo.axis.toByte(), 1, invertByte)
+                    },
+                    label = { Text("Second") }
+                )
+            }
+            // Invert
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Invert: ", modifier = Modifier.padding(end = 8.dp))
+                Switch(
+                    checked = servo.invert,
+                    onCheckedChange = {
+                        viewModel.setServoConfig(
+                            index.toByte(), servo.axis.toByte(), servo.half.toByte(),
+                            if (it) 1 else 0
+                        )
+                    }
+                )
+            }
+            // Encoder mux channel — protocol v1 added this as the optional 6th byte
+            // of MCMD_SET_SERVO_CFG; before that it could not be set over BLE at all.
+            DebouncedSlider(
+                label = "Encoder mux channel",
+                value = servo.muxChannel.toFloat(),
+                onValueChange = {
+                    viewModel.setServoConfig(
+                        index.toByte(), servo.axis.toByte(), servo.half.toByte(),
+                        invertByte, it.toInt().toByte()
+                    )
+                },
+                valueRange = 0f..7f,
+                valueFormat = "%.0f"
+            )
+
+            // PID Gains
+            Text("PID Gains", style = MaterialTheme.typography.bodyMedium)
+            DebouncedSlider(
+                label = "Kp",
+                value = servo.pid.kp,
+                onValueChange = { viewModel.setPidGains(index.toByte(), it, servo.pid.ki, servo.pid.kd) },
+                valueRange = 0f..10f,
+                valueFormat = "%.2f"
+            )
+            DebouncedSlider(
+                label = "Ki",
+                value = servo.pid.ki,
+                onValueChange = { viewModel.setPidGains(index.toByte(), servo.pid.kp, it, servo.pid.kd) },
+                valueRange = 0f..1f,
+                valueFormat = "%.3f"
+            )
+            DebouncedSlider(
+                label = "Kd",
+                value = servo.pid.kd,
+                onValueChange = { viewModel.setPidGains(index.toByte(), servo.pid.kp, servo.pid.ki, it) },
+                valueRange = 0f..5f,
+                valueFormat = "%.2f"
+            )
         }
     }
 }

@@ -16,8 +16,23 @@ object MotionCommands {
         return buf.array()
     }
 
-    fun setServoConfig(servoId: Byte, axis: Byte, half: Byte, invert: Byte): ByteArray =
+    /**
+     * `0x03` Set servo configuration.
+     *
+     * [muxChannel] is the optional 6th byte added in protocol v1 — it sets the
+     * encoder's I2C mux channel. Omit it to leave the channel untouched.
+     */
+    fun setServoConfig(
+        servoId: Byte,
+        axis: Byte,
+        half: Byte,
+        invert: Byte,
+        muxChannel: Byte? = null
+    ): ByteArray = if (muxChannel == null) {
         byteArrayOf(0x03, servoId, axis, half, invert)
+    } else {
+        byteArrayOf(0x03, servoId, axis, half, invert, muxChannel)
+    }
 
     fun setPidGains(servoId: Byte, kp: Float, ki: Float, kd: Float): ByteArray {
         val buf = ByteBuffer.allocate(14).order(ByteOrder.LITTLE_ENDIAN)

@@ -23,14 +23,19 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.tailapp.audio.FftProcessor
 import com.tailapp.viewmodel.AudioConfigViewModel
 import kotlin.math.ln
 import kotlin.math.exp
@@ -46,11 +51,20 @@ fun AudioConfigScreen(
     val freqStart by viewModel.freqStart.collectAsStateWithLifecycle()
     val freqEnd by viewModel.freqEnd.collectAsStateWithLifecycle()
     val isStreaming by viewModel.isStreaming.collectAsStateWithLifecycle()
+    val streamError by viewModel.streamError.collectAsStateWithLifecycle()
+    val snackbarHostState = remember { SnackbarHostState() }
 
     val audioPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
         if (granted) viewModel.toggleStream()
+    }
+
+    LaunchedEffect(streamError) {
+        streamError?.let {
+            snackbarHostState.showSnackbar(it)
+            viewModel.clearStreamError()
+        }
     }
 
     Scaffold(
@@ -63,7 +77,8 @@ fun AudioConfigScreen(
                     }
                 }
             )
-        }
+        },
+        snackbarHost = { SnackbarHost(snackbarHostState) }
     ) { padding ->
         Column(
             modifier = Modifier
@@ -107,8 +122,8 @@ fun AudioConfigScreen(
                     Slider(
                         value = numBins.toFloat(),
                         onValueChange = { viewModel.setNumBins(it.toInt()) },
-                        valueRange = 1f..128f,
-                        steps = 126,
+                        valueRange = FftProcessor.MIN_BINS.toFloat()..FftProcessor.MAX_BINS.toFloat(),
+                        steps = FftProcessor.MAX_BINS - FftProcessor.MIN_BINS - 1,
                         modifier = Modifier.fillMaxWidth()
                     )
 

@@ -29,13 +29,15 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -58,8 +60,23 @@ fun LedConfigScreen(
 ) {
     val state by viewModel.deviceState.collectAsStateWithLifecycle()
     val uploadProgress by viewModel.uploadProgress.collectAsStateWithLifecycle()
+    val uploadError by viewModel.uploadError.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val ledState = state.ledState
+    val capabilities = state.capabilities
+    val snackbarHostState = remember { SnackbarHostState() }
+
+    // Only offer effects/blends the connected firmware advertises.
+    val availableEffects = capabilities.effects.ifEmpty { LedEffect.entries }
+    val availableBlends = capabilities.blendModes.ifEmpty { BlendMode.entries }
+    val canAddLayer = ledState?.firstFreeLayerIndex(capabilities.maxLayers) != null
+
+    LaunchedEffect(uploadError) {
+        uploadError?.let {
+            snackbarHostState.showSnackbar(it)
+            viewModel.clearUploadError()
+        }
+    }
 
     Scaffold(
         topBar = {
@@ -72,8 +89,9 @@ fun LedConfigScreen(
                 }
             )
         },
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         floatingActionButton = {
-            if ((ledState?.layers?.size ?: 0) < 8) {
+            if (canAddLayer) {
                 FloatingActionButton(onClick = {
                     viewModel.addLayer(LedEffect.RAINBOW.id, BlendMode.OVERWRITE.id)
                 }) {
@@ -106,22 +124,39 @@ fun LedConfigScreen(
 
                     Spacer(Modifier.height(8.dp))
 
-                    val defaultLeds = ledState?.ledsPerRing?.joinToString(",") ?: "8,10,12,10,8"
+                    val defaultLeds = ledState?.ledsPerRing
+                        ?.takeIf { it.isNotEmpty() }
+                        ?.joinToString(",")
+                        ?: "8,10,12,10,8"
                     var ledsInput by remember(defaultLeds) { mutableStateOf(defaultLeds) }
+
+                    val parsedRings = ledsInput.split(",")
+                        .mapNotNull { it.trim().toIntOrNull() }
+                        .filter { it in 1..255 }
+                    val ringsValid = parsedRings.isNotEmpty() &&
+                        parsedRings.size <= capabilities.maxLedRings
 
                     TextField(
                         value = ledsInput,
                         onValueChange = { ledsInput = it },
                         label = { Text("LEDs per ring (comma-separated)") },
+                        isError = !ringsValid,
+                        supportingText = {
+                            Text(
+                                if (ringsValid) {
+                                    "${parsedRings.size} rings, ${parsedRings.sum()} LEDs"
+                                } else {
+                                    "Enter 1–${capabilities.maxLedRings} counts between 1 and 255"
+                                }
+                            )
+                        },
                         modifier = Modifier.fillMaxWidth()
                     )
                     Spacer(Modifier.height(8.dp))
-                    Button(onClick = {
-                        val leds = ledsInput.split(",").mapNotNull { it.trim().toIntOrNull() }
-                        if (leds.isNotEmpty()) {
-                            viewModel.setLedMatrix(leds.map { it.toByte() })
-                        }
-                    }) { Text("Apply Matrix") }
+                    Button(
+                        enabled = ringsValid,
+                        onClick = { viewModel.setLedMatrix(parsedRings.map { it.toByte() }) }
+                    ) { Text("Apply Matrix") }
                 }
             }
 
@@ -143,9 +178,19 @@ fun LedConfigScreen(
                 Spacer(Modifier.height(16.dp))
             }
 
-            // Layers
+            // Layers. Slots cleared with LCMD_REMOVE_LAYER keep their index on the
+            // device, so render by real index and skip the empty ones.
             if (ledState != null) {
-                ledState.layers.forEachIndexed { layerIdx, layer ->
+                val occupied = ledState.occupiedLayerIndices
+                if (occupied.isEmpty()) {
+                    Text(
+                        "No layers configured. Use + to add one.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                occupied.forEach { layerIdx ->
+                    val layer = ledState.layers[layerIdx]
                     Card(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
                         Column(modifier = Modifier.padding(16.dp)) {
                             Row(
@@ -185,7 +230,7 @@ fun LedConfigScreen(
                                     expanded = effectExpanded,
                                     onDismissRequest = { effectExpanded = false }
                                 ) {
-                                    LedEffect.entries.forEach { effect ->
+                                    availableEffects.forEach { effect ->
                                         DropdownMenuItem(
                                             text = { Text(effect.displayName) },
                                             onClick = {
@@ -217,7 +262,7 @@ fun LedConfigScreen(
                                     expanded = blendExpanded,
                                     onDismissRequest = { blendExpanded = false }
                                 ) {
-                                    BlendMode.entries.forEach { mode ->
+                                    availableBlends.forEach { mode ->
                                         DropdownMenuItem(
                                             text = { Text(mode.displayName) },
                                             onClick = {
@@ -308,8 +353,11 @@ fun LedConfigScreen(
                                 ) { uri: Uri? ->
                                     uri?.let { viewModel.uploadImage(context, it, layerIdx.toByte()) }
                                 }
-                                Button(onClick = { imagePicker.launch("image/*") }) {
-                                    Text("Upload Image")
+                                Button(
+                                    enabled = uploadProgress == null,
+                                    onClick = { imagePicker.launch("image/*") }
+                                ) {
+                                    Text("Upload Image (${capabilities.imageMaxDim}×${capabilities.imageMaxDim})")
                                 }
                             }
                         }

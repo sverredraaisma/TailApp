@@ -41,6 +41,7 @@ fun ScanScreen(
 ) {
     val devices by viewModel.devices.collectAsStateWithLifecycle()
     val isScanning by viewModel.isScanning.collectAsStateWithLifecycle()
+    val scanError by viewModel.scanError.collectAsStateWithLifecycle()
     var permissionsGranted by remember { mutableStateOf(false) }
 
     val permissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -107,18 +108,29 @@ fun ScanScreen(
                     }
                 }
             }
-        } else if (devices.isEmpty() && isScanning) {
+        } else if (devices.isEmpty()) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(padding),
                 contentAlignment = Alignment.Center
             ) {
-                Text(
-                    text = "Scanning for devices...",
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        text = when {
+                            scanError != null -> scanError.orEmpty()
+                            isScanning -> "Scanning for devices..."
+                            else -> "No devices found"
+                        },
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = if (scanError != null) MaterialTheme.colorScheme.error
+                        else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    if (!isScanning) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        TextButton(onClick = { viewModel.startScan() }) { Text("Scan again") }
+                    }
+                }
             }
         } else {
             LazyColumn(

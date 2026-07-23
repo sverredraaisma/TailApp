@@ -6,23 +6,48 @@ import kotlin.math.exp
 import kotlin.math.ln
 import kotlin.math.sqrt
 
-data class FftResult(
+class FftResult(
     val loudness: Byte,
     val bins: ByteArray
-)
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is FftResult) return false
+        return loudness == other.loudness && bins.contentEquals(other.bins)
+    }
 
+    override fun hashCode(): Int = 31 * loudness.toInt() + bins.contentHashCode()
+
+    override fun toString(): String = "FftResult(loudness=$loudness, bins=${bins.size})"
+}
+
+/**
+ * Turns a PCM frame into the FF05 payload: one perceived-loudness byte plus
+ * [numBins] magnitude bytes spread logarithmically across
+ * [freqRangeStart]..[freqRangeEnd].
+ *
+ * Not thread-safe — [runningPeakAmplitude] carries state between frames, so a
+ * single instance belongs to a single capture loop.
+ */
 class FftProcessor {
     var numBins: Int = 64
     var normalizationSpeed: Float = 0.1f
-    var freqRangeStart: Float = 20f
-    var freqRangeEnd: Float = 20000f
+    var freqRangeStart: Float = DEFAULT_FREQ_START
+    var freqRangeEnd: Float = DEFAULT_FREQ_END
 
     private var runningPeakAmplitude: Float = 1f
 
+    /** Resets the adaptive gain. Call when starting a new capture session. */
+    fun reset() {
+        runningPeakAmplitude = 1f
+    }
+
     fun process(samples: ShortArray, sampleRate: Int): FftResult {
-        // Find a power-of-2 FFT size
+        val binCount = numBins.coerceIn(MIN_BINS, MAX_BINS)
+
+        // Largest power of two that fits the frame.
         val fftSize = Integer.highestOneBit(samples.size)
-        if (fftSize < 2) return FftResult(0, ByteArray(numBins))
+        if (fftSize < 2 || sampleRate <= 0) return FftResult(0, ByteArray(binCount))
 
         // Apply Hann window and convert to float
         val real = FloatArray(fftSize)
@@ -41,10 +66,19 @@ class FftProcessor {
             sqrt(real[it] * real[it] + imag[it] * imag[it])
         }
 
-        // Resolve selected frequency range to FFT bin indices
+        // Resolve the selected frequency range to FFT bin indices. The range is
+        // sanitised first: ln() below needs a strictly positive start, and the
+        // bin arithmetic needs start strictly below end.
+        val nyquist = sampleRate / 2f
+        if (nyquist <= MIN_FREQ_HZ * MIN_RANGE_RATIO) return FftResult(0, ByteArray(binCount))
+        val requestedStart = freqRangeStart.takeIf { it.isFinite() } ?: DEFAULT_FREQ_START
+        val requestedEnd = freqRangeEnd.takeIf { it.isFinite() } ?: DEFAULT_FREQ_END
+        val rangeStart = requestedStart.coerceIn(MIN_FREQ_HZ, nyquist / MIN_RANGE_RATIO)
+        val rangeEnd = requestedEnd.coerceIn(rangeStart * MIN_RANGE_RATIO, nyquist)
+
         val freqPerBin = sampleRate.toFloat() / fftSize
-        val startBin = (freqRangeStart / freqPerBin).toInt().coerceIn(0, halfSize - 1)
-        val endBin = (freqRangeEnd / freqPerBin).toInt().coerceIn(startBin + 1, halfSize)
+        val startBin = (rangeStart / freqPerBin).toInt().coerceIn(0, halfSize - 1)
+        val endBin = (rangeEnd / freqPerBin).toInt().coerceIn(startBin + 1, halfSize)
 
         // Compute loudness (RMS) over the selected frequency range only
         var sumSquares = 0.0
@@ -57,20 +91,20 @@ class FftProcessor {
         val normalizedLoudness = (rms / runningPeakAmplitude * 255f).toInt().coerceIn(0, 255)
 
         // Map output bins to FFT bins on a logarithmic frequency scale
-        val outputBins = ByteArray(numBins)
-        val logStart = ln(freqRangeStart.toDouble())
-        val logEnd = ln(freqRangeEnd.toDouble())
+        val outputBins = ByteArray(binCount)
+        val logStart = ln(rangeStart.toDouble())
+        val logEnd = ln(rangeEnd.toDouble())
 
-        for (i in 0 until numBins) {
-            val freqFrom = exp(logStart + (logEnd - logStart) * i / numBins)
-            val freqTo = exp(logStart + (logEnd - logStart) * (i + 1) / numBins)
+        for (i in 0 until binCount) {
+            val freqFrom = exp(logStart + (logEnd - logStart) * i / binCount)
+            val freqTo = exp(logStart + (logEnd - logStart) * (i + 1) / binCount)
             val from = (freqFrom / freqPerBin).toInt().coerceIn(startBin, endBin - 1)
             val to = (freqTo / freqPerBin).toInt().coerceIn(from + 1, endBin)
             var sum = 0f
             for (j in from until to) sum += magnitudes[j]
             val avg = sum / (to - from)
             val normalized = (avg / runningPeakAmplitude).coerceIn(0f, 1f)
-            outputBins[i] = (normalized * 255f).toInt().toByte()
+            outputBins[i] = (normalized * 255f).toInt().coerceIn(0, 255).toByte()
         }
 
         return FftResult(normalizedLoudness.toByte(), outputBins)
@@ -118,5 +152,20 @@ class FftProcessor {
             }
             len = len shl 1
         }
+    }
+
+    companion object {
+        const val MIN_BINS = 1
+
+        /** The FF05 frame carries `num_bins` as a u8, and the device caps display at 32 bars. */
+        const val MAX_BINS = 128
+
+        const val DEFAULT_FREQ_START = 20f
+        const val DEFAULT_FREQ_END = 20000f
+
+        private const val MIN_FREQ_HZ = 1f
+
+        /** Keeps `ln(end) > ln(start)` so the log-spaced bin edges stay strictly increasing. */
+        private const val MIN_RANGE_RATIO = 1.01f
     }
 }

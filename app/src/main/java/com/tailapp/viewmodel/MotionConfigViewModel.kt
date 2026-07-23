@@ -21,8 +21,9 @@ class MotionConfigViewModel(
         viewModelScope.launch { deviceRepository.setPatternParam(paramId, value) }
     }
 
-    fun setServoConfig(servoId: Byte, axis: Byte, half: Byte, invert: Byte) {
-        viewModelScope.launch { deviceRepository.setServoConfig(servoId, axis, half, invert) }
+    /** [muxChannel] is optional — pass null to leave the encoder channel untouched. */
+    fun setServoConfig(servoId: Byte, axis: Byte, half: Byte, invert: Byte, muxChannel: Byte? = null) {
+        viewModelScope.launch { deviceRepository.setServoConfig(servoId, axis, half, invert, muxChannel) }
     }
 
     fun setPidGains(servoId: Byte, kp: Float, ki: Float, kd: Float) {

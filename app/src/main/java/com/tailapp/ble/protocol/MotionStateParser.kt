@@ -7,7 +7,7 @@ import java.nio.ByteOrder
 object MotionStateParser {
 
     fun parse(data: ByteArray): MotionState? {
-        if (data.size < 77) return null
+        if (data.size < Protocol.MOTION_STATE_SIZE) return null
         val buf = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN)
 
         val patternId = buf.get()
