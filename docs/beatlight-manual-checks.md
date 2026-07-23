@@ -72,6 +72,26 @@ actually notice on your music.
 If one decoder wins on everything you play, that is worth knowing — it would make
 the other a candidate for removal rather than a permanent choice.
 
+### 3b. The neural activation, once the model is installed
+
+The BeatNet CRNN is exported and switched on automatically whenever its `.onnx`
+is present in `filesDir/beat-models/` (`docs/beat-model.md` has the `adb push`
+recipe). Its front-end matches madmom's to 1.1e-6, so what is left to find out is
+whether the model helps on real music — and how much it costs on your phone.
+
+- [ ] Install the model, restart the session, and confirm the monitor card says
+      the CRNN is the live activation source rather than spectral flux.
+- [ ] Play the same track with and without it. The CRNN should be noticeably
+      better on anything the spectral flux tracker struggles with — sparse
+      percussion, quiet intros, material where every eighth note has energy.
+- [ ] Watch the dropped-sample counter. The plan's budget is inference well under
+      one 20 ms hop; a climbing counter with the CRNN on and a still counter with
+      it off is the signal that this phone cannot afford it. That number has never
+      been measured off-device.
+- [ ] The particle filter was tuned against spectral flux, whose activation is
+      noisy between beats. With the CRNN's much cleaner activation it should do
+      *better*, possibly with far fewer particles. Worth a listen.
+
 ## 4. Drops and sections
 
 - [ ] Play a track with a build-up and drop you know. The lighting reacts within
