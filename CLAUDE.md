@@ -22,6 +22,11 @@ gradlew.bat clean                  # Clean build outputs
 
 On macOS/Linux use `./gradlew` instead of `gradlew.bat`.
 
+The build includes a native step (Oboe capture, `app/src/main/cpp`), so a first
+build on a fresh checkout downloads the NDK and CMake and takes several minutes.
+`testDebugUnitTest` does not need them — the JVM suite never touches the native
+library, which is why almost everything is testable without a device.
+
 ## Version Matrix
 
 - Gradle 9.3, AGP 8.13.2, Kotlin 1.9.22
@@ -47,14 +52,28 @@ com.tailapp/
 │   └── protocol/           # Wire format: command builders, parsers, UUIDs, CRC
 ├── repository/DeviceRepository  # Single source of truth for device state
 ├── model/                  # DeviceState, MotionState, LedState, SystemInfo, Capabilities
-├── audio/                  # Mic capture, FFT, foreground streaming service
-├── viewmodel/              # Scan, DeviceOverview, MotionConfig, LedConfig, AudioConfig
+├── audio/                  # Capture (Oboe + AudioRecord), FFT, feature extraction, dsp/
+├── beat/                   # Beat/downbeat/tempo tracking (BeatLight)
+├── drop/                   # Drop detection + section state (BeatLight)
+├── genre/                  # Genre classification (BeatLight)
+├── effects/                # EffectProfile, controller, renderer, LightingEngine
+├── lighting/               # LightingOutput + FF0A/preview implementations
+├── led/                    # Kotlin port of the firmware LED render engine
+├── viewmodel/              # Scan, DeviceOverview, MotionConfig, LedConfig, AudioConfig, BeatLight
 ├── navigation/             # NavRoutes (sealed class), TailAppNavHost
 ├── ui/{theme,screen,components}
 ├── di/AppContainer
 ├── TailApp                 # Application subclass
 └── MainActivity            # Single Activity entry point
+
+app/src/main/cpp/           # Oboe capture + lock-free ring buffer (JNI)
+tools/                      # Python: model download/export, reference data
 ```
+
+**BeatLight** — the beat/drop/genre-reactive lighting feature — spans
+`audio` → `beat`/`drop`/`genre` → `effects` → `lighting`, and renders through the
+firmware mirror in `led`. `docs/beatlight.md` is its map; read it before touching
+any of those packages.
 
 ### Key patterns
 
@@ -73,12 +92,21 @@ com.tailapp/
   immediately, because the device only rebuilds its read buffers at 1 Hz.
 - **Runtime permissions** — `ScanScreen` requests `BLUETOOTH_SCAN` +
   `BLUETOOTH_CONNECT` on API 31+ and `ACCESS_FINE_LOCATION` on API 26-30;
-  `AudioConfigScreen` requests `RECORD_AUDIO`.
+  `AudioConfigScreen` and `BeatLightScreen` request `RECORD_AUDIO`.
+- **The LED engine is a firmware port, not a lookalike.** `com.tailapp.led`
+  mirrors TailFirmware's `led/` file for file, C++ integer truncation included,
+  because both the live preview and the direct-mode renderer have to produce the
+  pixels the device would. A divergence there is a preview that quietly lies.
+- **Analysis never runs on the main thread, and never twice at once.**
+  `LightingEngine` takes its dispatcher as a parameter for exactly this reason —
+  its analysis and render loops sharing a `FeatureExtractor` across threads
+  corrupts the extractor's ring buffer.
 
 ### Navigation
 
-`scan` (start destination), `device/{address}`, and the three config screens
-`device/{address}/{motion,led,audio}`. The device address is a nav argument.
+`scan` (start destination), `device/{address}`, and the config screens
+`device/{address}/{motion,led,audio,beatlight}`. The device address is a nav
+argument.
 
 ## BLE protocol (v3)
 
@@ -141,3 +169,13 @@ JVM unit tests live in `app/src/test/`. There are no instrumented tests.
   `@After`.
 - `unitTests.isReturnDefaultValues = true` is set so `android.util.Log` calls in
   tested classes don't throw.
+- `testutil/SyntheticAudio` generates click tracks, sines, noise and energy steps;
+  `testutil/PlaybackAudioSource` replays a buffer as an `AudioSource`;
+  `testutil/RecordingLightingOutput` records everything the renderer emits. Between
+  them the whole BeatLight pipeline runs offline, with no mic and no device.
+- **The DSP suites assert numbers, not shapes.** Tempo within ±2 BPM, beats within
+  ±70 ms of the true grid, LED colours equal to the firmware's integer arithmetic.
+  A change that makes one of those merely "close" has broken something.
+- **Anything driven by a clock takes the clock as a parameter.** The renderer, the
+  audio level source and the engine all do; that is what makes their behaviour
+  assertable rather than timing-dependent.
