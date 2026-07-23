@@ -4,10 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import com.tailapp.audio.FeatureConfig
 import com.tailapp.audio.FftStreamManager
-import com.tailapp.beat.ActivationSource
 import com.tailapp.beat.BeatModelStore
-import com.tailapp.beat.CrnnActivationSource
-import com.tailapp.beat.SpectralFluxActivationSource
 import com.tailapp.ble.BleConnectionManager
 import com.tailapp.ble.BleScanner
 import com.tailapp.effects.BeatLightSession
@@ -86,30 +83,19 @@ class AppContainer(context: Context) {
     val beatModelStore = BeatModelStore(File(context.filesDir, BeatModelStore.DIRECTORY_NAME))
 
     /**
-     * The neural activation function when its model is on disk *and* the
-     * front-end is the one it was trained on, the DSP one otherwise.
-     *
-     * On the shipped [FeatureConfig] the second condition does not hold — our
-     * frames are 205 bands from a 2048-sample window, BeatNet's are 136 from a
-     * 1411-sample one — so this is [SpectralFluxActivationSource] today and
-     * `CrnnActivationSource.create` says why in logcat. `docs/beat-model.md`
-     * has the measurements.
-     *
-     * **Not yet reachable.** `LightingEngine` constructs `BeatTracker(featureConfig)`
-     * and takes no activation source, so wiring this in needs one parameter added
-     * there — deliberately not done here, because `effects/` is not this change's
-     * to touch. Until then this is the selection, ready and tested, one line from
-     * being used.
+     * The store is handed to the engine rather than a resolved activation source:
+     * running the CRNN means running a *second front-end* alongside the shared
+     * one ([com.tailapp.audio.BeatNetFeatureExtractor]), and only the engine is
+     * in a position to drive both off one audio stream and pair their frames.
+     * With no model installed — the normal case — nothing is constructed and the
+     * DSP activation runs exactly as before.
      */
-    val beatActivationSource: ActivationSource =
-        CrnnActivationSource.create(beatModelStore, FeatureConfig())
-            ?: SpectralFluxActivationSource(FeatureConfig())
-
     val lightingEngine = LightingEngine(
         output = lightingOutput,
         ledLayout = ledLayout,
         scope = applicationScope,
-        genreClassifier = genreClassifier
+        genreClassifier = genreClassifier,
+        beatModelStore = beatModelStore
     )
 
     /**

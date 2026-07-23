@@ -3,13 +3,17 @@ package com.tailapp.effects
 import android.util.Log
 import com.tailapp.audio.AudioSource
 import com.tailapp.audio.AudioSources
+import com.tailapp.audio.BeatNetFeatureExtractor
 import com.tailapp.audio.FeatureConfig
 import com.tailapp.audio.FeatureExtractor
 import com.tailapp.audio.OboeAudioSource
 import com.tailapp.audio.dsp.Resampler
+import com.tailapp.beat.BeatActivation
 import com.tailapp.beat.BeatDecoder
 import com.tailapp.beat.BeatEvent
+import com.tailapp.beat.BeatModelStore
 import com.tailapp.beat.BeatTracker
+import com.tailapp.beat.CrnnActivationSource
 import com.tailapp.beat.ParticleFilterBeatDecoder
 import com.tailapp.drop.DropEvent
 import com.tailapp.drop.SectionState
@@ -51,6 +55,22 @@ enum class BeatDecoderKind(val displayName: String, val description: String) {
 }
 
 /**
+ * Which activation function is producing the beat/downbeat curve a session is
+ * decoding.
+ *
+ * Not a user choice — it is whatever is *available*. The CRNN needs its model
+ * installed (`docs/beat-model.md` has the `adb push` recipe) and needs to load;
+ * absent either, the DSP one runs and the session is otherwise identical. The
+ * monitoring screen shows it because "the neural model is installed but silently
+ * not running" is exactly the state that is impossible to diagnose from the
+ * lighting.
+ */
+enum class BeatActivationKind(val displayName: String) {
+    SPECTRAL_FLUX("Spectral flux"),
+    CRNN("BeatNet CRNN")
+}
+
+/**
  * Everything the monitoring UI shows about a running session.
  */
 data class BeatLightState(
@@ -68,6 +88,7 @@ data class BeatLightState(
     val inputLatencyMillis: Float = 0f,
     val droppedSamples: Long = 0L,
     val decoder: BeatDecoderKind = BeatDecoderKind.PHASE_LOCKED,
+    val activationSource: BeatActivationKind = BeatActivationKind.SPECTRAL_FLUX,
     val error: String? = null
 )
 
@@ -85,10 +106,60 @@ data class BeatLightState(
  * tests drive directly, so the pipeline can be exercised end to end without a
  * dispatcher, a microphone or a device.
  *
+ * ## Two front-ends, and how their frames are paired
+ *
+ * When [beatModelStore] holds an installed BeatNet CRNN, the same resampled
+ * audio is pushed through **two** extractors: the shared [FeatureExtractor],
+ * which feeds the tempo estimator, the transient tier and every timestamp, and a
+ * [BeatNetFeatureExtractor], whose 272-float frames feed
+ * [CrnnActivationSource]. Only the *activation* comes from the model; everything
+ * else downstream is unchanged, which is why
+ * [BeatDecoder.process] has an overload taking an explicit activation.
+ *
+ * Both run at the same 441-sample hop, so after start-up they emit frames one
+ * for one — but they emit them at different *points*, because their windows are
+ * aligned differently. The shared extractor emits frame `i` once
+ * `frameSize + i*hop` samples have arrived; the BeatNet extractor's frames are
+ * centred, so it emits frame `t` after only `706 + t*hop`. It therefore runs
+ * ahead, by
+ * ```
+ * lag = (frameSize - 706) / hop = (2048 - 706) / 441 = 3 frames
+ * ```
+ * at the shipped configuration. The pairing is that constant: **shared frame `i`
+ * takes the activation of BeatNet frame `i + 3`**, which is exactly the newest
+ * BeatNet frame in existence at the instant shared frame `i` closes. It is
+ * implemented by discarding the first `lag` activations and then consuming one
+ * per shared frame, so it holds regardless of how the audio was chunked.
+ *
+ * **Residual offset: 19 samples, 0.86 ms.** Window *ends* are the right thing to
+ * align here, not window centres: both activation functions respond to an onset
+ * on the first frame whose window contains it, so an onset at sample `s` shows up
+ * in the first frame whose window closes at or after `s` on either side. Shared
+ * frame `i`'s window closes at sample `i*hop + 2047`; BeatNet frame `i + 3`'s
+ * closes at `i*hop + 2028`. The activation is stamped with the shared frame's
+ * timestamp, so the model's opinion is applied 0.86 ms later than the audio it
+ * was formed from — two orders of magnitude inside the ±70 ms window the beat
+ * tests assert against, and far inside one hop. (Aligning window *centres*
+ * instead would pick frame `i + 2` and a −6.4 ms offset; that is the wrong
+ * criterion for a positive-difference feature, and it would also throw away the
+ * freshest frame for no gain.)
+ *
+ * If the model is absent, or fails to load, or a frame is mis-shaped, the CRNN
+ * disables itself and every frame from then on runs
+ * [BeatDecoder.process] with the decoder's own
+ * [com.tailapp.beat.SpectralFluxActivationSource] — the behaviour with no model
+ * installed, which is the normal case. [BeatLightState.activationSource] reports
+ * which is live. A failure *mid*-session costs about a second: the DSP source's
+ * adaptive statistics have seen no frames yet and report nothing until they have
+ * a second of history, by design.
+ *
  * @param output where frames go — typically the tail and the on-screen preview.
  * @param ledLayout the device's ring configuration, followed live.
  * @param scope lifetime of the loops.
  * @param genreClassifier context tier; inert until the ONNX model lands.
+ * @param beatModelStore where the BeatNet CRNN lives, or null to never run it.
+ *   Absent or unloadable is the normal case and costs nothing: the second
+ *   extractor is not even constructed.
  * @param workDispatcher where the two loops run. Defaults to [Dispatchers.Default]
  *   because neither loop may ever touch the main thread; tests substitute their
  *   own so the loops cannot race a hand-driven pipeline.
@@ -101,11 +172,35 @@ class LightingEngine(
     private val scope: CoroutineScope,
     private val featureConfig: FeatureConfig = FeatureConfig(),
     private val genreClassifier: GenreClassifier = NoGenreClassifier,
+    beatModelStore: BeatModelStore? = null,
     private val workDispatcher: CoroutineDispatcher = Dispatchers.Default,
     private val audioSourceFactory: (Int) -> AudioSource = { rate -> AudioSources.create(rate) },
     private val clock: () -> Long = System::nanoTime
 ) {
     private val extractor = FeatureExtractor(featureConfig)
+
+    /**
+     * The CRNN, when its model is installed and its front-end can be paired with
+     * ours. `create` never touches ONNX Runtime, so resolving this at
+     * construction cannot throw and costs nothing on a fresh install.
+     */
+    private val crnn: CrnnActivationSource? =
+        beatModelStore?.let { CrnnActivationSource.create(it, featureConfig) }
+
+    /** BeatNet's own front-end; built only when there is a model to feed. */
+    private val beatNetExtractor: BeatNetFeatureExtractor? =
+        crnn?.let { BeatNetFeatureExtractor() }
+
+    /** How far ahead the centred BeatNet frames run; see the class doc. */
+    private val beatNetLag: Int =
+        (featureConfig.frameSize - BeatNetFeatureExtractor.FIRST_FRAME_END) / featureConfig.hopSize
+
+    /** Activations awaiting the shared frame they pair with — one, in steady state. */
+    private val pendingActivations = ArrayDeque<BeatActivation>()
+    private var beatNetActivationsDiscarded = 0
+
+    /** True while the CRNN is the live activation function. */
+    private val crnnLive: Boolean get() = crnn != null && crnn.isAvailable
 
     /**
      * Rebuilt rather than swapped: the analysis loop reads this on a worker
@@ -121,7 +216,7 @@ class LightingEngine(
     private val renderer = ReactiveRenderer()
     private val controller = EffectController(renderer, output)
 
-    private val _state = MutableStateFlow(BeatLightState())
+    private val _state = MutableStateFlow(BeatLightState(activationSource = activationKind()))
     val state: StateFlow<BeatLightState> = _state.asStateFlow()
 
     private var source: AudioSource? = null
@@ -249,9 +344,18 @@ class LightingEngine(
 
             val (samples, count) = resample(read)
             accumulateGenreWindow(samples, count, nowNanos)
+            // Before the shared extractor, deliberately: the activation shared
+            // frame i pairs with comes from a BeatNet frame produced by this same
+            // chunk (see the class doc), so it has to exist by the time the loop
+            // below reaches that frame.
+            pumpBeatNet(samples, count, nowNanos)
 
             for (frame in extractor.push(samples, count, nowNanos)) {
-                for (beat in beatTracker.process(frame)) {
+                val activation = if (crnnLive) pendingActivations.removeFirstOrNull() else null
+                val beats =
+                    if (activation != null) beatTracker.process(frame, activation)
+                    else beatTracker.process(frame)
+                for (beat in beats) {
                     controller.onBeat(beat)
                     latestBeat = beat
                 }
@@ -273,6 +377,39 @@ class LightingEngine(
 
     /** Renders and dispatches one frame. */
     internal fun renderFrame(nowNanos: Long) = controller.renderFrame(nowNanos)
+
+    /**
+     * Runs the BeatNet front-end and the CRNN over the same chunk, queueing one
+     * activation per shared frame that is about to be produced.
+     *
+     * The model is run on *every* BeatNet frame, including the first
+     * [beatNetLag] whose activations are then thrown away: those frames are real
+     * audio and the LSTM's state has to have seen them, or the session starts
+     * with a 60 ms hole in the model's memory. Only the results are discarded,
+     * and only to line the two streams up.
+     */
+    private fun pumpBeatNet(samples: FloatArray, count: Int, nowNanos: Long) {
+        val frontEnd = beatNetExtractor ?: return
+        val model = crnn ?: return
+        if (!model.isAvailable) {
+            // Failed mid-session: drop whatever was queued so nothing stale can
+            // be paired with a later frame, and leave the DSP path to it.
+            pendingActivations.clear()
+            return
+        }
+
+        for (frame in frontEnd.push(samples, count, nowNanos)) {
+            val activation = model.activation(frame)
+            if (beatNetActivationsDiscarded < beatNetLag) {
+                beatNetActivationsDiscarded++
+            } else {
+                pendingActivations.addLast(activation)
+            }
+        }
+        // The failure may have happened partway through this chunk, in which case
+        // the tail of the queue is SILENT rather than an opinion.
+        if (!model.isAvailable) pendingActivations.clear()
+    }
 
     private fun resample(read: Int): Pair<FloatArray, Int> {
         val converter = resampler ?: return readBuffer to read
@@ -327,6 +464,7 @@ class LightingEngine(
                 bpm = beatTracker.bpm,
                 beatConfidence = beatTracker.confidence,
                 decoder = decoderKind,
+                activationSource = activationKind(),
                 lastBeat = latestBeat,
                 lastDrop = latestDrop,
                 section = transients.sectionState,
@@ -348,8 +486,19 @@ class LightingEngine(
         }
     }
 
+    private fun activationKind(): BeatActivationKind =
+        if (crnnLive) BeatActivationKind.CRNN else BeatActivationKind.SPECTRAL_FLUX
+
     private fun reset() {
         extractor.reset()
+        // Both halves of the CRNN's memory: the extractor holds the frame its
+        // positive difference is taken against, the source holds the LSTM's
+        // hidden *and* cell state. Carrying either into a new session starts the
+        // model confidently in the wrong place.
+        beatNetExtractor?.reset()
+        crnn?.reset()
+        pendingActivations.clear()
+        beatNetActivationsDiscarded = 0
         beatTracker = when (decoderKind) {
             BeatDecoderKind.PHASE_LOCKED -> BeatTracker(featureConfig)
             BeatDecoderKind.PARTICLE_FILTER -> ParticleFilterBeatDecoder(featureConfig)
@@ -362,7 +511,7 @@ class LightingEngine(
         latestBeat = null
         latestDrop = null
         latestRamp = 0f
-        _state.value = BeatLightState()
+        _state.value = BeatLightState(activationSource = activationKind())
     }
 
     private companion object {

@@ -293,14 +293,30 @@ at 22050 Hz for 6 s (no audio file is committed, and none is needed), runs
 the 300×3 activations, madmom's resolved filterbank geometry, and the graph's
 tensor names and shapes — as base64 little-endian float32.
 
-`BeatNetFrontEndParityTest` reads that file and measures our `FeatureExtractor`
-against it. **It does not match, and that is the point of the script.** Last
-measured: mean |ours − BeatNet| = **0.210** over a reference range of 0..1.954,
-with six of eight front-end properties differing. See `docs/beat-model.md`.
+`BeatNetFeatureExtractorTest` reads that file and diffs `BeatNetFeatureExtractor`
+— BeatNet's front-end, ported — against every value of it. **That is the gate the
+project plan puts in front of any model work, and it passes**: max
+|ours − BeatNet| = **1.1e-6**, mean 7.4e-8, over 299×272 = 81 328 values on a
+reference range of 0..1.954. The residual is float32 round-off; the same port in
+double agrees exactly.
 
-`CrnnActivationSourceTest` also reads it, and gets an exact match on the one
-thing our Kotlin *does* reproduce: the stacked positive difference, max
-|Kotlin − madmom| = **0.0** over all 300×272 values.
+`BeatNetFrontEndParityTest` reads the same file and measures the *shared*
+`FeatureExtractor` against it. **It does not match, and that is deliberate**: mean
+|ours − BeatNet| = **0.210**, with six of eight front-end properties differing.
+Three calibrated tiers depend on that geometry, so it stays. See
+`docs/beat-model.md`.
+
+`CrnnActivationSourceTest` also reads it, for the exported graph's tensor names
+and the softmax it produces.
+
+One inconsistency in this script worth knowing about before trusting its geometry
+block: `filterbank_geometry()` builds its filterbank on a `winLength // 2 + 1` =
+**706**-bin frequency axis, while the pipeline that produces `features` uses
+madmom's `stft`, which returns `fft_size >> 1` = **705**. The axes are 0.14%
+apart, enough to move 8 of the 136 filter centres onto a different bin. The
+`features` array is the one the model consumes and the one the Kotlin is asserted
+against; `filterCenterHz` is informational and `BeatNetFeatureExtractorTest`
+tolerates exactly those eight one-bin differences.
 
 If the file is missing the parity tests skip with a reason rather than failing.
 
@@ -313,8 +329,11 @@ adb shell run-as com.tailapp cp /data/local/tmp/beatnet-crnn-model1.onnx \
     files/beat-models/beatnet-crnn-model1.onnx
 ```
 
-Until it is present `BeatModelStore.isInstalled` is false and `AppContainer` uses
-`SpectralFluxActivationSource`. **Installing it is not currently enough to switch
-the CRNN on**: `CrnnActivationSource.create` also checks that the feature frames
-it would be fed are BeatNet's, and on the shipped `FeatureConfig` they are not.
-It logs which properties mismatched. See `docs/beat-model.md`.
+Until it is present `BeatModelStore.isInstalled` is false and `LightingEngine`
+runs `SpectralFluxActivationSource` — it does not even construct the second
+front-end. **Installing it is enough to switch the CRNN on**: the model is fed by
+`BeatNetFeatureExtractor`, not by the shared front-end, so
+`CrnnActivationSource.create` only has to check that the two extractors can be
+paired (same sample rate, same hop, shared window at least 706 samples), and on
+the shipped `FeatureConfig` they can. Restart the BeatLight session after
+pushing; the monitor card's "Activation" line reports which one is live.

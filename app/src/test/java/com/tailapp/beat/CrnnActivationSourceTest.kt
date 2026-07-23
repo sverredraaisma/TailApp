@@ -1,7 +1,8 @@
 package com.tailapp.beat
 
+import com.tailapp.audio.BeatNetFeatureExtractor
+import com.tailapp.audio.BeatNetFrame
 import com.tailapp.audio.FeatureConfig
-import com.tailapp.audio.FeatureFrame
 import com.tailapp.testutil.BeatReference
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -14,7 +15,6 @@ import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import java.io.ByteArrayInputStream
 import java.io.File
-import kotlin.math.abs
 
 /**
  * Everything about the CRNN activation source that can be checked on the JVM.
@@ -27,14 +27,19 @@ import kotlin.math.abs
  *
  * What *is* testable, and all of it matters:
  *
- * - the model-absent and wrong-front-end paths, which on a fresh install are the
- *   only paths that ever run;
+ * - the model-absent path, which on a fresh install is the only path that runs;
+ * - the pairing gate: [CrnnActivationSource.create] refuses a shared front-end
+ *   whose frames could not be matched up with BeatNet's one for one;
+ * - that a mis-shaped frame disables the source rather than corrupting the input;
+ * - that an unloadable model degrades to silence exactly once;
  * - that [CrnnActivationSource.reset] clears the cell state as well as the
- *   hidden state;
- * - that the 272-vector this builds is byte-for-byte the one madmom's
- *   `SpectrogramDifferenceProcessor` builds, diffed against the reference dump.
- *   That last one is the only *numeric* check available without the native
- *   runtime, and it covers the part of the contract most likely to be wrong.
+ *   hidden state.
+ *
+ * The numeric check that used to live here — that the 272-vector fed to the model
+ * is madmom's stacked difference — moved to `BeatNetFeatureExtractorTest` along
+ * with the code that builds it. It is stronger there: the whole vector is now
+ * computed from audio rather than assembled from reference bands, and it is
+ * diffed against madmom at **1.1e-6** over all 81 328 values.
  */
 class CrnnActivationSourceTest {
 
@@ -49,27 +54,17 @@ class CrnnActivationSourceTest {
     }
 
     /**
-     * A [FeatureConfig] whose filterbank happens to resolve to BeatNet's 136
-     * bands, so [CrnnActivationSource.create]'s geometry gate can be tested from
-     * the passing side.
-     *
-     * It is *not* BeatNet's front-end — nothing in this project is, which is the
-     * whole finding of `BeatNetFrontEndParityTest`. It is 30 Hz to 1500 Hz at 24
-     * bands per octave, which lands on 136 bands by arithmetic. The gate checks
-     * the shape of what it will be fed, and this has that shape.
+     * The shipped shared front-end. It is *not* BeatNet's — that is the whole
+     * finding of `BeatNetFrontEndParityTest` — and it does not need to be: the
+     * CRNN is fed by [BeatNetFeatureExtractor]. What [CrnnActivationSource.create]
+     * checks of it is only whether the two can be driven off one audio stream.
      */
-    private val bandMatchedConfig = FeatureConfig(fMax = 1500f)
+    private val pairableConfig = FeatureConfig()
 
-    private fun frame(bands: FloatArray, index: Long = 0L) = FeatureFrame(
+    private fun frame(features: FloatArray, index: Long = 0L) = BeatNetFrame(
         index = index,
         timestampNanos = index * 20_000_000L,
-        bands = bands,
-        flux = 0f,
-        rms = 0f,
-        bassEnergy = 0f,
-        midEnergy = 0f,
-        highEnergy = 0f,
-        spectralCentroidHz = 0f
+        features = features
     )
 
     // --- the model-absent path ---------------------------------------------------
@@ -83,7 +78,7 @@ class CrnnActivationSourceTest {
 
     @Test
     fun `create returns null when the model is absent`() {
-        assertNull(CrnnActivationSource.create(store(), bandMatchedConfig))
+        assertNull(CrnnActivationSource.create(store(), pairableConfig))
     }
 
     @Test
@@ -93,7 +88,7 @@ class CrnnActivationSourceTest {
         store.crnn.createNewFile()
 
         assertFalse("an empty file is not an installed model", store.isInstalled)
-        assertNull(CrnnActivationSource.create(store, bandMatchedConfig))
+        assertNull(CrnnActivationSource.create(store, pairableConfig))
     }
 
     @Test
@@ -120,19 +115,24 @@ class CrnnActivationSourceTest {
         assertTrue(failure is IllegalArgumentException)
     }
 
-    // --- the wrong-front-end path ------------------------------------------------
+    // --- the pairing gate --------------------------------------------------------
 
     @Test
-    fun `create refuses the shipped feature config even when the model is installed`() {
+    fun `create accepts the shipped feature config, because the CRNN brings its own front-end`() {
         val store = store()
         installStub(store)
 
-        // The gate that is closed today: FeatureConfig()'s filterbank resolves to
-        // 205 bands, BeatNet's to 136. See BeatNetFrontEndParityTest.
-        assertNull(
-            "the CRNN must not run on frames it was not trained on",
-            CrnnActivationSource.create(store, FeatureConfig())
+        // This used to be the gate that was closed: FeatureConfig()'s filterbank
+        // resolves to 205 bands and BeatNet needs 136, so the source refused. It
+        // is no longer the right question — the model is fed by
+        // BeatNetFeatureExtractor, not by the shared one — and what create now
+        // checks is only whether the two front-ends can be driven off one stream.
+        assertNotNull(
+            "the shipped front-end shares BeatNet's sample rate and hop, so the two pair 1:1",
+            CrnnActivationSource.create(store, pairableConfig)
         )
+        assertEquals(BeatNetFeatureExtractor.SAMPLE_RATE, pairableConfig.sampleRate)
+        assertEquals(BeatNetFeatureExtractor.HOP_SIZE, pairableConfig.hopSize)
     }
 
     @Test
@@ -140,24 +140,36 @@ class CrnnActivationSourceTest {
         val store = store()
         installStub(store)
 
-        assertNull(CrnnActivationSource.create(store, bandMatchedConfig.copy(sampleRate = 44100)))
-        assertNull(CrnnActivationSource.create(store, bandMatchedConfig.copy(hopSize = 512)))
+        // A different rate means the two extractors would be fed differently
+        // scaled audio; a different hop means their frame streams run at
+        // different rates and no fixed pairing exists.
+        assertNull(CrnnActivationSource.create(store, pairableConfig.copy(sampleRate = 44100)))
+        assertNull(CrnnActivationSource.create(store, pairableConfig.copy(hopSize = 512)))
     }
 
     @Test
-    fun `create accepts a front-end with BeatNet's frame geometry`() {
+    fun `create refuses a shared window shorter than BeatNet's first frame`() {
         val store = store()
         installStub(store)
-        assertNotNull(CrnnActivationSource.create(store, bandMatchedConfig))
+
+        // 512 < 706: the shared extractor would emit frame 0 before the BeatNet
+        // frame it pairs with existed, and the activation would arrive late.
+        assertNull(CrnnActivationSource.create(store, pairableConfig.copy(frameSize = 512)))
+        assertTrue(
+            "the shipped window is comfortably past it",
+            pairableConfig.frameSize > BeatNetFeatureExtractor.FIRST_FRAME_END
+        )
     }
 
     @Test
     fun `a frame of the wrong width disables the source instead of corrupting the input`() {
         val store = store()
         installStub(store)
-        val source = CrnnActivationSource.create(store, bandMatchedConfig)!!
+        val source = CrnnActivationSource.create(store, pairableConfig)!!
 
-        val activation = source.activation(frame(FloatArray(64)))
+        // 136 is the band count, not the feature width: the classic half-vector
+        // mistake, and it must not reach the model.
+        val activation = source.activation(frame(FloatArray(CrnnActivationSource.BAND_COUNT)))
 
         assertEquals(0f, activation.beat, 0f)
         assertEquals(0f, activation.downbeat, 0f)
@@ -168,11 +180,11 @@ class CrnnActivationSourceTest {
     fun `an unloadable model degrades to silence exactly once`() {
         val store = store()
         installStub(store)  // 64 bytes of 0x01 is not an ONNX graph
-        val source = CrnnActivationSource.create(store, bandMatchedConfig)!!
+        val source = CrnnActivationSource.create(store, pairableConfig)!!
         assertTrue("loading is lazy; create must not touch the runtime", source.isAvailable)
 
-        val bands = FloatArray(CrnnActivationSource.BAND_COUNT) { 0.5f }
-        val first = source.activation(frame(bands))
+        val features = FloatArray(CrnnActivationSource.FEATURE_SIZE) { 0.5f }
+        val first = source.activation(frame(features))
 
         // On the JVM this fails as UnsatisfiedLinkError (no native runtime); on a
         // device it would fail as a parse error. Either way it must be caught.
@@ -180,7 +192,7 @@ class CrnnActivationSourceTest {
         assertEquals(0f, first.downbeat, 0f)
         assertFalse(source.isAvailable)
 
-        val second = source.activation(frame(bands, index = 1))
+        val second = source.activation(frame(features, index = 1))
         assertEquals(0f, second.beat, 0f)
         assertEquals(0f, second.downbeat, 0f)
     }
@@ -191,7 +203,7 @@ class CrnnActivationSourceTest {
     fun `reset clears the hidden state and the cell state`() {
         val store = store()
         installStub(store)
-        val source = CrnnActivationSource.create(store, bandMatchedConfig)!!
+        val source = CrnnActivationSource.create(store, pairableConfig)!!
 
         val (hidden, cell) = source.recurrentState
         assertEquals(
@@ -212,25 +224,30 @@ class CrnnActivationSourceTest {
         )
     }
 
+    /**
+     * The other half of a session's memory — the frame the positive difference is
+     * taken against — belongs to [BeatNetFeatureExtractor] now, and
+     * `BeatNetFeatureExtractorTest.reset starts over` covers it. This pins the
+     * split so the two halves cannot quietly diverge: resetting the extractor
+     * alone would leave the LSTM mid-bar, resetting the source alone would leave
+     * the next frame differencing against a previous session's audio.
+     * `LightingEngine.reset` does both.
+     */
     @Test
-    fun `reset clears the difference history so the next frame starts clean`() {
-        val store = store()
-        installStub(store)
-        val source = CrnnActivationSource.create(store, bandMatchedConfig)!!
-        val bands = CrnnActivationSource.BAND_COUNT
+    fun `the difference history belongs to the extractor, not to this`() {
+        val extractor = BeatNetFeatureExtractor()
+        val audio = FloatArray(BeatNetFeatureExtractor.FIRST_FRAME_END + 2 * BeatNetFeatureExtractor.HOP_SIZE) {
+            if (it > BeatNetFeatureExtractor.FIRST_FRAME_END) 0.5f else 0f
+        }
 
-        source.buildInput(FloatArray(bands) { 0.1f })
-        source.buildInput(FloatArray(bands) { 0.9f })
-        assertTrue(
-            "the second frame sees a rise",
-            (bands until 2 * bands).any { source.featureVector[it] > 0f }
-        )
+        val frames = extractor.push(audio, endTimestampNanos = 0L)
+        assertTrue("the step produced a rise", frames.last().features.drop(CrnnActivationSource.BAND_COUNT).any { it > 0f })
 
-        source.reset()
-        source.buildInput(FloatArray(bands) { 0.9f })
+        extractor.reset()
+        val afterReset = extractor.push(audio, endTimestampNanos = 0L)
         assertTrue(
             "after reset the first frame has no predecessor and so no difference",
-            (bands until 2 * bands).all { source.featureVector[it] == 0f }
+            afterReset.first().features.drop(CrnnActivationSource.BAND_COUNT).all { it == 0f }
         )
     }
 
@@ -283,50 +300,25 @@ class CrnnActivationSourceTest {
     }
 
     /**
-     * The one numeric parity check that does not need the native runtime: the
-     * 272-vector [CrnnActivationSource.buildInput] assembles, against the one
-     * madmom's `SpectrogramDifferenceProcessor(diff_ratio=0.5, positive_diffs=True,
-     * stack_diffs=np.hstack)` assembled for the same bands.
-     *
-     * Achieved: **max |Kotlin − madmom| = 0.0** across all 300x272 values. It is
-     * exact rather than close because the two do the same float32 subtraction on
-     * the same float32 inputs; the reference bands are handed in rather than
-     * recomputed, so nothing upstream can contribute rounding.
+     * The 272-vector the model is handed is exactly what
+     * [BeatNetFeatureExtractor] emits — no copy, no reshape, no reordering in
+     * between. That is the whole of this class's input contract now, and the
+     * reason the numeric parity check lives in `BeatNetFeatureExtractorTest`
+     * (max 1.1e-6 against madmom over 81 328 values) rather than here.
      */
     @Test
-    fun `the feature vector matches madmom's stacked difference exactly`() {
+    fun `the input width is the extractor's output width`() {
         val reference = BeatReference.load()
         assumeTrue(BeatReference.SKIP_REASON, reference != null)
         reference!!
 
-        val store = store()
-        installStub(store)
-        val source = CrnnActivationSource.create(store, bandMatchedConfig)!!
+        assertEquals(CrnnActivationSource.FEATURE_SIZE, BeatNetFeatureExtractor.FEATURE_SIZE)
+        assertEquals(CrnnActivationSource.FEATURE_SIZE, reference.featureDim)
 
-        val bands = reference.bands()
-        val bandCount = reference.numFilters
-        val width = reference.featureDim
-        val expected = reference.features
-
-        var worst = 0f
-        var worstAt = -1
-        for (t in 0 until reference.frames) {
-            val row = FloatArray(bandCount)
-            System.arraycopy(bands, t * bandCount, row, 0, bandCount)
-            source.buildInput(row)
-            for (i in 0 until width) {
-                val delta = abs(source.featureVector[i] - expected[t * width + i])
-                if (delta > worst) {
-                    worst = delta
-                    worstAt = t * width + i
-                }
-            }
+        val frames = BeatNetFeatureExtractor().push(reference.signal, endTimestampNanos = 0L)
+        assertTrue(frames.isNotEmpty())
+        for (frame in frames) {
+            assertEquals(CrnnActivationSource.FEATURE_SIZE, frame.features.size)
         }
-
-        assertTrue(
-            "max |Kotlin - madmom| = $worst at index $worstAt over " +
-                "${reference.frames}x$width values",
-            worst == 0f
-        )
     }
 }

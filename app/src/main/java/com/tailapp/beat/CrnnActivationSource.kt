@@ -4,22 +4,34 @@ import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
 import android.util.Log
+import com.tailapp.audio.BeatNetFeatureExtractor
+import com.tailapp.audio.BeatNetFrame
 import com.tailapp.audio.FeatureConfig
-import com.tailapp.audio.FeatureFrame
-import com.tailapp.audio.dsp.LogFilterbank
 import java.nio.FloatBuffer
 
 /**
- * BeatNet's CRNN as an [ActivationSource]: one frame in, beat and downbeat
+ * BeatNet's CRNN as a beat activation function: one frame in, beat and downbeat
  * probabilities out, entirely on-device.
  *
  * ```
- *   FeatureFrame.bands (136 log-filtered bands)
- *        -> [bands ‖ max(0, bands - previous bands)]   -> 272 floats
+ *   BeatNetFeatureExtractor  ->  BeatNetFrame.features (272)
  *        -> beatnet-crnn.onnx  (conv -> 2x LSTM(150) -> linear -> softmax)
  *        -> [beat, downbeat, non-beat]
  *        -> BeatActivation(beat, downbeat)
  * ```
+ *
+ * **This is deliberately not an [ActivationSource].** That interface hands out a
+ * [com.tailapp.audio.FeatureFrame] — 205 unit-peak bands from a 2048-sample
+ * trailing window — and the CRNN was trained on something else entirely: 136
+ * unit-area bands from a 1411-sample *centred* window, stacked with their
+ * positive difference. `docs/beat-model.md` measures what happens when the two
+ * are conflated: rebanding our frames onto BeatNet's geometry as carefully as the
+ * data allows still makes the model report half-time and collapses the downbeat
+ * channel from twelve clean peaks to one. So this takes [BeatNetFrame]s from
+ * [BeatNetFeatureExtractor] — which matches madmom to 1.1e-6 — and nothing else
+ * can be handed to it by accident. `LightingEngine` runs both extractors on the
+ * same audio and pairs their frames; see its KDoc for how, and for the residual
+ * alignment offset.
  *
  * **The recurrent state is ours, not the graph's.** BeatNet's PyTorch module
  * keeps its LSTM state in instance attributes and never resets it — run two
@@ -32,58 +44,19 @@ import java.nio.FloatBuffer
  *
  * **Absent models are the normal case.** The `.onnx` is a build output that does
  * not exist upstream (see [BeatModelStore]), so a fresh install has none.
- * [create] returns null then and `AppContainer` falls back to
- * [SpectralFluxActivationSource]. A model that is present but unloadable
- * degrades the same way, once, at first use: the failure is logged,
- * [isAvailable] goes false, and every later frame short-circuits to a zero
- * activation. A broken install must not cost a 50 Hz stream of exceptions on the
- * analysis thread.
- *
- * ## The front-end this needs, and why nothing produces it yet
- *
- * The CRNN was trained on madmom's `LogarithmicFilteredSpectrogram`, measured
- * out of BeatNet's own `log_spect.py` and dumped by
- * `tools/dump_beat_reference.py`:
- *
- * | | BeatNet | `FeatureConfig` defaults |
- * |---|---|---|
- * | sample rate | 22050 | 22050 ✓ |
- * | hop | 441 (50 fps) | 441 ✓ |
- * | window | **1411** (64 ms) | 2048 ✗ |
- * | bands | **136** | 205 ✗ |
- * | band centres | 46.85 – 10853 Hz | 30 – 10861 Hz ✗ |
- * | filter scaling | unit **area** (`norm_filters=True`) | unit **peak** ✗ |
- * | frame alignment | centred on `t * hop` | window *ends* at `frameSize + t * hop` ✗ |
- * | model input | `bands ‖ positive diff` (272) | `bands` (205) ✗ |
- *
- * Only the first two match. `FeatureConfig`'s KDoc used to claim the whole row
- * matched; `BeatNetFrontEndParityTest` now measures what actually does. See
- * `docs/beat-model.md` for the numbers and for why the defaults were left alone
- * (every other tier and its tests are calibrated against them).
- *
- * So [create] **validates the geometry of the frames it will be fed and refuses
- * to run on the wrong ones.** Feeding a model a differently-computed
- * spectrogram does not produce slightly worse beats, it produces confident
- * nonsense: measured on the reference signal, a best-effort rebanding of our
- * 205-band frames onto BeatNet's 136 makes the CRNN report half-time and
- * collapses the downbeat channel from twelve clean peaks to one. Silently
- * accepting that would be worse than not running at all.
- *
- * Today nothing in the app produces 136-band frames, so this source reports
- * unavailable on the default configuration and the DSP tracker keeps running.
- * What is missing is a BeatNet-geometry front-end (a 1411-point DFT, madmom's
- * unique-bin filterbank, centred frames) *and* a way to reach it: the
- * [ActivationSource] seam receives a [FeatureFrame], not audio, so the extractor
- * would have to be chosen where `LightingEngine` builds it.
+ * [create] returns null then and `LightingEngine` runs the DSP activation
+ * ([SpectralFluxActivationSource], inside whichever [BeatDecoder] is selected)
+ * exactly as before. A model that is present but unloadable degrades the same
+ * way, once, at first use: the failure is logged, [isAvailable] goes false, every
+ * later frame short-circuits to a zero activation, and the engine falls back to
+ * the DSP path for the rest of the session. A broken install must not cost a
+ * 50 Hz stream of exceptions on the analysis thread.
  *
  * @param store where the `.onnx` lives.
- * @param bandCount how many bands the incoming frames carry; validated on every
- *   frame, because a mismatch here is silent corruption rather than a crash.
  */
 class CrnnActivationSource internal constructor(
-    private val store: BeatModelStore,
-    private val bandCount: Int
-) : ActivationSource {
+    private val store: BeatModelStore
+) {
 
     private var environment: OrtEnvironment? = null
     private var session: OrtSession? = null
@@ -93,22 +66,8 @@ class CrnnActivationSource internal constructor(
     /** False once loading or inference has failed; there is no retry. */
     val isAvailable: Boolean get() = !failed
 
-    // Reused across frames: at 50 Hz the hot path should not be allocating
-    // arrays. The ONNX tensors themselves are per-frame — ORT copies into native
-    // memory on creation and owns the result — but the Java-side buffers are not.
-    private val features = FloatArray(FEATURE_SIZE)
-
-    /**
-     * The 272-vector the next inference would submit, for the test that diffs
-     * [buildInput] against madmom's own stacked difference. Live, not a copy —
-     * the array is reused every frame, which is the point of it existing.
-     */
-    internal val featureVector: FloatArray get() = features
-
-    private val previousBands = FloatArray(bandCount)
     private val hiddenState = FloatArray(STATE_SIZE)
     private val cellState = FloatArray(STATE_SIZE)
-    private var hasPreviousFrame = false
 
     /**
      * The LSTM's hidden and cell state, for the test that [reset] clears *both*.
@@ -118,22 +77,27 @@ class CrnnActivationSource internal constructor(
      */
     internal val recurrentState: List<FloatArray> get() = listOf(hiddenState, cellState)
 
-    override fun activation(frame: FeatureFrame): BeatActivation {
+    /**
+     * Runs one frame.
+     *
+     * @param frame a [BeatNetFrame] from [BeatNetFeatureExtractor]; its
+     *   `features` array is submitted directly, with no copy and no reshaping.
+     *   A frame of the wrong width is structural — the extractor feeding this is
+     *   not the one it was built for — so it disables the source rather than
+     *   handing the model a mis-shaped tensor.
+     */
+    fun activation(frame: BeatNetFrame): BeatActivation {
         if (failed) return SILENT
-        if (frame.bands.size != bandCount) {
-            // Structural: the extractor feeding us is not the one create()
-            // inspected. Stop rather than feed the model a mis-shaped vector.
-            Log.e(TAG, "expected $bandCount bands, got ${frame.bands.size}; disabling the CRNN")
+        if (frame.features.size != FEATURE_SIZE) {
+            Log.e(TAG, "expected $FEATURE_SIZE features, got ${frame.features.size}; disabling the CRNN")
             failed = true
             close()
             return SILENT
         }
         if (!ensureLoaded()) return SILENT
 
-        buildInput(frame.bands)
-
         return try {
-            runFrame()
+            runFrame(frame.features)
         } catch (e: Exception) {
             // One bad inference should not take the lighting session with it, but
             // it is almost always structural (wrong model, wrong shape), so stop
@@ -146,18 +110,20 @@ class CrnnActivationSource internal constructor(
     }
 
     /**
-     * Drops the recurrent state and the difference history: the next frame is
-     * treated as the first of a new session.
+     * Drops the recurrent state: the next frame is treated as the first of a new
+     * session.
      *
      * Not optional. The LSTM's state encodes where in the bar the model thinks
      * it is; carrying a previous session's into a new one starts the tracker
      * confidently in the wrong place and it can take bars to recover.
+     *
+     * The *feature* history — the frame the positive difference is taken against
+     * — lives in [BeatNetFeatureExtractor] and is cleared by resetting that.
+     * `LightingEngine.reset` does both.
      */
-    override fun reset() {
+    fun reset() {
         hiddenState.fill(0f)
         cellState.fill(0f)
-        previousBands.fill(0f)
-        hasPreviousFrame = false
     }
 
     /** Releases the ONNX session. The source is unusable afterwards unless reloaded. */
@@ -170,34 +136,7 @@ class CrnnActivationSource internal constructor(
         loaded = false
     }
 
-    // --- input ----------------------------------------------------------------
-
-    /**
-     * `[bands ‖ max(0, bands - previous)]`, which is what madmom's
-     * `SpectrogramDifferenceProcessor(diff_ratio=0.5, positive_diffs=True,
-     * stack_diffs=np.hstack)` produces at this window and hop: the dump records
-     * `diffFrames = 1`, so "the previous frame" is the whole of it.
-     *
-     * The first frame has no predecessor. madmom pads the difference with zeros
-     * there and so does this — an all-zero difference reads as "nothing changed",
-     * which is the right thing for the first frame of a session, whereas
-     * differencing against silence would stamp a phantom onset onto it.
-     */
-    internal fun buildInput(bands: FloatArray) {
-        System.arraycopy(bands, 0, features, 0, bandCount)
-        if (hasPreviousFrame) {
-            for (i in 0 until bandCount) {
-                val delta = bands[i] - previousBands[i]
-                features[bandCount + i] = if (delta > 0f) delta else 0f
-            }
-        } else {
-            features.fill(0f, bandCount, FEATURE_SIZE)
-            hasPreviousFrame = true
-        }
-        System.arraycopy(bands, 0, previousBands, 0, bandCount)
-    }
-
-    private fun runFrame(): BeatActivation {
+    private fun runFrame(features: FloatArray): BeatActivation {
         val env = environment!!
         val ortSession = session!!
 
@@ -275,22 +214,22 @@ class CrnnActivationSource internal constructor(
     companion object {
         private const val TAG = "CrnnActivationSource"
 
-        // --- BeatNet's geometry, from tools/dump_beat_reference.py -------------
+        // --- BeatNet's geometry, owned by BeatNetFeatureExtractor -------------
 
         /** Analysis rate the CRNN was trained at. */
-        const val SAMPLE_RATE = 22050
+        const val SAMPLE_RATE = BeatNetFeatureExtractor.SAMPLE_RATE
 
         /** 20 ms — 50 activation frames per second. */
-        const val HOP_SIZE = 441
+        const val HOP_SIZE = BeatNetFeatureExtractor.HOP_SIZE
 
-        /** 64 ms. Not a power of two, which is why [com.tailapp.audio.dsp.Fft] cannot produce it. */
-        const val WINDOW_SIZE = 1411
+        /** 64 ms. Not a power of two, hence [com.tailapp.audio.dsp.BluesteinFft]. */
+        const val WINDOW_SIZE = BeatNetFeatureExtractor.WINDOW_SIZE
 
         /** Filters madmom's `LogarithmicFilterbank` resolves to at that window. */
-        const val BAND_COUNT = 136
+        const val BAND_COUNT = BeatNetFeatureExtractor.BAND_COUNT
 
         /** `bands ‖ positive difference`. */
-        const val FEATURE_SIZE = 2 * BAND_COUNT
+        const val FEATURE_SIZE = BeatNetFeatureExtractor.FEATURE_SIZE
 
         /** `num_layers * batch * hidden_size` = 2 * 1 * 150. */
         const val HIDDEN_LAYERS = 2
@@ -321,15 +260,25 @@ class CrnnActivationSource internal constructor(
 
         /**
          * Builds a source, or returns null when the model is not installed or the
-         * frames it would be fed are not the ones BeatNet was trained on.
+         * *shared* front-end it would run alongside cannot be paired with
+         * BeatNet's.
+         *
+         * The CRNN brings its own front-end ([BeatNetFeatureExtractor]), so
+         * [config] is not checked for band count or window — it is checked for
+         * the three things that decide whether the two extractors can be driven
+         * off one audio stream and their frames matched up one for one:
+         *
+         * - the same sample rate, since both are fed the same resampled samples;
+         * - the same hop, or the two frame streams run at different rates and no
+         *   fixed pairing exists;
+         * - a shared window at least as long as BeatNet's first frame
+         *   ([BeatNetFeatureExtractor.FIRST_FRAME_END]), so the BeatNet frame a
+         *   shared frame pairs with has always already been produced. At the
+         *   shipped 2048 it has, by three frames.
          *
          * Does not touch ONNX Runtime — no native library is loaded until the
          * first [activation] — so calling this during startup is cheap and cannot
          * throw.
-         *
-         * @param config the front-end the caller will drive this with. Its sample
-         *   rate, hop and resulting band count must be BeatNet's; see the class
-         *   doc for what happens when they are not.
          */
         fun create(store: BeatModelStore, config: FeatureConfig): CrnnActivationSource? {
             if (!store.isInstalled) {
@@ -344,30 +293,20 @@ class CrnnActivationSource internal constructor(
             if (config.hopSize != HOP_SIZE) {
                 mismatches += "hopSize ${config.hopSize} != $HOP_SIZE"
             }
-            // The band count is a property of the filterbank, not of the config,
-            // so ask the filterbank. This is the check that fails on the shipped
-            // defaults (205 bands, not 136) — see the class doc.
-            val bands = LogFilterbank(
-                sampleRate = config.sampleRate,
-                frameSize = config.frameSize,
-                bandsPerOctave = config.bandsPerOctave,
-                fMin = config.fMin,
-                fMax = config.fMax
-            ).bandCount
-            if (bands != BAND_COUNT) {
-                mismatches += "band count $bands != $BAND_COUNT (window ${config.frameSize}, " +
-                    "BeatNet uses $WINDOW_SIZE with madmom's unique-bin filterbank)"
+            if (config.frameSize < BeatNetFeatureExtractor.FIRST_FRAME_END) {
+                mismatches += "frameSize ${config.frameSize} is shorter than BeatNet's first frame " +
+                    "(${BeatNetFeatureExtractor.FIRST_FRAME_END}), so its activation would arrive late"
             }
             if (mismatches.isNotEmpty()) {
                 Log.w(
                     TAG,
-                    "the CRNN is installed but this front-end is not the one it was trained on " +
+                    "the CRNN is installed but cannot be paired with this front-end " +
                         "($mismatches); staying inert. See docs/beat-model.md."
                 )
                 return null
             }
 
-            return CrnnActivationSource(store, bands)
+            return CrnnActivationSource(store)
         }
     }
 }

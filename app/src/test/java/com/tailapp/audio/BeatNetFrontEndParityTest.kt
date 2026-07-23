@@ -9,13 +9,13 @@ import org.junit.Test
 import kotlin.math.abs
 
 /**
- * The shared front-end against BeatNet's, measured rather than assumed.
+ * The **shared** front-end against BeatNet's, measured rather than assumed.
  *
  * The project plan makes numeric validation of the feature extractor a gate on
- * any model work, and [FeatureConfig]'s KDoc claims its defaults "match BeatNet's
- * `log_spect.py`". `tools/dump_beat_reference.py` runs BeatNet's *own* extractor
- * — madmom's `LogarithmicFilteredSpectrogram`, unmodified — on a deterministic
- * signal, and this diffs against that.
+ * any model work, and [FeatureConfig]'s KDoc once claimed its defaults "match
+ * BeatNet's `log_spect.py`". `tools/dump_beat_reference.py` runs BeatNet's *own*
+ * extractor — madmom's `LogarithmicFilteredSpectrogram`, unmodified — on a
+ * deterministic signal, and this diffs against that.
  *
  * **The claim does not hold, and this file is where that is written down.** Two
  * of eight properties match. The rest are pinned below with the measured size of
@@ -33,15 +33,24 @@ import kotlin.math.abs
  * | frame alignment | centred | window-end | differ |
  * | model input | bands ‖ positive diff | bands | differ |
  *
- * These tests therefore assert the *divergence*. Each one fails the day someone
- * makes the two front-ends agree — which is the day `CrnnActivationSource` can be
- * switched on, and the day `docs/beat-model.md` needs rewriting. That is the
- * intended failure, not a false alarm.
+ * ## The gate is now passed — by a *second* extractor
  *
- * `FeatureConfig`'s defaults are deliberately left alone: the DSP beat tracker,
- * the transient tier and their tests are all calibrated against 205 bands from a
- * 2048-sample window, and moving them to chase a model that is not wired in yet
- * would break three working tiers to enable none.
+ * [BeatNetFeatureExtractor] is BeatNet's front-end, and
+ * `BeatNetFeatureExtractorTest` diffs it against the same dump at
+ * **max 1.1e-6 over 81 328 values** on a 0..1.954 range. That is the answer to
+ * everything this file measures; `CrnnActivationSource` consumes its
+ * [BeatNetFrame]s, and `LightingEngine` runs the two extractors side by side on
+ * the same audio.
+ *
+ * So these assertions are *not* stale, and they are not the gate any more. They
+ * pin the shared [FeatureExtractor]'s divergence, which is still real, still
+ * deliberate, and still load-bearing: the DSP beat tracker, the tempo estimator
+ * and the transient tier are all calibrated against 205 unit-peak bands from a
+ * 2048-sample window, and their tests assert numbers (tempo within ±2 BPM, beats
+ * within ±70 ms), not shapes. Anything that quietly moved [FeatureConfig] onto
+ * BeatNet's geometry would break three working tiers to enable nothing — the
+ * CRNN already has the front-end it needs. Each assertion below fails the day
+ * that happens, which is the intended failure.
  *
  * The parity tests skip (rather than fail) when the dump is absent; regenerating
  * it costs a PyTorch install. The structural comparisons that need no dump always
@@ -89,13 +98,14 @@ class BeatNetFrontEndParityTest {
         assertEquals("BeatNet's window, for the record", 1411, reference.winLength)
         assertTrue(
             "FeatureConfig.frameSize (${config.frameSize}) now equals BeatNet's " +
-                "(${reference.winLength}). If that is deliberate, this test and " +
-                "docs/beat-model.md both need updating — and CrnnActivationSource may " +
-                "finally be usable.",
+                "(${reference.winLength}). The CRNN does not need that — it is fed by " +
+                "BeatNetFeatureExtractor — so this is three calibrated tiers being moved " +
+                "for no gain. If it really is deliberate, docs/beat-model.md needs rewriting.",
             config.frameSize != reference.winLength
         )
-        // And it cannot be made equal without new DSP: 1411 = 17 x 83, while
-        // FeatureConfig requires a power of two because dsp/Fft is radix-2.
+        // And it could not be made equal with dsp/Fft alone: 1411 = 17 x 83, while
+        // FeatureConfig requires a power of two because Fft is radix-2. Reaching
+        // it took dsp/BluesteinFft, which BeatNetFeatureExtractor uses.
         assertTrue("1411 is not a power of two", Integer.bitCount(reference.winLength) != 1)
     }
 
@@ -205,8 +215,9 @@ class BeatNetFrontEndParityTest {
 
         // Our FeatureFrame carries the bands and a *scalar* flux, not a per-band
         // difference vector, so nothing downstream of FeatureExtractor could
-        // reconstruct this half without keeping the previous frame itself —
-        // which is exactly what CrnnActivationSource does.
+        // reconstruct this half without keeping the previous frame itself.
+        // BeatNetFeatureExtractor emits the stacked 272 directly, which is why
+        // BeatNetFrame is its own type rather than another FeatureFrame.
         val frames = FeatureExtractor(config).push(
             FloatArray(config.frameSize + config.hopSize),
             endTimestampNanos = 0L
@@ -227,7 +238,9 @@ class BeatNetFrontEndParityTest {
      * Measured: **mean |diff| 0.210, max 1.954, at a whole-frame alignment of +2**,
      * against a reference whose entire range is 0..1.954. That is not "close with
      * a scale factor", it is a different representation. See `docs/beat-model.md`
-     * for what feeding it to the CRNN anyway does to the activations.
+     * for what feeding it to the CRNN anyway does to the activations — and
+     * `BeatNetFeatureExtractorTest`, which reaches 1.1e-6 on the same comparison
+     * by being BeatNet's front-end instead of approximating it.
      */
     @Test
     fun `bands computed from the reference signal do not match BeatNet's`() {
@@ -286,11 +299,13 @@ class BeatNetFrontEndParityTest {
                 "mean |diff| $bestMean, max $bestMax, over a reference range of 0..$range"
 
         // Pinned as a divergence. The bound is generous downwards on purpose: if
-        // someone builds a real BeatNet front-end this fails and points at the docs.
+        // the *shared* front-end is ever moved onto BeatNet's geometry this fails
+        // and points at the docs. (The real BeatNet front-end already exists as a
+        // second extractor; this assertion is about FeatureExtractor staying put.)
         assertTrue(
-            "$message — the front-ends now agree far better than they did " +
-                "(mean was 0.210). Update docs/beat-model.md and consider enabling " +
-                "CrnnActivationSource.",
+            "$message — the shared front-end has moved towards BeatNet's " +
+                "(mean was 0.210). The CRNN does not need it to; check what that " +
+                "did to the tempo and transient tiers, then update docs/beat-model.md.",
             bestMean > 0.1f
         )
         // And upwards, so a catastrophic regression in our own front-end (all

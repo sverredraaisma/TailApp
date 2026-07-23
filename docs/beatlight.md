@@ -11,16 +11,28 @@ This document is the map. The wire protocol lives in TailFirmware's
 
 ```
  Mic ──(Oboe)──► FloatRingBuffer ──► FeatureExtractor (shared STFT + log filterbank)
-                                              │
-        ┌─────────────────────────────────────┼──────────────────────────────┐
+                    │                         │
+                    │ (same audio)            │
+                    ▼                         │
+       BeatNetFeatureExtractor                │
+      (1411-pt centred window,                │
+       136 unit-area bands)                   │
+                    │                         │
+                    ▼                         │
+        CrnnActivationSource                  │
+       (BeatNet CRNN, when installed)         │
+                    │                         │
+                    │ activation              │
+        ┌───────────┴─────────────────────────┼──────────────────────────────┐
         ▼                                     ▼                              ▼
   ActivationSource                    Transient statistics         Discogs-EffNet
-  (spectral flux now,                 (RMS / bass / centroid         (ONNX, on-device)
-   ONNX CRNN later)                    / onset density)                      │
-        ▼                                     ▼                        ┌─────┴─────┐
-  TempoEstimator ──► BeatTracker        DropDetector                GenreHead  SectionState
-        │                                     │                          │        │
-        ▼                                     ▼                          ▼        ▼
+  (spectral flux — the                (RMS / bass / centroid         (ONNX, on-device)
+   fallback, and the                   / onset density)                      │
+   default with no model)                      │                       ┌─────┴─────┐
+        ▼                                      ▼                    GenreHead  SectionState
+  TempoEstimator ──► BeatDecoder         DropDetector                   │        │
+        │                                      │                        │        │
+        ▼                                      ▼                        ▼        ▼
     BeatEvent                        DropEvent / SectionStateUpdate   GenreState
         └─────────────────────────────────────┴──────────────────────────┴────────┘
                                               ▼
@@ -36,6 +48,13 @@ This document is the map. The wire protocol lives in TailFirmware's
         TailDirectLedOutput (FF0A)                        Compose preview
 ```
 
+**Two front-ends, one beat tier.** The shared `FeatureExtractor` feeds everything
+— tempo, transients, timestamps, and the fallback activation. When the BeatNet
+CRNN is installed, the same audio *also* goes through `BeatNetFeatureExtractor`,
+whose 272-float frames are the only thing the model ever sees; its activation
+replaces spectral flux and nothing else changes. The two extractors' frames pair
+three apart with a 0.86 ms residual — see [beat-model.md](beat-model.md).
+
 | Tier | Rate | Produces | Drives |
 |---|---|---|---|
 | Beat | 50 fps (441-sample hop @ 22050 Hz) | `BeatEvent` | per-beat triggers |
@@ -46,8 +65,8 @@ This document is the map. The wire protocol lives in TailFirmware's
 
 | Package | Contents |
 |---|---|
-| `com.tailapp.audio` | `AudioSource` (Oboe + `AudioRecord` fallback), `FloatRingBuffer`, `FeatureConfig`/`FeatureFrame`, `FeatureExtractor`, `dsp/` |
-| `com.tailapp.beat` | `ActivationSource`, `SpectralFluxActivationSource`, `CrnnActivationSource`, `BeatModelStore`, `TempoEstimator`, `BeatTracker`, `BeatEvent` — see [beat-model.md](beat-model.md) |
+| `com.tailapp.audio` | `AudioSource` (Oboe + `AudioRecord` fallback), `FloatRingBuffer`, `FeatureConfig`/`FeatureFrame`, `FeatureExtractor`, `BeatNetFeatureExtractor`/`BeatNetFrame`, `dsp/` (`Fft`, `BluesteinFft`, `LogFilterbank`, `Resampler`) |
+| `com.tailapp.beat` | `ActivationSource`, `SpectralFluxActivationSource`, `CrnnActivationSource`, `BeatModelStore`, `TempoEstimator`, `BeatDecoder` (`BeatTracker`, `ParticleFilterBeatDecoder`), `BeatEvent` — see [beat-model.md](beat-model.md) |
 | `com.tailapp.drop` | transient detector, section-state tracker, `DropEvent`, `SectionState` |
 | `com.tailapp.genre` | `GenreState`, `GenreClassifier`, `EffnetMelSpectrogram`, `OnnxGenreClassifier`, `GenreModelStore` — see [genre-model.md](genre-model.md) |
 | `com.tailapp.effects` | `EffectProfile`, `EffectController`, `ReactiveRenderer` |
@@ -79,7 +98,7 @@ to TailApp changed four things; each was a deliberate call, not a shortcut.
 | Plan said | Built instead | Why |
 |---|---|---|
 | WLED over UDP/OSC as the lighting output | The tail over BLE FF0A direct pixel streaming | The lighting hardware is the tail. `LightingOutput` stays the seam, so a WLED backend is still a drop-in. |
-| BeatNet+ CRNN (ONNX) from the start | DSP onset/tempo tracker first, behind `ActivationSource` | Ships a working, fully-tested pipeline without a multi-gigabyte Python toolchain in the critical path. The CRNN swaps in behind the same interface. |
+| BeatNet+ CRNN (ONNX) from the start | DSP onset/tempo tracker first; the CRNN now runs alongside it when installed | Ships a working, fully-tested pipeline without a multi-gigabyte Python toolchain in the critical path. The CRNN replaces only the activation function, and only when its model is on the device. |
 | Genre head trained on the owner's labelled library | Essentia's Discogs-EffNet + `genre_discogs400`, unmodified | Requested: no personally-trained model. Its weights are CC BY-NC-ND, so they are fetched and converted by `tools/`, never committed — the app ships the code and the models are installed onto the device. |
 | Section head trained on hand-marked timestamps | Heuristic section-state machine on the transient tier | The training data for it was the same labelled set that was dropped. Thresholds are config, not constants. |
 
@@ -104,10 +123,15 @@ covered by `gradlew.bat testDebugUnitTest`:
   reason if that dump has not been generated. A neural front-end has no
   self-evident right answer to assert; matching what the model was trained with
   is the only meaningful check.
-- `BeatNetFrontEndParityTest` does the same for the beat tier and reaches the
-  opposite conclusion: our shared front-end is **not** BeatNet's. It pins each of
-  the six divergences with its measured size, so every one of those assertions
-  fails the day someone closes the gap. See [beat-model.md](beat-model.md).
+- `BeatNetFeatureExtractorTest` is the beat tier's equivalent, and the gate the
+  project plan puts in front of any model work: every one of 299×272 values
+  diffed against madmom's own output, **max 1.1e-6** on a 0..1.954 range.
+  `BluesteinFftTest` backs it by checking the arbitrary-size DFT underneath
+  against a naive O(n²) one at eleven sizes (worst 2.5e-7).
+- `BeatNetFrontEndParityTest` measures the *shared* front-end against the same
+  dump and reaches the opposite conclusion: it is **not** BeatNet's, by a mean of
+  0.210. That is why there are two extractors, and its assertions now guard
+  against the shared one being quietly moved. See [beat-model.md](beat-model.md).
 
 ## Status
 
@@ -124,51 +148,57 @@ covered by `gradlew.bat testDebugUnitTest`:
 | LightingEngine + session + service | done |
 | BeatLight screen (monitor, calibration, profiles) | done |
 | ONNX genre model (Discogs-EffNet) | done — installed onto the device, not shipped; falls back to `NoGenreClassifier` when absent |
-| ONNX beat model (BeatNet CRNN) | exported and verified; `CrnnActivationSource` written and tested — **not switched on**: the shared front-end is not the one BeatNet was trained on. See [beat-model.md](beat-model.md) |
-| Front-end parity with BeatNet (the plan's Phase 2 gate) | **failed, measured** — mean \|diff\| 0.210 on a 0..1.954 range; six of eight properties differ. `FeatureConfig`'s defaults deliberately unchanged |
-| Particle-filter beat decoder | the intended replacement for `BeatTracker`; not yet implemented |
+| Arbitrary-size DFT (`BluesteinFft`) | done — 1411-point transform over the radix-2 `Fft`; 2.5e-7 worst relative error against a naive double-precision DFT |
+| BeatNet front-end (`BeatNetFeatureExtractor`) | done — madmom's pipeline ported; **max 1.1e-6** against madmom's own output over 81 328 values. ~0.1 ms per frame; both front-ends together ~0.15 ms of the 20 ms hop |
+| Front-end parity with BeatNet (the plan's Phase 2 gate) | **passed** — by a second, dedicated extractor. The shared `FeatureConfig` is deliberately unchanged and still 0.210 out, which is why there are two |
+| ONNX beat model (BeatNet CRNN) | exported, verified, and **switched on**: `LightingEngine` runs it whenever the model is installed, and falls back to spectral flux otherwise. See [beat-model.md](beat-model.md) |
+| Particle-filter beat decoder | done — `ParticleFilterBeatDecoder`, selectable alongside `BeatTracker`; see `BeatDecoderComparisonTest` |
+| Per-frame CRNN inference cost, and accuracy on real music | **not measured** — needs a phone; see [beatlight-manual-checks.md](beatlight-manual-checks.md) |
 | On-device verification | see [beatlight-manual-checks.md](beatlight-manual-checks.md) — needs a phone and the tail |
 
-### What is deliberately not done
+### The DSP tracker is still the floor, not a leftover
 
 The plan's two neural beat pieces — BeatNet's CRNN and its particle-filter
-decoder — deliberately came after the DSP tracker rather than instead of it.
-The DSP tracker in `beat/` is honest about being the MVP the plan asks for
-first: measured on synthetic grids it holds 90/128/174 BPM to within 1 BPM with
-over 90% of beats inside the standard ±70 ms window, and it recovers from a
-tempo change within a few bars. It is weaker than a particle filter on sparse
-percussion, rubato and half-time feels, and `docs/beatlight-manual-checks.md`
-asks specifically for those cases to be reported.
+decoder — deliberately came after the DSP tracker rather than instead of it, and
+the DSP tracker did not go away when they arrived. It is what runs on every
+device with no model installed, which is every fresh install: measured on
+synthetic grids it holds 90/128/174 BPM to within 1 BPM with over 90% of beats
+inside the standard ±70 ms window, and it recovers from a tempo change within a
+few bars. It is weaker than a particle filter on sparse percussion, rubato and
+half-time feels, and `docs/beatlight-manual-checks.md` asks specifically for
+those cases to be reported.
 
-Because `ActivationSource` is the seam, the CRNN replaces only the activation
-function, and the decoder replaces only `BeatTracker` — neither touches the
-front-end, the transient tier or anything downstream.
+The two neural pieces are independent replacements at two different seams: the
+CRNN replaces only the activation function, the particle filter replaces only the
+decoder. Neither touches the transient tier or anything downstream, and either
+can be absent.
 
-### The CRNN is built but not switched on
-
-BeatNet's CRNN is now exported to ONNX (`tools/export_beatnet.py`, verified to
-3.6e-7 against PyTorch both whole-sequence and frame-by-frame) and
-`CrnnActivationSource` runs it one frame at a time with the LSTM state carried
-explicitly. It is inert anyway, for a reason worth stating in the map rather than
-only in [beat-model.md](beat-model.md):
+### Why the CRNN needed a second front-end
 
 **`FeatureConfig`'s defaults do not match BeatNet's `log_spect.py`, despite the
-comment saying they were chosen to.** Measured against BeatNet's own extractor,
-sample rate, hop, bands-per-octave and the log compression match; the window
-(1411 vs 2048), the band count (136 vs 205), the lowest band centre (46.85 vs
-30 Hz), the filter normalisation (unit area vs unit peak), the frame alignment
+comment that used to say they were chosen to.** Measured against BeatNet's own
+extractor, sample rate, hop, bands-per-octave and the log compression match; the
+window (1411 vs 2048), the band count (136 vs 205), the lowest band centre (46.85
+vs 30 Hz), the filter normalisation (unit area vs unit peak), the frame alignment
 (centred vs window-end) and the model's input vector (bands ‖ positive difference
 vs bands) do not.
 
 Feeding the model our frames anyway was tried and measured: it reports half-time
-and the downbeat channel collapses from twelve clean peaks to one. So
-`CrnnActivationSource.create` validates the geometry of the frames it will be fed
-and returns null on the shipped configuration, and `AppContainer` falls back to
-`SpectralFluxActivationSource`.
+and the downbeat channel collapses from twelve clean peaks to one.
 
-`FeatureConfig`'s defaults were left alone on purpose — the DSP tracker, the
-tempo estimator and the transient tier are all calibrated against them, and their
-tests assert numbers, not shapes. A BeatNet front-end has to be a *second*
-extractor (a 1411-point DFT, madmom's unique-bin unit-area filterbank, centred
-frames), chosen where `LightingEngine` builds the extractor — the seam hands an
-`ActivationSource` a `FeatureFrame`, not audio, so it cannot choose its own.
+Moving `FeatureConfig` was not the answer either — the DSP tracker, the tempo
+estimator and the transient tier are all calibrated against its 205 bands from a
+2048-sample window, and their tests assert numbers, not shapes. So BeatNet's
+front-end is a **second** extractor: `BeatNetFeatureExtractor`, on a 1411-point
+Bluestein DFT, with madmom's unique-bin unit-area filterbank and centred frames.
+It matches madmom's own output to **1.1e-6** across 81 328 values and costs
+about 0.1 ms per frame.
+
+`LightingEngine` is where the two meet, because the `ActivationSource` seam hands
+out a `FeatureFrame` rather than audio and so cannot choose its own front-end.
+The engine pushes each chunk through both extractors, pairs shared frame `i` with
+BeatNet frame `i + 3` (a 0.86 ms residual — [beat-model.md](beat-model.md)
+derives it), and drives the decoder through `BeatDecoder.process(frame,
+activation)`. With no model installed neither the extractor nor the source is
+constructed at all, and `BeatLightState.activationSource` — shown on the monitor
+card — says which one is live.

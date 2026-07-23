@@ -252,7 +252,8 @@ private fun MonitorSection(
             Spacer(Modifier.height(8.dp))
             Text(
                 "Latency ${"%.0f".format(state.inputLatencyMillis)} ms · " +
-                    "Dropped samples ${state.droppedSamples}",
+                    "Dropped samples ${state.droppedSamples} · " +
+                    "Activation ${state.activationSource.displayName}",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

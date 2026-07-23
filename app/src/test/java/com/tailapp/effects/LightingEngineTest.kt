@@ -1,6 +1,9 @@
 package com.tailapp.effects
 
+import com.tailapp.audio.BeatNetFeatureExtractor
 import com.tailapp.audio.FeatureConfig
+import com.tailapp.audio.FeatureExtractor
+import com.tailapp.beat.BeatModelStore
 import com.tailapp.testutil.PlaybackAudioSource
 import com.tailapp.testutil.RecordingLightingOutput
 import com.tailapp.testutil.SyntheticAudio
@@ -14,7 +17,12 @@ import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TemporaryFolder
+import java.io.ByteArrayInputStream
+import java.io.File
+import kotlin.math.abs
 
 /**
  * The whole pipeline end to end: synthetic audio in, LED frames out.
@@ -26,6 +34,9 @@ import org.junit.Test
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class LightingEngineTest {
+
+    @get:Rule
+    val temporaryFolder = TemporaryFolder()
 
     private val featureConfig = FeatureConfig()
     private val layout = MutableStateFlow(listOf(8, 10, 12, 10, 8))
@@ -40,7 +51,8 @@ class LightingEngineTest {
         audio: FloatArray,
         sampleRate: Int = FeatureConfig().sampleRate,
         scope: CoroutineScope,
-        dispatcher: CoroutineDispatcher
+        dispatcher: CoroutineDispatcher,
+        beatModelStore: BeatModelStore? = null
     ): Harness {
         val output = RecordingLightingOutput()
         val source = PlaybackAudioSource(audio, sampleRate)
@@ -49,6 +61,7 @@ class LightingEngineTest {
             ledLayout = layout,
             scope = scope,
             featureConfig = featureConfig,
+            beatModelStore = beatModelStore,
             // The engine's own loops must run on the test scheduler, not on
             // Dispatchers.Default — otherwise they race the hand-driven pump
             // below on a real thread and corrupt the extractor's ring buffer.
@@ -201,6 +214,112 @@ class LightingEngineTest {
         assertEquals("the offset changed which beats were detected", unshifted.size, shifted.size)
         unshifted.zip(shifted).forEach { (plain, offset) ->
             assertEquals(plain - 40_000_000L, offset)
+        }
+    }
+
+    // --- the CRNN activation path -------------------------------------------------
+
+    @Test
+    fun `with no beat model the DSP activation runs and says so`() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val scope = CoroutineScope(dispatcher)
+        val harness = harness(
+            SyntheticAudio.clickTrack(128f, 5f, featureConfig.sampleRate),
+            scope = scope,
+            dispatcher = dispatcher
+        )
+        harness.engine.start()
+
+        assertEquals(BeatActivationKind.SPECTRAL_FLUX, harness.engine.state.value.activationSource)
+        drive(harness)
+        assertEquals(BeatActivationKind.SPECTRAL_FLUX, harness.engine.state.value.activationSource)
+
+        harness.engine.stop()
+        scope.cancel()
+    }
+
+    /**
+     * The degradation path, which is the only CRNN path the JVM can reach:
+     * `libonnxruntime.so` is an Android native library, so the first inference
+     * throws `UnsatisfiedLinkError` here exactly as a corrupt model would on a
+     * device.
+     *
+     * What must survive that is everything else. The second front-end is built
+     * and driven, the model is asked and fails once, the source disables itself,
+     * and the session finishes tracking the tempo on the DSP activation with the
+     * state reporting which one is live. A broken install must cost one logged
+     * failure, not a session.
+     */
+    @Test
+    fun `an unloadable beat model degrades to the DSP activation mid-session`() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val scope = CoroutineScope(dispatcher)
+        val store = BeatModelStore(File(temporaryFolder.root, BeatModelStore.DIRECTORY_NAME))
+        store.install(BeatModelStore.CRNN_MODEL, ByteArrayInputStream(ByteArray(64) { 1 }))
+
+        val harness = harness(
+            SyntheticAudio.clickTrack(128f, 30f, featureConfig.sampleRate),
+            scope = scope,
+            dispatcher = dispatcher,
+            beatModelStore = store
+        )
+        harness.engine.start()
+
+        // Loading is lazy, so before any audio the engine believes the CRNN is live.
+        assertEquals(BeatActivationKind.CRNN, harness.engine.state.value.activationSource)
+
+        drive(harness)
+
+        assertEquals(
+            "the first inference fails and the source disables itself for good",
+            BeatActivationKind.SPECTRAL_FLUX,
+            harness.engine.state.value.activationSource
+        )
+        assertEquals("the pipeline kept tracking", 128f, harness.engine.state.value.bpm, 2f)
+        assertTrue("no beats reached the output", harness.output.beats.isNotEmpty())
+
+        harness.engine.stop()
+        scope.cancel()
+    }
+
+    /**
+     * The pairing arithmetic `LightingEngine`'s KDoc claims, checked against the
+     * two extractors rather than restated.
+     *
+     * Shared frame `i` takes BeatNet frame `i + 3`'s activation, and the two
+     * windows close 19 samples (0.86 ms) apart.
+     */
+    @Test
+    fun `the two front-ends pair three frames apart, 19 samples out`() {
+        val sampleRate = featureConfig.sampleRate
+        val audio = SyntheticAudio.clickTrack(120f, 3f, sampleRate)
+        val endNanos = (audio.size.toLong() * 1_000_000_000L) / sampleRate
+
+        val sharedFrames = FeatureExtractor(featureConfig).push(audio, endTimestampNanos = endNanos)
+        val beatNetFrames = BeatNetFeatureExtractor().push(audio, endTimestampNanos = endNanos)
+
+        val lag = (featureConfig.frameSize - BeatNetFeatureExtractor.FIRST_FRAME_END) / featureConfig.hopSize
+        assertEquals("the documented lag", 3, lag)
+
+        // Frame i + lag must always exist by the time frame i does: BeatNet runs
+        // ahead by exactly that many, plus whatever the tail of the buffer gave it.
+        assertTrue(
+            "BeatNet produced ${beatNetFrames.size} frames against ${sharedFrames.size} shared ones",
+            beatNetFrames.size >= sharedFrames.size + lag
+        )
+
+        val residualSamples = featureConfig.frameSize -
+            BeatNetFeatureExtractor.FIRST_FRAME_END - lag * featureConfig.hopSize
+        assertEquals("the documented residual", 19, residualSamples)
+
+        // And it is visible in the timestamps, which are what the decoder sees.
+        val residualNanos = (residualSamples.toLong() * 1_000_000_000L) / sampleRate
+        for (i in sharedFrames.indices) {
+            val delta = sharedFrames[i].timestampNanos - beatNetFrames[i + lag].timestampNanos
+            assertTrue(
+                "frame $i: shared window closes ${delta}ns after its BeatNet partner's, expected ~$residualNanos",
+                abs(delta - residualNanos) <= 1L
+            )
         }
     }
 }
