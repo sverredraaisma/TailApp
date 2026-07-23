@@ -99,7 +99,7 @@ fail with `BAD_STATE`.
 | FF07 | read + notify | Events: tap base/tip, config changed |
 | FF08 | read/write | Profile slots (occupancy + names) |
 | FF09 | read + notify | Command result (ACK/error) for every non-FF05/FF0A write |
-| FF0A | write-no-response | Direct LED pixel stream — **not yet implemented app-side** |
+| FF0A | write-no-response | Direct LED pixel stream (`DeviceRepository.streamDirectFrame`) |
 
 Things worth remembering when touching this layer:
 
@@ -118,6 +118,13 @@ Things worth remembering when touching this layer:
 - **`servo_config_t` is a historical name.** The motors are TMC2209 steppers as
   of firmware `d4973bf`; the FF01/FF06 servo payloads were deliberately left
   unchanged, so nothing on this side needed to move.
+- **FF0A packets pay for their own header.** `DirectPixelFrame.maxLedsPerPacket`
+  computes `((mtu-3)-2)/3`, not the protocol doc's `(mtu-3)/3` — that
+  approximation skips subtracting the 2-byte `start_index` header and
+  overstates capacity by one LED at MTU 247/517. Direct mode is transient
+  session state on both ends: FF03 `0x09` isn't persisted, and the firmware
+  auto-reverts it if the app disconnects mid-stream, so `DeviceRepository`
+  resets `directModeActive` in `onDisconnected` to match.
 
 ## Testing
 

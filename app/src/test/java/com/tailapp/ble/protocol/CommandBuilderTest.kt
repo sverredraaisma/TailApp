@@ -151,6 +151,12 @@ class CommandBuilderTest {
         )
     }
 
+    @Test
+    fun `setDirectMode is two bytes`() {
+        assertArrayEquals(byteArrayOf(0x09, 0x01), LedCommands.setDirectMode(true))
+        assertArrayEquals(byteArrayOf(0x09, 0x00), LedCommands.setDirectMode(false))
+    }
+
     // ── FF06 system ────────────────────────────────────────────────
 
     @Test

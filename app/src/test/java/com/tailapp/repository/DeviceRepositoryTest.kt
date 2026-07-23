@@ -643,6 +643,105 @@ class DeviceRepositoryTest {
         assertFalse(repository.deviceState.value.fftStreamActive)
     }
 
+    // ── Direct pixel streaming (FF0A) ──────────────────────────────
+
+    @Test
+    fun `setDirectMode writes FF03 0x09 and flips the state flag`() = runTest {
+        val transport = FakeBleTransport()
+        val repository = connected(transport)
+        transport.clearTraffic()
+        assertFalse(repository.deviceState.value.directModeActive)
+
+        val ok = repository.setDirectMode(true)
+        advanceUntilIdle()
+
+        assertTrue(ok)
+        assertArrayEquals(byteArrayOf(0x09, 0x01), transport.writesTo(CharacteristicUuids.LED_CMD).single())
+        assertTrue(repository.deviceState.value.directModeActive)
+
+        transport.clearTraffic()
+        repository.setDirectMode(false)
+        advanceUntilIdle()
+
+        assertArrayEquals(byteArrayOf(0x09, 0x00), transport.writesTo(CharacteristicUuids.LED_CMD).single())
+        assertFalse(repository.deviceState.value.directModeActive)
+    }
+
+    @Test
+    fun `setDirectMode does not flip the flag when the write fails`() = runTest {
+        val transport = FakeBleTransport().apply { writeResult = false }
+        val repository = connected(transport)
+
+        val ok = repository.setDirectMode(true)
+        advanceUntilIdle()
+
+        assertFalse(ok)
+        assertFalse(repository.deviceState.value.directModeActive)
+    }
+
+    @Test
+    fun `disconnect clears directModeActive`() = runTest {
+        val transport = FakeBleTransport()
+        val repository = connected(transport)
+        repository.setDirectMode(true)
+        advanceUntilIdle()
+        assertTrue(repository.deviceState.value.directModeActive)
+
+        transport.setConnectionState(ConnectionState.DISCONNECTED)
+        advanceUntilIdle()
+
+        assertFalse(repository.deviceState.value.directModeActive)
+    }
+
+    @Test
+    fun `streamDirectFrame sends a single write when the frame fits one packet`() = runTest {
+        val transport = FakeBleTransport()
+        val repository = connected(transport)
+        transport.setMtu(23) // maxLedsPerPacket(23) == 6
+        transport.clearTraffic()
+
+        val rgb = ByteArray(6 * 3) { it.toByte() }
+        repository.streamDirectFrame(rgb, ledCount = 6, startIndex = 10)
+        advanceUntilIdle()
+
+        val writes = transport.writesWithoutResponse.filter { it.uuid == CharacteristicUuids.LED_DIRECT }
+        assertEquals(1, writes.size)
+        val packet = writes.single().data
+        assertEquals(10, ByteBuffer.wrap(packet, 0, 2).order(ByteOrder.LITTLE_ENDIAN).short.toInt() and 0xFFFF)
+        assertArrayEquals(rgb, packet.copyOfRange(2, packet.size))
+        // Never on the mutex-guarded write path — that would stall the hot path.
+        assertTrue(transport.writesTo(CharacteristicUuids.LED_DIRECT).isEmpty())
+    }
+
+    @Test
+    fun `streamDirectFrame splits a larger frame with increasing start indices and no lost or duplicated pixels`() = runTest {
+        val transport = FakeBleTransport()
+        val repository = connected(transport)
+        transport.setMtu(23) // maxLedsPerPacket(23) == 6
+        transport.clearTraffic()
+
+        val ledCount = 14 // 6 + 6 + 2 across three packets at this MTU
+        val rgb = ByteArray(ledCount * 3) { it.toByte() }
+        repository.streamDirectFrame(rgb, ledCount = ledCount, startIndex = 100)
+        advanceUntilIdle()
+
+        val writes = transport.writesWithoutResponse.filter { it.uuid == CharacteristicUuids.LED_DIRECT }
+        assertEquals(3, writes.size)
+
+        val expectedStartsAndCounts = listOf(100 to 6, 106 to 6, 112 to 2)
+        val reassembled = ByteArray(rgb.size)
+        writes.forEachIndexed { i, write ->
+            val (expectedStart, expectedCount) = expectedStartsAndCounts[i]
+            val start = ByteBuffer.wrap(write.data, 0, 2).order(ByteOrder.LITTLE_ENDIAN).short.toInt() and 0xFFFF
+            assertEquals(expectedStart, start)
+            assertEquals(2 + expectedCount * 3, write.data.size)
+
+            val pixelOffset = (start - 100) * 3
+            write.data.copyOfRange(2, write.data.size).copyInto(reassembled, pixelOffset)
+        }
+        assertArrayEquals(rgb, reassembled)
+    }
+
     // ── Protocol version ───────────────────────────────────────────
 
     @Test

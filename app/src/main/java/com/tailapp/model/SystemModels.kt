@@ -92,6 +92,13 @@ data class DeviceState(
     val ledState: LedState? = null,
     val profiles: List<ProfileSlot> = emptyList(),
     val fftStreamActive: Boolean = false,
+    /**
+     * Whether FF0A direct pixel streaming is bypassing the effect stack. Mirrors
+     * transient session state on the device (FF03 `0x09` Set Direct Mode) — not
+     * persisted, and the firmware reverts it on its own on disconnect, so this
+     * is reset alongside the rest of [DeviceState] in `onDisconnected`.
+     */
+    val directModeActive: Boolean = false,
     /** Most recent FF09 acknowledgement — used to surface rejected commands. */
     val lastCommandResult: CommandResult? = null
 ) {

@@ -7,6 +7,7 @@ import com.tailapp.ble.protocol.CharacteristicUuids
 import com.tailapp.ble.protocol.CommandResult
 import com.tailapp.ble.protocol.CommandResultParser
 import com.tailapp.ble.protocol.Crc32
+import com.tailapp.ble.protocol.DirectPixelFrame
 import com.tailapp.ble.protocol.FftFrameBuilder
 import com.tailapp.ble.protocol.LedCommands
 import com.tailapp.ble.protocol.LedStateParser
@@ -19,6 +20,7 @@ import com.tailapp.ble.protocol.SystemCommands
 import com.tailapp.ble.protocol.SystemEvent
 import com.tailapp.ble.protocol.SystemEventParser
 import com.tailapp.ble.protocol.SystemInfoParser
+import com.tailapp.led.PixelBuffer
 import com.tailapp.model.DeviceState
 import com.tailapp.model.LayerConfig
 import com.tailapp.model.LedState
@@ -215,6 +217,9 @@ class DeviceRepository(
         setupJob = null
         notificationJob?.cancel()
         notificationJob = null
+        // Rebuilding from a fresh DeviceState() also resets directModeActive to
+        // false, matching the firmware auto-reverting direct mode on disconnect
+        // (app_bridge.cpp::app_led_render checks connection state every frame).
         _deviceState.value = DeviceState(connectionState = ConnectionState.DISCONNECTED)
     }
 
@@ -451,6 +456,65 @@ class DeviceRepository(
     fun setFftStreamActive(active: Boolean) {
         _deviceState.update { it.copy(fftStreamActive = active) }
     }
+
+    // --- Direct pixel streaming (FF0A) ---
+
+    /**
+     * `0x09` Set Direct Mode on FF03. Enabled, this bypasses the layer/effect/
+     * compositor stack so frames pushed via [streamDirectFrame] are shown as-is;
+     * disabled, it resumes normal effect rendering.
+     *
+     * This is transient session state, not persisted on the device — and the
+     * firmware auto-reverts it on disconnect (`app_bridge.cpp::app_led_render`
+     * checks the connection state every frame and clears its own direct-mode
+     * flag if the app is gone, so the tail never gets stuck on a stale frame).
+     * [onDisconnected] mirrors that on this side by resetting
+     * [DeviceState.directModeActive] to false too.
+     */
+    suspend fun setDirectMode(enabled: Boolean): Boolean {
+        val ok = transport.writeCharacteristic(CharacteristicUuids.LED_CMD, LedCommands.setDirectMode(enabled))
+        if (ok) {
+            _deviceState.update { it.copy(directModeActive = enabled) }
+        }
+        return ok
+    }
+
+    /**
+     * Streams one rendered frame to FF0A, split into
+     * [DirectPixelFrame.maxLedsPerPacket]-sized packets at increasing
+     * [startIndex] values and sent with [BleTransport.writeWithoutResponse].
+     *
+     * No suspension and no ACK by design — this is the hot path a beat-reactive
+     * renderer calls ~30x/second, and awaiting the mutex-guarded write path
+     * (or FF09) here would risk stalling behind command traffic. The firmware
+     * doesn't wrap or clamp indices at the strip boundary either
+     * (`LedMatrix::write_pixels` simply stops once an index reaches the
+     * configured LED count), so a [ledCount] longer than the physical strip is
+     * safe to send — the tail is just dropped on the device, not wrapped.
+     *
+     * @param rgb packed `r,g,b` triplets, e.g. [PixelBuffer.bytes].
+     * @param ledCount number of LEDs to stream from [rgb]; defaults to the whole buffer.
+     * @param startIndex index of the first LED in the strip that [rgb] represents.
+     */
+    fun streamDirectFrame(rgb: ByteArray, ledCount: Int = rgb.size / 3, startIndex: Int = 0) {
+        val maxPerPacket = DirectPixelFrame.maxLedsPerPacket(negotiatedMtu.value)
+        var sent = 0
+        while (sent < ledCount) {
+            val count = minOf(maxPerPacket, ledCount - sent)
+            val packet = DirectPixelFrame.build(
+                startIndex = startIndex + sent,
+                rgb = rgb,
+                offset = sent * 3,
+                ledCount = count
+            )
+            transport.writeWithoutResponse(CharacteristicUuids.LED_DIRECT, packet)
+            sent += count
+        }
+    }
+
+    /** Convenience overload streaming an already-rendered [PixelBuffer]. */
+    fun streamDirectFrame(buffer: PixelBuffer, startIndex: Int = 0) =
+        streamDirectFrame(buffer.bytes, buffer.ledCount, startIndex)
 
     // --- Profile commands ---
 

@@ -31,6 +31,17 @@ object Protocol {
 
     /** Bytes per layer entry in the FF04 LED-state payload. */
     const val LED_LAYER_SIZE = 39
+
+    /**
+     * The largest ATT MTU worth planning for. The firmware requests a preferred
+     * MTU of 512 (`ble_att_set_preferred_mtu`), which negotiates up to 517 once
+     * the 3-byte ATT opcode+handle overhead is added back on — the same ceiling
+     * [com.tailapp.repository.DeviceRepository] requests on connect. Used as the
+     * upper bound for [DirectPixelFrame]'s packet-budget sanity check, since a
+     * single FF0A write can never carry more LEDs than this allows regardless of
+     * what the live connection actually negotiated.
+     */
+    const val MAX_ATT_MTU = 517
 }
 
 /** Result code reported on FF09 after every non-FFT write. */

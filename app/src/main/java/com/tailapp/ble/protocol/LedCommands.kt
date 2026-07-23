@@ -62,4 +62,14 @@ object LedCommands {
         buf.putInt(crc32)
         return buf.array()
     }
+
+    /**
+     * `0x09` Set Direct Mode. Enabling bypasses the layer/effect/compositor stack
+     * so pixels streamed on FF0A ([DirectPixelFrame]) are shown as-is; disabling
+     * resumes normal effect rendering. Not persisted — a transient session flag
+     * that the firmware also reverts on its own if the app disconnects while
+     * direct mode is on (see `app_bridge.cpp::app_led_render`).
+     */
+    fun setDirectMode(enabled: Boolean): ByteArray =
+        byteArrayOf(0x09, if (enabled) 1 else 0)
 }
