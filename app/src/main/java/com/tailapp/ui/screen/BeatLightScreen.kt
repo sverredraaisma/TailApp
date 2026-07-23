@@ -52,6 +52,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.tailapp.beat.BeatEvent
 import com.tailapp.ble.ConnectionState
+import com.tailapp.effects.BeatDecoderKind
 import com.tailapp.effects.BeatLightState
 import com.tailapp.effects.EffectProfile
 import com.tailapp.genre.GenreState
@@ -82,6 +83,7 @@ fun BeatLightScreen(
     val deviceState by viewModel.deviceState.collectAsStateWithLifecycle()
     val triggerOffsetMillis by viewModel.triggerOffsetMillis.collectAsStateWithLifecycle()
     val manualProfileId by viewModel.manualProfileId.collectAsStateWithLifecycle()
+    val decoderKind by viewModel.decoderKind.collectAsStateWithLifecycle()
 
     val snackbarHostState = remember { SnackbarHostState() }
 
@@ -169,7 +171,9 @@ fun BeatLightScreen(
             Spacer(Modifier.height(16.dp))
             CalibrationSection(
                 triggerOffsetMillis = triggerOffsetMillis,
-                onOffsetChange = viewModel::setTriggerOffset
+                onOffsetChange = viewModel::setTriggerOffset,
+                decoderKind = decoderKind,
+                onDecoderChange = viewModel::setDecoder
             )
 
             Spacer(Modifier.height(16.dp))
@@ -298,7 +302,9 @@ private fun BeatPulse(lastBeat: BeatEvent?, modifier: Modifier = Modifier) {
 @Composable
 private fun CalibrationSection(
     triggerOffsetMillis: Float,
-    onOffsetChange: (Float) -> Unit
+    onOffsetChange: (Float) -> Unit,
+    decoderKind: BeatDecoderKind,
+    onDecoderChange: (BeatDecoderKind) -> Unit
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
@@ -330,6 +336,36 @@ private fun CalibrationSection(
                     "${BeatLightViewModel.MAX_OFFSET_MS.toInt()} ms",
                     style = MaterialTheme.typography.labelSmall
                 )
+            }
+
+            Spacer(Modifier.height(20.dp))
+            Text("Beat decoder", style = MaterialTheme.typography.titleSmall)
+            Text(
+                "Neither is strictly better — the only way to settle it is to hear both " +
+                    "against the same music. Switching restarts the session.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.height(4.dp))
+            BeatDecoderKind.entries.forEach { kind ->
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    RadioButton(
+                        selected = decoderKind == kind,
+                        onClick = { onDecoderChange(kind) }
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(kind.displayName, style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            kind.description,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
             }
         }
     }

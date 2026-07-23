@@ -7,8 +7,10 @@ import com.tailapp.audio.FeatureConfig
 import com.tailapp.audio.FeatureExtractor
 import com.tailapp.audio.OboeAudioSource
 import com.tailapp.audio.dsp.Resampler
+import com.tailapp.beat.BeatDecoder
 import com.tailapp.beat.BeatEvent
 import com.tailapp.beat.BeatTracker
+import com.tailapp.beat.ParticleFilterBeatDecoder
 import com.tailapp.drop.DropEvent
 import com.tailapp.drop.SectionState
 import com.tailapp.drop.TransientAnalyzer
@@ -29,6 +31,26 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 /**
+ * Which beat decoder a session runs.
+ *
+ * Both are real options rather than old-and-new: measured head to head, the
+ * phase-locked tracker is more precise about tempo and never drops a beat on
+ * sparse material, while the particle filter is the one that keeps tracking
+ * heavily syncopated music the other refuses to lock onto at all. Which matters
+ * depends entirely on what is playing, so the choice is the user's.
+ */
+enum class BeatDecoderKind(val displayName: String, val description: String) {
+    PHASE_LOCKED(
+        "Phase-locked",
+        "Precise tempo, cheap. Can fail to lock on heavily syncopated music."
+    ),
+    PARTICLE_FILTER(
+        "Particle filter",
+        "Tracks syncopation the other gives up on. Slightly looser tempo, ~100x the work."
+    )
+}
+
+/**
  * Everything the monitoring UI shows about a running session.
  */
 data class BeatLightState(
@@ -45,6 +67,7 @@ data class BeatLightState(
     val isProfileOverridden: Boolean = false,
     val inputLatencyMillis: Float = 0f,
     val droppedSamples: Long = 0L,
+    val decoder: BeatDecoderKind = BeatDecoderKind.PHASE_LOCKED,
     val error: String? = null
 )
 
@@ -83,7 +106,17 @@ class LightingEngine(
     private val clock: () -> Long = System::nanoTime
 ) {
     private val extractor = FeatureExtractor(featureConfig)
-    private val beatTracker = BeatTracker(featureConfig)
+
+    /**
+     * Rebuilt rather than swapped: the analysis loop reads this on a worker
+     * thread, so changing decoders while one is running would be a data race on
+     * whatever internal state it carries. [decoderKind] therefore takes effect
+     * at the next [start], and the session UI restarts the session to apply it.
+     */
+    private var beatTracker: BeatDecoder = BeatTracker(featureConfig)
+
+    /** Decoder used by the *next* session. Changing it does not disturb a running one. */
+    var decoderKind: BeatDecoderKind = BeatDecoderKind.PHASE_LOCKED
     private val transients = TransientAnalyzer(featureConfig = featureConfig)
     private val renderer = ReactiveRenderer()
     private val controller = EffectController(renderer, output)
@@ -293,6 +326,7 @@ class LightingEngine(
             it.copy(
                 bpm = beatTracker.bpm,
                 beatConfidence = beatTracker.confidence,
+                decoder = decoderKind,
                 lastBeat = latestBeat,
                 lastDrop = latestDrop,
                 section = transients.sectionState,
@@ -316,6 +350,10 @@ class LightingEngine(
 
     private fun reset() {
         extractor.reset()
+        beatTracker = when (decoderKind) {
+            BeatDecoderKind.PHASE_LOCKED -> BeatTracker(featureConfig)
+            BeatDecoderKind.PARTICLE_FILTER -> ParticleFilterBeatDecoder(featureConfig)
+        }
         beatTracker.reset()
         transients.reset()
         resampler?.reset()

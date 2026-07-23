@@ -1,5 +1,6 @@
 package com.tailapp.viewmodel
 
+import com.tailapp.effects.BeatDecoderKind
 import com.tailapp.effects.EffectProfiles
 import com.tailapp.effects.LightingEngine
 import com.tailapp.lighting.PreviewLightingOutput
@@ -206,4 +207,46 @@ class BeatLightViewModelTest {
         assertFalse(viewModel.isActive.value)
         assertNull(viewModel.error.value)
     }
+
+    @Test
+    fun `defaults to the phase-locked decoder`() {
+        val engine = newEngine()
+        val viewModel = newViewModel(engine = engine)
+
+        assertEquals(BeatDecoderKind.PHASE_LOCKED, viewModel.decoderKind.value)
+        assertEquals(BeatDecoderKind.PHASE_LOCKED, engine.decoderKind)
+    }
+
+    @Test
+    fun `setDecoder applies to the engine`() {
+        val engine = newEngine()
+        val viewModel = newViewModel(engine = engine)
+
+        viewModel.setDecoder(BeatDecoderKind.PARTICLE_FILTER)
+
+        assertEquals(BeatDecoderKind.PARTICLE_FILTER, viewModel.decoderKind.value)
+        assertEquals(BeatDecoderKind.PARTICLE_FILTER, engine.decoderKind)
+    }
+
+    @Test
+    fun `the decoder choice persists across view model instances`() {
+        val prefs = FakeSharedPreferences()
+        newViewModel(prefs = prefs).setDecoder(BeatDecoderKind.PARTICLE_FILTER)
+
+        val engine = newEngine()
+        val restored = newViewModel(prefs = prefs, engine = engine)
+
+        assertEquals(BeatDecoderKind.PARTICLE_FILTER, restored.decoderKind.value)
+        assertEquals(BeatDecoderKind.PARTICLE_FILTER, engine.decoderKind)
+    }
+
+    @Test
+    fun `an unknown saved decoder falls back to the default`() {
+        // A decoder removed by an app update must not leave the app unable to start.
+        val prefs = FakeSharedPreferences()
+        prefs.edit().putString(BeatLightViewModel.KEY_DECODER, "GRADIENT_DESCENT_ORACLE").apply()
+
+        assertEquals(BeatDecoderKind.PHASE_LOCKED, newViewModel(prefs = prefs).decoderKind.value)
+    }
+
 }

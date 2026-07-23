@@ -2,6 +2,7 @@ package com.tailapp.viewmodel
 
 import android.content.SharedPreferences
 import androidx.lifecycle.ViewModel
+import com.tailapp.effects.BeatDecoderKind
 import com.tailapp.effects.BeatLightSession
 import com.tailapp.effects.BeatLightState
 import com.tailapp.effects.EffectProfile
@@ -65,6 +66,19 @@ class BeatLightViewModel(
     /** User calibration in milliseconds, restored from [prefs]; negative fires earlier. */
     val triggerOffsetMillis: StateFlow<Float> = _triggerOffsetMillis.asStateFlow()
 
+    private val _decoderKind = MutableStateFlow(
+        prefs?.getString(KEY_DECODER, null)
+            ?.let { saved -> BeatDecoderKind.entries.firstOrNull { it.name == saved } }
+            ?: BeatDecoderKind.PHASE_LOCKED
+    )
+
+    /**
+     * Which beat decoder the next session runs. Neither is strictly better —
+     * see [BeatDecoderKind] — so this is a real choice, and the only way to
+     * settle it is to hear both against the same music.
+     */
+    val decoderKind: StateFlow<BeatDecoderKind> = _decoderKind.asStateFlow()
+
     private val _manualProfileId = MutableStateFlow<String?>(null)
 
     /** Id of the pinned profile, or null while automatic (classifier-driven). */
@@ -82,6 +96,8 @@ class BeatLightViewModel(
         val restored = prefs?.getString(KEY_MANUAL_PROFILE, null)?.let(EffectProfiles::byId)
         _manualProfileId.value = restored?.id
         engine.manualProfile = restored
+
+        engine.decoderKind = _decoderKind.value
     }
 
     fun start() {
@@ -108,6 +124,25 @@ class BeatLightViewModel(
         prefs?.edit()?.putFloat(KEY_TRIGGER_OFFSET, clamped)?.apply()
     }
 
+    /**
+     * Chooses the decoder for the next session.
+     *
+     * A running session is restarted, because swapping a decoder mid-flight
+     * would race the analysis thread against whatever state it carries. The
+     * restart is a second of darkness, which is the honest cost of the change.
+     */
+    fun setDecoder(kind: BeatDecoderKind) {
+        if (_decoderKind.value == kind) return
+        _decoderKind.value = kind
+        engine.decoderKind = kind
+        prefs?.edit()?.putString(KEY_DECODER, kind.name)?.apply()
+
+        if (session?.isActive?.value == true) {
+            session.stop()
+            session.start()
+        }
+    }
+
     /** Pins [profile], or returns to the classifier when it is null. */
     fun setManualProfile(profile: EffectProfile?) {
         _manualProfileId.value = profile?.id
@@ -126,5 +161,6 @@ class BeatLightViewModel(
         // SharedPreferences keys the view model itself reads and writes.
         internal const val KEY_TRIGGER_OFFSET = "beatlight_trigger_offset_ms"
         internal const val KEY_MANUAL_PROFILE = "beatlight_manual_profile_id"
+        internal const val KEY_DECODER = "beatlight_decoder"
     }
 }
