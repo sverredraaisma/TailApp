@@ -13,6 +13,22 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "1.0"
+
+        externalNativeBuild {
+            cmake {
+                // Oboe's prefab package is built against the shared STL; linking
+                // the static one alongside it is the classic way to end up with
+                // two copies of the C++ runtime in one process.
+                arguments += "-DANDROID_STL=c++_shared"
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
     }
 
     buildTypes {
@@ -27,6 +43,8 @@ android {
 
     buildFeatures {
         compose = true
+        // Lets CMake resolve Oboe's headers and .so straight out of its AAR.
+        prefab = true
     }
 
     composeOptions {
@@ -70,6 +88,10 @@ dependencies {
     implementation("androidx.core:core-ktx:1.12.0")
 
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
+
+    // Low-latency mic capture. Picks AAudio or OpenSL ES per device; the JNI
+    // bridge lives in src/main/cpp.
+    implementation("com.google.oboe:oboe:1.10.0")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.7.3")
