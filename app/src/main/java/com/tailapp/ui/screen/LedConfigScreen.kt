@@ -193,12 +193,25 @@ fun LedConfigScreen(
                         modifier = Modifier.fillMaxWidth()
                     )
                     Spacer(Modifier.height(4.dp))
-                    Text(
-                        "Local approximation of what the tail should be showing right now — " +
-                            "not a live feed from the device.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    // Direct mode bypasses the effect stack entirely, so while
+                    // BeatLight is streaming this preview describes a stack the
+                    // device is not currently rendering. Saying so beats showing
+                    // a confident picture of the wrong thing.
+                    if (state.directModeActive) {
+                        Text(
+                            "BeatLight is streaming frames directly — the device is not " +
+                                "showing this effect stack right now.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.tertiary
+                        )
+                    } else {
+                        Text(
+                            "Local approximation of what the tail should be showing right now — " +
+                                "not a live feed from the device.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
             }
 
