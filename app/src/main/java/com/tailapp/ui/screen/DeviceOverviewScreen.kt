@@ -59,6 +59,7 @@ fun DeviceOverviewScreen(
     onNavigateToLed: () -> Unit,
     onNavigateToMotion: () -> Unit,
     onNavigateToAudio: () -> Unit,
+    onNavigateToBeatLight: () -> Unit,
     onDisconnected: () -> Unit
 ) {
     val state by viewModel.deviceState.collectAsStateWithLifecycle()
@@ -314,6 +315,7 @@ fun DeviceOverviewScreen(
                 Button(onClick = onNavigateToMotion) { Text("Motion Config") }
                 Button(onClick = onNavigateToLed) { Text("LED Config") }
                 Button(onClick = onNavigateToAudio) { Text("Audio Config") }
+                Button(onClick = onNavigateToBeatLight) { Text("BeatLight") }
             }
 
             Spacer(Modifier.height(16.dp))

@@ -65,12 +65,6 @@ fun LedPreview(
         return
     }
 
-    // Same normalised coordinate map LedStackRenderer feeds every effect, so
-    // coords[i] lines up with frame.packed(i) below.
-    val coords = remember(ledsPerRing) { LedLayout.coordsFor(ledsPerRing) }
-    val numRings = ledsPerRing.size
-    val maxRowCount = ledsPerRing.maxOrNull() ?: 1
-
     var frame by remember(previewClock) { mutableStateOf<PixelBuffer?>(null) }
 
     // Drives the animation from the Compose frame clock - no background
@@ -91,6 +85,32 @@ fun LedPreview(
         onDispose { previewClock.reset() }
     }
 
+    LedStrip(pixels = frame, ledsPerRing = ledsPerRing, modifier = modifier)
+}
+
+/**
+ * Draws one rendered frame of the strip, positioned by [ledsPerRing]'s ring
+ * layout - the same drawing code [LedPreview] uses for its live replay of the
+ * device's own effect stack, extracted so any other screen showing a
+ * [PixelBuffer] (e.g. the BeatLight monitor) doesn't reimplement it.
+ *
+ * [pixels] is nullable so a caller can show the strip's frame (background,
+ * sizing) before the first frame has rendered, exactly as [LedPreview] did
+ * before this was split out: no dots draw until pixels arrive, but the canvas
+ * itself doesn't flash a placeholder in the meantime.
+ */
+@Composable
+fun LedStrip(
+    pixels: PixelBuffer?,
+    ledsPerRing: List<Int>,
+    modifier: Modifier = Modifier,
+) {
+    // Same normalised coordinate map LedStackRenderer feeds every effect, so
+    // coords[i] lines up with frame.packed(i) below.
+    val coords = remember(ledsPerRing) { LedLayout.coordsFor(ledsPerRing) }
+    val numRings = ledsPerRing.size
+    val maxRowCount = ledsPerRing.maxOrNull() ?: 1
+
     val unlitColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = UNLIT_ALPHA)
     val backgroundColor = MaterialTheme.colorScheme.surfaceVariant
 
@@ -101,7 +121,7 @@ fun LedPreview(
             .clip(RoundedCornerShape(12.dp))
             .background(backgroundColor)
     ) {
-        val f = frame ?: return@Canvas
+        val f = pixels ?: return@Canvas
         drawLedStrip(coords, f, maxRowCount, numRings, unlitColor)
     }
 }
@@ -167,8 +187,9 @@ private fun DrawScope.drawLedStrip(
     }
 }
 
+/** Shown in place of the strip when there is no layout (or no data) to draw yet. */
 @Composable
-private fun LedPreviewPlaceholder(modifier: Modifier = Modifier) {
+fun LedPreviewPlaceholder(modifier: Modifier = Modifier) {
     Box(
         modifier = modifier
             .fillMaxWidth()

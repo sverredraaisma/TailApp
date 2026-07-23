@@ -17,6 +17,9 @@ sealed class NavRoutes(val route: String) {
     data object AudioConfig : NavRoutes("device/{address}/audio") {
         fun create(address: String) = "device/${URLEncoder.encode(address, "UTF-8")}/audio"
     }
+    data object BeatLight : NavRoutes("device/{address}/beatlight") {
+        fun create(address: String) = "device/${URLEncoder.encode(address, "UTF-8")}/beatlight"
+    }
 
     companion object {
         fun decodeAddress(encoded: String?): String? =

@@ -11,11 +11,13 @@ import androidx.navigation.compose.composable
 import androidx.navigation.navArgument
 import com.tailapp.di.AppContainer
 import com.tailapp.ui.screen.AudioConfigScreen
+import com.tailapp.ui.screen.BeatLightScreen
 import com.tailapp.ui.screen.DeviceOverviewScreen
 import com.tailapp.ui.screen.LedConfigScreen
 import com.tailapp.ui.screen.MotionConfigScreen
 import com.tailapp.ui.screen.ScanScreen
 import com.tailapp.viewmodel.AudioConfigViewModel
+import com.tailapp.viewmodel.BeatLightViewModel
 import com.tailapp.viewmodel.DeviceOverviewViewModel
 import com.tailapp.viewmodel.LedConfigViewModel
 import com.tailapp.viewmodel.MotionConfigViewModel
@@ -55,6 +57,7 @@ fun TailAppNavHost(
                 onNavigateToLed = { navController.navigate(NavRoutes.LedConfig.create(address)) },
                 onNavigateToMotion = { navController.navigate(NavRoutes.MotionConfig.create(address)) },
                 onNavigateToAudio = { navController.navigate(NavRoutes.AudioConfig.create(address)) },
+                onNavigateToBeatLight = { navController.navigate(NavRoutes.BeatLight.create(address)) },
                 onDisconnected = {
                     navController.popBackStack(NavRoutes.Scan.route, inclusive = false)
                 }
@@ -89,6 +92,22 @@ fun TailAppNavHost(
                 AudioConfigViewModel(container.deviceRepository, container.fftStreamManager, container.audioPrefs)
             })
             AudioConfigScreen(viewModel = vm, onBack = { navController.popBackStack() })
+        }
+
+        composable(
+            route = NavRoutes.BeatLight.route,
+            arguments = listOf(navArgument("address") { type = NavType.StringType })
+        ) {
+            val vm: BeatLightViewModel = viewModel(factory = factory {
+                BeatLightViewModel(
+                    container.deviceRepository,
+                    container.lightingEngine,
+                    container.lightingPreview,
+                    container.beatLightSession,
+                    container.beatLightPrefs
+                )
+            })
+            BeatLightScreen(viewModel = vm, onBack = { navController.popBackStack() })
         }
     }
 }
