@@ -50,6 +50,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.tailapp.model.BlendMode
 import com.tailapp.model.LedEffect
 import com.tailapp.ui.components.EffectParameterSlider
+import com.tailapp.ui.components.LedPreview
 import com.tailapp.viewmodel.LedConfigViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -177,6 +178,31 @@ fun LedConfigScreen(
                 }
                 Spacer(Modifier.height(16.dp))
             }
+
+            // Live preview - computed locally from the same effect stack the
+            // firmware runs, since the device never streams its frame buffer
+            // back. Sits above the layer list so an edit's effect is visible
+            // right next to the controls that caused it.
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text("Live Preview", style = MaterialTheme.typography.titleMedium)
+                    Spacer(Modifier.height(8.dp))
+                    LedPreview(
+                        ledState = ledState,
+                        previewClock = viewModel.previewClock,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "Local approximation of what the tail should be showing right now — " +
+                            "not a live feed from the device.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(16.dp))
 
             // Layers. Slots cleared with LCMD_REMOVE_LAYER keep their index on the
             // device, so render by real index and skip the empty ones.

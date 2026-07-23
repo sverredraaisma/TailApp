@@ -76,7 +76,7 @@ fun TailAppNavHost(
             arguments = listOf(navArgument("address") { type = NavType.StringType })
         ) {
             val vm: LedConfigViewModel = viewModel(factory = factory {
-                LedConfigViewModel(container.deviceRepository)
+                LedConfigViewModel(container.deviceRepository, container.fftStreamManager)
             })
             LedConfigScreen(viewModel = vm, onBack = { navController.popBackStack() })
         }

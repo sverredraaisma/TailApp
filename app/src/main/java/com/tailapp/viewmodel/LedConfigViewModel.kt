@@ -7,17 +7,23 @@ import android.net.Uri
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.tailapp.audio.FftResult
+import com.tailapp.audio.FftStreamManager
+import com.tailapp.led.ImageData
+import com.tailapp.led.LedPreviewClock
 import com.tailapp.model.DeviceState
 import com.tailapp.repository.DeviceRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 class LedConfigViewModel(
-    private val deviceRepository: DeviceRepository
+    private val deviceRepository: DeviceRepository,
+    private val fftStreamManager: FftStreamManager? = null
 ) : ViewModel() {
 
     val deviceState: StateFlow<DeviceState> = deviceRepository.deviceState
@@ -27,6 +33,46 @@ class LedConfigViewModel(
 
     private val _uploadError = MutableStateFlow<String?>(null)
     val uploadError: StateFlow<String?> = _uploadError.asStateFlow()
+
+    /**
+     * Bytes of the last image this app successfully uploaded, kept purely so
+     * the live preview's Image layer has something to render - the firmware
+     * never reports uploaded image bytes back (FF03 upload is write-only; see
+     * [com.tailapp.led.effects.ImageRenderer]). This only covers images
+     * uploaded *this* session: an Image layer restored from a device that
+     * already had one stored (or uploaded in a previous app session) has no
+     * bytes here and can't be previewed - the device has no way to hand them
+     * back either way.
+     */
+    private var lastUploadedImage: ImageData? = null
+
+    /** Drives [com.tailapp.ui.components.LedPreview]; see its and [LedPreviewClock]'s KDoc. */
+    val previewClock = LedPreviewClock(imageSupplier = { lastUploadedImage })
+
+    init {
+        // Feed the same FFT frames the app streams to the device (FF05) into
+        // the preview's audio source, so Audio Power/Bar/Freq Bars layers
+        // animate here too. `filterNotNull` also does the "don't write while
+        // not streaming" job: FftStreamManager.stop() nulls latestResult out,
+        // so AudioLevelSource is simply left alone to go stale on its own
+        // 200ms clock - the same as it would if the device stopped receiving
+        // FF05 frames.
+        fftStreamManager?.let { manager ->
+            viewModelScope.launch {
+                manager.latestResult.filterNotNull().collect { onFftResult(it) }
+            }
+        }
+    }
+
+    /**
+     * Maps one FF05-shaped [FftResult] into [previewClock]'s [com.tailapp.led.AudioLevelSource],
+     * the same way the firmware's own `FftBuffer::write` would. Internal (rather
+     * than private) so it's directly unit-testable without needing a real
+     * [FftStreamManager], which requires an Android `Context` this doesn't.
+     */
+    internal fun onFftResult(result: FftResult) {
+        previewClock.audio.write(result.loudness.toInt() and 0xFF, result.bins)
+    }
 
     fun setLayerEffect(layer: Byte, effectId: Byte, blendMode: Byte) {
         viewModelScope.launch { deviceRepository.setLayerEffect(layer, effectId, blendMode) }
@@ -97,7 +143,12 @@ class LedConfigViewModel(
                     chunkSize = chunkSize,
                     onProgress = { _uploadProgress.value = it }
                 )
-                if (!ok) {
+                if (ok) {
+                    // Only cache on a confirmed accept - the preview should
+                    // reflect what the device actually has, not what we merely
+                    // attempted to send.
+                    lastUploadedImage = ImageData(rgb, dim, dim)
+                } else {
                     _uploadError.value = "Image upload failed — the device did not accept all writes"
                 }
             } catch (e: Exception) {

@@ -24,6 +24,17 @@ class FftStreamManager(
     private val _isStreaming = MutableStateFlow(false)
     val isStreaming: StateFlow<Boolean> = _isStreaming.asStateFlow()
 
+    /**
+     * The most recent frame computed while streaming - additive to the FF05
+     * send path below, for local consumers (the LED preview) that want the
+     * same loudness/bins without re-deriving them from raw PCM. Cleared on
+     * [stop] so a consumer that only forwards frames while this is non-null
+     * naturally stops as soon as the mic does, rather than replaying a stale
+     * frame from the last session.
+     */
+    private val _latestResult = MutableStateFlow<FftResult?>(null)
+    val latestResult: StateFlow<FftResult?> = _latestResult.asStateFlow()
+
     /** Set when [start] could not open the microphone; cleared on the next attempt. */
     private val _error = MutableStateFlow<String?>(null)
     val error: StateFlow<String?> = _error.asStateFlow()
@@ -58,6 +69,7 @@ class FftStreamManager(
                     if (read > 0) {
                         val samples = if (read == buffer.size) buffer else buffer.copyOf(read)
                         val result = fftProcessor.process(samples, AudioCaptureManager.SAMPLE_RATE)
+                        _latestResult.value = result
                         deviceRepository.sendFftFrame(result.loudness, result.bins)
                     } else if (read < 0) {
                         Log.w(TAG, "AudioRecord.read returned $read, stopping capture")
@@ -77,6 +89,7 @@ class FftStreamManager(
         if (!_isStreaming.value) return
         _isStreaming.value = false
         deviceRepository.setFftStreamActive(false)
+        _latestResult.value = null
         streamJob?.cancel()
         streamJob = null
         // AudioRecord cleanup happens in the job's finally block
