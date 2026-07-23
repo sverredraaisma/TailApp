@@ -3,9 +3,20 @@ package com.tailapp.audio
 /**
  * Front-end geometry shared by every analysis tier.
  *
- * The defaults match BeatNet's `log_spect.py` (22050 Hz, 2048-sample window,
- * 441-sample hop = 50 frames/sec, logarithmically spaced filterbank) so the
- * DSP beat tracker and a future ONNX CRNN can consume the exact same frames.
+ * The defaults were *intended* to match BeatNet's `log_spect.py` so a future
+ * ONNX CRNN could consume the same frames. Measured against BeatNet's own
+ * extractor, they do not: the sample rate, hop, bands-per-octave and log
+ * compression agree, but the window (2048 vs 1411), the band count (205 vs 136),
+ * the lowest band centre, the filter normalisation, the frame alignment and the
+ * model's input width all differ — mean absolute difference 0.210 on a 0..1.954
+ * range. `BeatNetFrontEndParityTest` pins every one of those divergences, and
+ * `docs/beat-model.md` has the full table.
+ *
+ * These defaults are therefore *this pipeline's* geometry, not BeatNet's, and
+ * they are load-bearing for the DSP tracker and both other tiers. Feeding the
+ * CRNN from them was measured to produce half-time beats and a collapsed
+ * downbeat channel, so `CrnnActivationSource` refuses them rather than adapting.
+ * Running the CRNN needs its own extractor, not a tweak here.
  *
  * @param sampleRate analysis rate; capture is resampled to this.
  * @param frameSize STFT window length in samples.

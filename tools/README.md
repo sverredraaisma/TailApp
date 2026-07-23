@@ -1,12 +1,26 @@
-# tools/ — model preparation for the genre classifier
+# tools/ — model preparation
 
-Three scripts that turn MTG's published Essentia models into the two ONNX files
-`com.tailapp.genre.OnnxGenreClassifier` runs, plus the reference dump the Kotlin
-unit tests diff against.
+Offline scripts that turn published models into the ONNX files the app runs, plus
+the reference dumps the Kotlin unit tests diff against. Two independent sets:
+
+| | Scripts | Model | Doc |
+|---|---|---|---|
+| genre tier | `download_models.py`, `convert_to_onnx.py`, `dump_reference.py` | Essentia Discogs-EffNet + genre_discogs400 | [`docs/genre-model.md`](../docs/genre-model.md) |
+| beat tier | `download_beatnet.py`, `export_beatnet.py`, `dump_beat_reference.py` | BeatNet CRNN | [`docs/beat-model.md`](../docs/beat-model.md) |
 
 Nothing in here is part of the Gradle build. It runs once, on a workstation, when
-the models need (re)building. The app never calls out to a network at run time —
-see `docs/genre-model.md`.
+the models need (re)building. The app never calls out to a network at run time.
+
+**Two environments, on purpose.** The genre scripts use `tools/pyproject.toml`
+(TensorFlow, Python 3.11) via `uv sync`. The beat scripts carry their own
+dependencies inline (PEP 723) and are run with `uv run tools/<script>.py`, which
+builds the environment each one needs and nothing else — PyTorch for the export,
+madmom on Python 3.9 for the reference dump. One lockfile holding TensorFlow,
+PyTorch *and* madmom would be a 2 GB resolver fight for no benefit.
+
+---
+
+# The genre classifier
 
 ## Licence and attribution
 
@@ -149,3 +163,158 @@ done
 Until all three are present `GenreModelStore.isInstalled` is false, `AppContainer`
 uses `NoGenreClassifier`, and the lighting runs on the default profile. See
 `docs/genre-model.md`.
+
+---
+
+# The beat model (BeatNet CRNN)
+
+Three scripts that turn BeatNet's published checkpoint into the streaming ONNX
+graph `com.tailapp.beat.CrnnActivationSource` runs, plus the reference dump the
+front-end parity tests diff against.
+
+Read [`docs/beat-model.md`](../docs/beat-model.md) before running them — in
+particular the front-end section, which is why the model is not switched on.
+
+## Licence and attribution
+
+> **BeatNet** (`model_1_weights.pt`, inside `BeatNet-1.1.3-py3-none-any.whl`)
+> © Mojtaba Heydari et al., University of Rochester.
+> Published at <https://github.com/mjhydri/BeatNet> under **CC BY 4.0**
+> (<https://creativecommons.org/licenses/by/4.0/>) — the wheel's own `LICENSE`
+> file is the Attribution 4.0 International legal code.
+>
+> Heydari, M., Cwitkowitz, F., & Duan, Z. (2021).
+> *BeatNet: CRNN and Particle Filtering for Online Joint Beat, Downbeat and
+> Meter Tracking.* ISMIR 2021.
+
+CC BY 4.0 permits redistribution and commercial use with attribution, so unlike
+the genre weights there is no licence reason the `.onnx` could not ship. It is
+kept out of git because it is a *build output*: it does not exist upstream, and
+`export_beatnet.py` rebuilds it in seconds.
+
+madmom 0.16.1 (BSD / CC BY-NC-SA, © the madmom authors) is used only here, on the
+workstation, to generate the reference dump. None of it is ported into the app.
+
+## Setup
+
+No `uv sync`. Each script declares its dependencies inline (PEP 723):
+
+```bash
+uv run tools/download_beatnet.py     # stdlib only
+uv run tools/export_beatnet.py       # torch, onnx, onnxruntime  (~250 MB)
+uv run tools/dump_beat_reference.py  # numpy, scipy, librosa, mido, onnxruntime
+```
+
+Both of the latter pin **Python 3.9**, which `uv` fetches as a managed CPython.
+That is madmom's constraint, not a preference: madmom 0.16.1 does
+`from collections import MutableSequence` (gone in 3.10) and uses `np.float`
+(gone in numpy 1.24).
+
+## The scripts, in order
+
+### 1. `download_beatnet.py`
+
+```bash
+uv run tools/download_beatnet.py [--force]
+```
+
+Fetches two archives into `<repo>/models/`, verifies each against the SHA-256
+PyPI publishes, and unpacks them:
+
+| Archive | Size | Unpacked to | What |
+|---|---|---|---|
+| `BeatNet-1.1.3-py3-none-any.whl` | 9.2 MB | `models/beatnet/pkg` | `model.py`, `log_spect.py` and the three 1.6 MB checkpoints |
+| `madmom-0.16.1.tar.gz` | 20.0 MB | `models/madmom` | madmom's sources |
+
+Idempotent: an already-unpacked tree with the right digest is left alone.
+
+Two things it deliberately does *not* do:
+
+- **It does not `pip install BeatNet`.** The package pins `numba==0.54.1`, which
+  resolves against nothing modern, and needs pyaudio and matplotlib for the live
+  streaming and plotting this project does not use. The other two scripts put the
+  unpacked directory on `sys.path` instead, so only torch, numpy, madmom and
+  librosa are ever needed.
+- **It does not `pip install madmom` either.** madmom publishes no wheels, only an
+  sdist that Cythonises three `.pyx` files — so installing it needs a C toolchain
+  (on Windows, a Windows SDK that ships separately from the MSVC compiler). None
+  of the compiled modules are on the path this project uses: they are an HMM
+  decoder, a CRF beat decoder and a comb filterbank, all part of madmom's
+  *decoder*. `dump_beat_reference.py` registers namespace stubs for `madmom` and
+  `madmom.audio` so those two `__init__.py` files never execute, and imports the
+  pure-Python feature modules directly. Nothing is patched; the code that runs is
+  upstream's bytes.
+
+### 2. `export_beatnet.py`
+
+```bash
+uv run tools/export_beatnet.py [--model 1|2|3]   # 1 = GTZAN (default)
+```
+
+Writes `<repo>/models/beatnet-crnn-model1.onnx` (1.6 MB, opset 17) and prints the
+resolved tensor names. Read them from the output; do not assume them. As of the
+last run:
+
+```
+  arch     conv1=(2, 1, 10) linear0=(150, 262) lstm=LSTM(150, 150, layers=2) linear=(3, 150)
+  streaming vs whole-sequence (torch):     max abs diff 3.576e-07
+  exported beatnet-crnn-model1.onnx (1,614,782 bytes, opset 17)
+  input    name='features'   shape=[1, 'frames', 272] type=tensor(float)
+  input    name='h0'         shape=[2, 1, 150] type=tensor(float)
+  input    name='c0'         shape=[2, 1, 150] type=tensor(float)
+  output   name='probs'      shape=[1, 3, 'frames'] type=tensor(float)
+  output   name='hn'         shape=[2, 1, 150] type=tensor(float)
+  output   name='cn'         shape=[2, 1, 150] type=tensor(float)
+  whole-sequence ORT vs torch:             max abs diff 3.576e-07
+  frame-by-frame ORT vs whole-sequence:    max abs diff 3.576e-07
+```
+
+The export is not a formality. `BDA.forward` keeps its LSTM state in *instance
+attributes*; exported as-is that state folds into the graph as a constant zero
+and every frame is decoded as if it were the first. The script rewraps the module
+so hidden and cell state are explicit inputs and outputs, folds in the softmax
+`final_pred` applies separately, and refuses to write the file unless streaming
+it frame by frame reproduces a whole-sequence PyTorch run.
+
+It also refuses to export if the checkpoint has **missing keys**. BeatNet loads
+with `strict=False`, which would silently leave a renamed layer at its random
+initialisation.
+
+### 3. `dump_beat_reference.py`
+
+```bash
+uv run tools/dump_beat_reference.py [--model 1|2|3]
+```
+
+Synthesises the same deterministic 120 BPM test signal `dump_reference.py` uses,
+at 22050 Hz for 6 s (no audio file is committed, and none is needed), runs
+**BeatNet's own `LOG_SPECT`** and then the exported graph on it, and writes
+`<repo>/testdata/beat_reference.json`: the signal, the 300×272 feature matrix,
+the 300×3 activations, madmom's resolved filterbank geometry, and the graph's
+tensor names and shapes — as base64 little-endian float32.
+
+`BeatNetFrontEndParityTest` reads that file and measures our `FeatureExtractor`
+against it. **It does not match, and that is the point of the script.** Last
+measured: mean |ours − BeatNet| = **0.210** over a reference range of 0..1.954,
+with six of eight front-end properties differing. See `docs/beat-model.md`.
+
+`CrnnActivationSourceTest` also reads it, and gets an exact match on the one
+thing our Kotlin *does* reproduce: the stacked positive difference, max
+|Kotlin − madmom| = **0.0** over all 300×272 values.
+
+If the file is missing the parity tests skip with a reason rather than failing.
+
+## Installing the model on a device
+
+```bash
+adb shell run-as com.tailapp mkdir -p files/beat-models
+adb push models/beatnet-crnn-model1.onnx /data/local/tmp/beatnet-crnn-model1.onnx
+adb shell run-as com.tailapp cp /data/local/tmp/beatnet-crnn-model1.onnx \
+    files/beat-models/beatnet-crnn-model1.onnx
+```
+
+Until it is present `BeatModelStore.isInstalled` is false and `AppContainer` uses
+`SpectralFluxActivationSource`. **Installing it is not currently enough to switch
+the CRNN on**: `CrnnActivationSource.create` also checks that the feature frames
+it would be fed are BeatNet's, and on the shipped `FeatureConfig` they are not.
+It logs which properties mismatched. See `docs/beat-model.md`.
