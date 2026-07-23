@@ -2,11 +2,16 @@ package com.tailapp.di
 
 import android.content.Context
 import android.content.SharedPreferences
+import com.tailapp.audio.FeatureConfig
 import com.tailapp.audio.FftStreamManager
 import com.tailapp.ble.BleConnectionManager
 import com.tailapp.ble.BleScanner
 import com.tailapp.effects.BeatLightSession
 import com.tailapp.effects.LightingEngine
+import com.tailapp.genre.GenreClassifier
+import com.tailapp.genre.GenreModelStore
+import com.tailapp.genre.NoGenreClassifier
+import com.tailapp.genre.OnnxGenreClassifier
 import com.tailapp.lighting.CompositeLightingOutput
 import com.tailapp.lighting.PreviewLightingOutput
 import com.tailapp.lighting.TailDirectLedOutput
@@ -18,6 +23,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import java.io.File
 
 class AppContainer(context: Context) {
     private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -50,10 +56,27 @@ class AppContainer(context: Context) {
         lightingPreview
     )
 
+    /**
+     * Where the Discogs-EffNet artifacts live once installed. They are not in the
+     * APK — the weights are CC BY-NC-ND, see `docs/genre-model.md`.
+     */
+    val genreModelStore = GenreModelStore(File(context.filesDir, GenreModelStore.DIRECTORY_NAME))
+
+    /**
+     * The real classifier when its models are on disk, the inert stand-in
+     * otherwise. `LightingEngine` sizes the context-tier window from its own
+     * `FeatureConfig.sampleRate`, so that is the rate the classifier is told to
+     * expect; it resamples to the model's 16 kHz itself.
+     */
+    private val genreClassifier: GenreClassifier =
+        OnnxGenreClassifier.create(genreModelStore, inputSampleRate = FeatureConfig().sampleRate)
+            ?: NoGenreClassifier
+
     val lightingEngine = LightingEngine(
         output = lightingOutput,
         ledLayout = ledLayout,
-        scope = applicationScope
+        scope = applicationScope,
+        genreClassifier = genreClassifier
     )
 
     val beatLightSession = BeatLightSession(context, lightingEngine, applicationScope)

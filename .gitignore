@@ -14,3 +14,13 @@
 .cxx
 local.properties
 app/build/
+
+# Genre-classifier model artifacts. Essentia's Discogs-EffNet weights are
+# CC BY-NC-ND 4.0: downloading and running the originals is fine, redistributing
+# them (or the ONNX conversions derived from them) is not. tools/download_models.py
+# and tools/convert_to_onnx.py rebuild everything in here on demand.
+/models/
+
+# uv-managed virtualenv for tools/
+tools/.venv/
+tools/__pycache__/

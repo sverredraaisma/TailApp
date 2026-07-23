@@ -1,0 +1,37 @@
+[project]
+name = "tailapp-genre-tools"
+version = "0.1.0"
+description = "Offline model-preparation scripts for TailApp's on-device genre classifier"
+readme = "README.md"
+
+# TensorFlow publishes no wheels for 3.13/3.14 (the system interpreter here is
+# 3.14), so the interpreter is pinned to one it does support. `uv sync` will
+# fetch a managed CPython 3.11 rather than touching the system install.
+requires-python = ">=3.11,<3.12"
+
+dependencies = [
+    # TF is needed only to *read* the frozen graphs; inference is done by
+    # onnxruntime so the Python and the Kotlin sides run the same engine.
+    #
+    # On Windows the `tensorflow-cpu` wheel is a 2 KB stub whose only job is to
+    # pull in `tensorflow-intel`, and it declares that in per-wheel metadata that
+    # uv's universal resolver does not see — install it here and you get the stub
+    # and no `tensorflow` module. Naming the real distribution per platform is
+    # what makes `uv sync` reproducible on all three.
+    "tensorflow-intel==2.15.1 ; sys_platform == 'win32'",
+    "tensorflow-cpu==2.15.1 ; sys_platform != 'win32'",
+    "tf2onnx==1.16.1",
+    "onnx==1.16.1",
+    "onnxruntime==1.17.3",
+    # TF 2.15 is a numpy-1 build; tf2onnx 1.16 has not been ported to numpy 2.
+    "numpy==1.26.4",
+    # The one version both TF 2.15 and tf2onnx 1.16 accept.
+    "protobuf==3.20.3",
+    # TF 2.15 pulls this in unconditionally, but upstream stopped publishing
+    # Windows wheels after 0.31.0. Nothing here reads from GCS; the pin exists
+    # only so the resolver can finish on win_amd64.
+    "tensorflow-io-gcs-filesystem==0.31.0 ; sys_platform == 'win32'",
+]
+
+[tool.uv]
+package = false

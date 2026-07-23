@@ -93,6 +93,20 @@ dependencies {
     // bridge lives in src/main/cpp.
     implementation("com.google.oboe:oboe:1.10.0")
 
+    // On-device genre classification (com.tailapp.genre). Runs the Discogs-EffNet
+    // embedding model and its genre head; the weights are not in this repo, see
+    // docs/genre-model.md.
+    //
+    // CPU execution provider only, deliberately: NNAPI is deprecated as of
+    // Android 15, and ORT's NNAPI EP partitions an EfficientNet back onto the CPU
+    // for most of its ops anyway, so a delegate buys overhead and a second code
+    // path. One 2-second patch every 3 seconds is a few tens of ms of CPU.
+    //
+    // Not cheap: 116 MB of the 139 MB debug APK, because AGP stores .so
+    // uncompressed and this module ships all four ABIs. An arm64-only,
+    // compressed release build carries ~11 MB of it. See docs/genre-model.md.
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.27.0")
+
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.7.3")
 }
