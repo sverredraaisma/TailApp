@@ -14,8 +14,8 @@ This document is the map. The wire protocol lives in TailFirmware's
                                               │
         ┌─────────────────────────────────────┼──────────────────────────────┐
         ▼                                     ▼                              ▼
-  ActivationSource                    Transient statistics            Embedding model
-  (spectral flux now,                 (RMS / bass / centroid           (ONNX, later)
+  ActivationSource                    Transient statistics         Discogs-EffNet
+  (spectral flux now,                 (RMS / bass / centroid         (ONNX, on-device)
    ONNX CRNN later)                    / onset density)                      │
         ▼                                     ▼                        ┌─────┴─────┐
   TempoEstimator ──► BeatTracker        DropDetector                GenreHead  SectionState
@@ -40,7 +40,7 @@ This document is the map. The wire protocol lives in TailFirmware's
 |---|---|---|---|
 | Beat | 50 fps (441-sample hop @ 22050 Hz) | `BeatEvent` | per-beat triggers |
 | Transient | ~5-10 Hz | `DropEvent`, `SectionStateUpdate` | drop hits, build-up ramps, breakdown dimming |
-| Context | every 1-3 s | `GenreState` | which effect profile is active |
+| Context | every 3 s (one 2.048 s Discogs-EffNet patch) | `GenreState` | which effect profile is active |
 
 ## Module map
 
@@ -49,7 +49,7 @@ This document is the map. The wire protocol lives in TailFirmware's
 | `com.tailapp.audio` | `AudioSource` (Oboe + `AudioRecord` fallback), `FloatRingBuffer`, `FeatureConfig`/`FeatureFrame`, `FeatureExtractor`, `dsp/` |
 | `com.tailapp.beat` | `ActivationSource`, `TempoEstimator`, `BeatTracker`, `BeatEvent` |
 | `com.tailapp.drop` | transient detector, section-state tracker, `DropEvent`, `SectionState` |
-| `com.tailapp.genre` | `GenreState`, classifier wrapper |
+| `com.tailapp.genre` | `GenreState`, `GenreClassifier`, `EffnetMelSpectrogram`, `OnnxGenreClassifier`, `GenreModelStore` — see [genre-model.md](genre-model.md) |
 | `com.tailapp.effects` | `EffectProfile`, `EffectController`, `ReactiveRenderer` |
 | `com.tailapp.lighting` | `LightingOutput`, `TailDirectLedOutput`, preview sink |
 | `com.tailapp.led` | Kotlin port of the firmware LED engine — coordinates, effects, compositor |
@@ -80,7 +80,7 @@ to TailApp changed four things; each was a deliberate call, not a shortcut.
 |---|---|---|
 | WLED over UDP/OSC as the lighting output | The tail over BLE FF0A direct pixel streaming | The lighting hardware is the tail. `LightingOutput` stays the seam, so a WLED backend is still a drop-in. |
 | BeatNet+ CRNN (ONNX) from the start | DSP onset/tempo tracker first, behind `ActivationSource` | Ships a working, fully-tested pipeline without a multi-gigabyte Python toolchain in the critical path. The CRNN swaps in behind the same interface. |
-| Genre head trained on the owner's labelled library | Generalised pretrained classifier only | Requested: no personally-trained model. |
+| Genre head trained on the owner's labelled library | Essentia's Discogs-EffNet + `genre_discogs400`, unmodified | Requested: no personally-trained model. Its weights are CC BY-NC-ND, so they are fetched and converted by `tools/`, never committed — the app ships the code and the models are installed onto the device. |
 | Section head trained on hand-marked timestamps | Heuristic section-state machine on the transient tier | The training data for it was the same labelled set that was dropped. Thresholds are config, not constants. |
 
 Oboe *was* kept as specified: capture runs through `app/src/main/cpp`, with an
@@ -99,18 +99,42 @@ covered by `gradlew.bat testDebugUnitTest`:
   tempo and beat-alignment error against a known grid.
 - The LED suites assert parity with the firmware's arithmetic, not just internal
   consistency.
+- `EffnetMelSpectrogramTest` asserts parity with the *model's* front-end: it
+  diffs against a reference dump from `tools/dump_reference.py` and skips with a
+  reason if that dump has not been generated. A neural front-end has no
+  self-evident right answer to assert; matching what the model was trained with
+  is the only meaningful check.
 
 ## Status
 
 | Phase | State |
 |---|---|
-| Contracts + license | done |
-| Oboe capture | in progress |
-| Feature extraction | in progress |
-| Beat / downbeat / tempo (DSP) | in progress |
-| FF0A direct streaming | in progress |
-| LED engine port | in progress |
-| Drop / build-up / breakdown | not started |
-| Effect controller + profiles | not started |
-| UI (monitor, preview, calibration) | not started |
-| ONNX beat + genre models | not started |
+| Contracts + AGPL-3.0 license | done |
+| Oboe capture + ring buffer | done |
+| Feature extraction (shared front-end) | done |
+| Beat / downbeat / tempo (DSP decoder) | done |
+| Drop / build-up / breakdown | done |
+| FF0A direct pixel streaming | done |
+| LED engine port + live preview | done |
+| Effect profiles, controller, renderer | done |
+| LightingEngine + session + service | done |
+| BeatLight screen (monitor, calibration, profiles) | done |
+| ONNX genre model (Discogs-EffNet) | done — installed onto the device, not shipped; falls back to `NoGenreClassifier` when absent |
+| ONNX beat model (BeatNet CRNN) | behind `ActivationSource`, not yet implemented |
+| Particle-filter beat decoder | the intended replacement for `BeatTracker`; not yet implemented |
+| On-device verification | see [beatlight-manual-checks.md](beatlight-manual-checks.md) — needs a phone and the tail |
+
+### What is deliberately not done
+
+The two neural beat pieces from the original plan — BeatNet's CRNN and its
+particle-filter decoder — are unimplemented on purpose, in that order of intent.
+The DSP tracker in `beat/` is honest about being the MVP the plan asks for
+first: measured on synthetic grids it holds 90/128/174 BPM to within 1 BPM with
+over 90% of beats inside the standard ±70 ms window, and it recovers from a
+tempo change within a few bars. It is weaker than a particle filter on sparse
+percussion, rubato and half-time feels, and `docs/beatlight-manual-checks.md`
+asks specifically for those cases to be reported.
+
+Because `ActivationSource` is the seam, the CRNN replaces only the activation
+function, and the decoder replaces only `BeatTracker` — neither touches the
+front-end, the transient tier or anything downstream.

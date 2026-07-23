@@ -22,6 +22,15 @@ android {
                 arguments += "-DANDROID_STL=c++_shared"
             }
         }
+
+        ndk {
+            // ONNX Runtime dominates the APK — ~29 MB of native code per ABI,
+            // stored uncompressed. Shipping the two ABIs that matter (arm64 for
+            // every phone this targets in practice, x86_64 for the emulator)
+            // roughly halves it. A genuinely 32-bit ARM device would need
+            // armeabi-v7a added back here.
+            abiFilters += listOf("arm64-v8a", "x86_64")
+        }
     }
 
     externalNativeBuild {

@@ -79,7 +79,13 @@ class AppContainer(context: Context) {
         genreClassifier = genreClassifier
     )
 
-    val beatLightSession = BeatLightSession(context, lightingEngine, applicationScope)
+    /**
+     * The FFT stream is handed in so a starting session can stop it: both want
+     * the microphone, and a second capture generally gets silence rather than an
+     * error.
+     */
+    val beatLightSession =
+        BeatLightSession(context, lightingEngine, applicationScope, fftStreamManager)
 
     val beatLightPrefs: SharedPreferences =
         context.getSharedPreferences("beatlight_config", Context.MODE_PRIVATE)

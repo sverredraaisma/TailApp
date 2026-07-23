@@ -3,6 +3,7 @@ package com.tailapp.effects
 import android.content.Context
 import android.content.Intent
 import android.util.Log
+import com.tailapp.audio.FftStreamManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -22,7 +23,8 @@ import kotlinx.coroutines.launch
 class BeatLightSession(
     private val context: Context,
     val engine: LightingEngine,
-    private val scope: CoroutineScope
+    private val scope: CoroutineScope,
+    private val fftStreamManager: FftStreamManager? = null
 ) {
     val state: StateFlow<BeatLightState> get() = engine.state
 
@@ -46,6 +48,16 @@ class BeatLightSession(
         if (_isActive.value) return
         _isActive.value = true
         _error.value = null
+
+        // The FF05 visualiser stream and this session both want the microphone,
+        // and a second capture generally gets silence rather than an error. They
+        // are mutually exclusive anyway: direct mode bypasses the effect stack
+        // the FFT stream feeds, so leaving it running would only burn battery
+        // sending frames nothing renders.
+        if (fftStreamManager?.isStreaming?.value == true) {
+            Log.i(TAG, "stopping the FF05 stream: it and this session cannot share the mic")
+            fftStreamManager.stop()
+        }
 
         transitionJob?.cancel()
         transitionJob = scope.launch {
