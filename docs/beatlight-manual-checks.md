@@ -43,8 +43,34 @@ question the tests cannot answer.
 - [ ] Downbeats land on bar one, not on beat three. Four-to-the-floor material is
       the hardest case here because every beat carries a kick.
 - [ ] Try something sparse — half-time, a breakdown, something with a swung feel.
-      The DSP decoder is expected to be weaker here than the particle filter it is
-      meant to be replaced by; note *how* it fails.
+      Note *how* it fails, not just that it does.
+
+### 3a. Which decoder — the one comparison the tests cannot settle
+
+Both decoders are shipped and switchable in the calibration card, because measured
+head to head neither wins outright:
+
+| | Phase-locked | Particle filter |
+|---|---|---|
+| Tempo precision | ≤0.5 BPM | up to ~2 BPM |
+| Steady material | identical, often beat for beat | identical |
+| Sparse material | never drops a beat | drops ~8% |
+| Heavy syncopation | **emits nothing at all** | tracks it |
+| Cost | negligible | ~100×, still <1% of budget |
+
+The synthetic signals say that much. What they cannot say is which failure you
+actually notice on your music.
+
+- [ ] Play the same track on both, back to back, and say which felt better locked.
+- [ ] Find something heavily syncopated (strong off-beats, broken kick patterns).
+      The phase-locked decoder is expected to go dark on it — its confidence gate
+      never opens. Confirm the particle filter tracks it, and confirm the failure
+      is as stark as predicted.
+- [ ] Check whether the particle filter's looser tempo is visible as drift over a
+      long track, or whether it is invisible in practice.
+
+If one decoder wins on everything you play, that is worth knowing — it would make
+the other a candidate for removal rather than a permanent choice.
 
 ## 4. Drops and sections
 
