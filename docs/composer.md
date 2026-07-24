@@ -159,6 +159,15 @@ target to its own axis limits and shapes it through the jerk-limited profiles,
 which is what makes it safe to drive a physical mechanism from a phone that is
 not real-time.
 
+FF0B has a second caller. `MotionConfigViewModel`'s manual pad steers the tail by
+hand from the motion screen, reporting a drag as a *fraction* of each axis's
+configured travel rather than in degrees — so the pad means the same thing
+whatever limits are set, and its corner is always exactly the corner of the
+mechanism's range. An asymmetric range maps a centred pad to the midpoint, not to
+zero: a mechanism trimmed to 0..60° has no zero position to go to. Streaming is a
+lease on the device's attention rather than a mode, which § "Direct mode is a
+lease, not a mode switch" covers for both streams.
+
 ## Parameters
 
 Each effect declares a schema of `EffectParam`s — `Scalar`, `Color`, `Choice`,
@@ -264,9 +273,13 @@ relationship is a constructor `require` and a test rather than a comment.
 moves, construction fails loudly instead of the session quietly stopping being
 ours two seconds in.
 
-The motion stream works the same way, with a shorter lease:
-`MotionSystem::STREAM_TIMEOUT_US` is 500 ms, and `MotionConfigViewModel` re-sends
-a held pose every 100 ms. Same shape, same reason — see `beatlight.md`.
+The motion stream (§ "The same analysis can drive the motors") works the same
+way with a shorter lease: `MotionSystem::STREAM_TIMEOUT_US` is 500 ms, because a
+mechanism left holding a pose is a worse failure than a strip left holding a
+colour. The manual pad re-sends its held pose every 100 ms for that reason, and
+letting go simply stops sending rather than commanding a centre position —
+releasing should give back whatever the device's own pattern was doing, and the
+timeout has to work for the disconnect case anyway.
 
 ## Where it lives
 
