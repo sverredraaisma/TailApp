@@ -23,13 +23,22 @@ import com.tailapp.repository.DeviceRepository
 class TailDirectLedOutput(
     private val repository: DeviceRepository,
     /**
-     * Must stay **below** the firmware's direct-mode stale-frame timeout
-     * (`ConfigManager::DIRECT_FRAME_TIMEOUT_US`, 2 s), or a genuinely idle but
-     * live stream would be mistaken for an abandoned one and the device would
-     * fall back to its own effect stack mid-session.
+     * Must stay **below** [FIRMWARE_STALE_TIMEOUT_MILLIS], or a genuinely idle
+     * but live stream would be mistaken for an abandoned one and the device
+     * would fall back to its own effect stack mid-session.
      */
-    private val keepaliveMillis: Long = 1000L
+    private val keepaliveMillis: Long = DEFAULT_KEEPALIVE_MILLIS
 ) : LightingOutput {
+
+    init {
+        // Asserted rather than merely documented: the two numbers live in
+        // different repositories, so nothing but this check would notice if one
+        // of them moved.
+        require(keepaliveMillis < FIRMWARE_STALE_TIMEOUT_MILLIS) {
+            "keepalive ${keepaliveMillis}ms must stay under the device's " +
+                "${FIRMWARE_STALE_TIMEOUT_MILLIS}ms stale-frame timeout"
+        }
+    }
 
     private var lastFrame: ByteArray? = null
     private var lastSentNanos = Long.MIN_VALUE
@@ -64,8 +73,20 @@ class TailDirectLedOutput(
         lastFrame = frame.bytes.copyOf()
     }
 
-    private companion object {
-        const val TAG = "TailDirectLedOutput"
-        const val NANOS_PER_MILLI = 1_000_000L
+    companion object {
+        /**
+         * TailFirmware `ConfigManager::DIRECT_FRAME_TIMEOUT_US`, in
+         * milliseconds. After this long without an FF0A frame the device
+         * decides the stream was abandoned and resumes its own effect stack —
+         * which is what stops a crashed or backgrounded app leaving the tail
+         * frozen on one frame.
+         */
+        const val FIRMWARE_STALE_TIMEOUT_MILLIS = 2000L
+
+        /** Half the device's timeout, so one lost keepalive is still survivable. */
+        const val DEFAULT_KEEPALIVE_MILLIS = 1000L
+
+        private const val TAG = "TailDirectLedOutput"
+        private const val NANOS_PER_MILLI = 1_000_000L
     }
 }

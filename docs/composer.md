@@ -239,6 +239,35 @@ without being destructible: saving over "Pulse" stores a copy under the same id,
 and resetting deletes that copy so the original reappears. Nothing the user can
 do leaves them with no compositions at all.
 
+## Direct mode is a lease, not a mode switch
+
+Rendering on the phone means the device has to stop rendering for itself, and the
+handover has to survive the phone going away without warning — a crash, a
+backgrounded app, a walk out of range. So direct mode is held as a lease rather
+than toggled: `LCMD_SET_DIRECT_MODE` opens it, every FF0A frame renews it, and
+the device takes it back on its own after
+`ConfigManager::DIRECT_FRAME_TIMEOUT_US` (2 s) without one. The alternative — a
+mode the app switches off when it's done — leaves the tail frozen on whatever
+frame it happened to be showing when the app died.
+
+That gives `TailDirectLedOutput` two jobs that pull against each other. FF0A
+writes are unacknowledged, so skipping frames identical to the last one saves
+real airtime and is worth doing; but skip for too long and a static composition
+looks exactly like an abandoned stream. The keepalive is what separates the two:
+an unchanged frame is resent anyway every
+`TailDirectLedOutput.DEFAULT_KEEPALIVE_MILLIS` (1 s), half the device's timeout,
+so one lost keepalive is still survivable.
+
+The two numbers live in different repositories, which is precisely why the
+relationship is a constructor `require` and a test rather than a comment.
+`FIRMWARE_STALE_TIMEOUT_MILLIS` mirrors the firmware constant; if either side
+moves, construction fails loudly instead of the session quietly stopping being
+ours two seconds in.
+
+The motion stream works the same way, with a shorter lease:
+`MotionSystem::STREAM_TIMEOUT_US` is 500 ms, and `MotionConfigViewModel` re-sends
+a held pose every 100 ms. Same shape, same reason — see `beatlight.md`.
+
 ## Where it lives
 
 | File | Contents |
