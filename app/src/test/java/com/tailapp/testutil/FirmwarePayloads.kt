@@ -4,6 +4,7 @@ import com.tailapp.ble.protocol.Protocol
 import com.tailapp.model.Capabilities
 import com.tailapp.model.ImuConfig
 import com.tailapp.model.LayerConfig
+import com.tailapp.model.LedOutputState
 import com.tailapp.model.MotionLimits
 import com.tailapp.model.MotionSystemState
 import com.tailapp.model.PidGains
@@ -61,10 +62,21 @@ object FirmwarePayloads {
         return w.toByteArray()
     }
 
-    /** FF04 LED state — matrix header plus 39 bytes per layer. */
+    val DEFAULT_OUTPUT: LedOutputState = LedOutputState(
+        brightness = 255,
+        gammaEnabled = true,
+        currentLimitMa = 0,
+        lastPowerScale = 255
+    )
+
+    /**
+     * FF04 LED state — matrix header, 40 bytes per layer, then the output block.
+     * Pass `output = null` for firmware older than protocol v5.
+     */
     fun ledState(
         ledsPerRing: List<Int> = listOf(8, 10, 12, 10, 8),
-        layers: List<LayerConfig> = emptyList()
+        layers: List<LayerConfig> = emptyList(),
+        output: LedOutputState? = DEFAULT_OUTPUT
     ): ByteArray {
         val w = Writer()
         w.u8(ledsPerRing.size)
@@ -78,7 +90,15 @@ object FirmwarePayloads {
             w.bool(layer.flipY)
             w.bool(layer.mirrorX)
             w.bool(layer.mirrorY)
+            w.u8(layer.opacity)
             repeat(8) { w.f32(layer.params.getOrElse(it) { 0f }) }
+        }
+        if (output != null) {
+            w.u8(output.brightness)
+            w.bool(output.gammaEnabled)
+            w.u8(output.currentLimitMa and 0xFF)
+            w.u8((output.currentLimitMa shr 8) and 0xFF)
+            w.u8(output.lastPowerScale)
         }
         return w.toByteArray()
     }
@@ -91,8 +111,9 @@ object FirmwarePayloads {
         flipY: Boolean = false,
         mirrorX: Boolean = false,
         mirrorY: Boolean = false,
-        params: List<Float> = List(8) { 0f }
-    ) = LayerConfig(effectId, blendMode, enabled, flipX, flipY, mirrorX, mirrorY, params)
+        params: List<Float> = List(8) { 0f },
+        opacity: Int = 255
+    ) = LayerConfig(effectId, blendMode, enabled, flipX, flipY, mirrorX, mirrorY, params, opacity)
 
     val DEFAULT_MOTION: MotionSystemState = MotionSystemState(
         motorsEnabled = true,

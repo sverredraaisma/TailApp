@@ -72,4 +72,38 @@ object LedCommands {
      */
     fun setDirectMode(enabled: Boolean): ByteArray =
         byteArrayOf(0x09, if (enabled) 1 else 0)
+
+    /**
+     * `0x0A` Per-layer opacity, 0-255 (protocol v5).
+     *
+     * Applies to every blend mode, not just Normal: a half-opacity Add is a
+     * weaker glow, which is what makes deep stacks tractable rather than
+     * saturating to white.
+     */
+    fun setLayerOpacity(layer: Byte, opacity: Int): ByteArray =
+        byteArrayOf(0x0A, layer, opacity.coerceIn(0, 255).toByte())
+
+    /**
+     * `0x0B` Output stage: master brightness, gamma, and the current budget
+     * (protocol v5).
+     *
+     * [currentLimitMa] of 0 disables limiting. It exists because a wearable's
+     * regulator cannot deliver what a full-white frame asks for — roughly 60 mA
+     * per LED — and the failure mode without it is the rail browning out
+     * mid-frame rather than the picture dimming.
+     */
+    fun setOutputConfig(
+        brightness: Int,
+        gammaEnabled: Boolean,
+        currentLimitMa: Int
+    ): ByteArray {
+        val limit = currentLimitMa.coerceIn(0, 65535)
+        return byteArrayOf(
+            0x0B,
+            brightness.coerceIn(0, 255).toByte(),
+            if (gammaEnabled) 1 else 0,
+            (limit and 0xFF).toByte(),
+            ((limit shr 8) and 0xFF).toByte()
+        )
+    }
 }

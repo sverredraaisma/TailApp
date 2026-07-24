@@ -537,6 +537,86 @@ class DeviceRepository(
         )
     }
 
+    /**
+     * Writes a whole layer stack to the device and optionally saves it to a
+     * profile slot, so it runs with nothing connected.
+     *
+     * Clears the stack first: leaving old layers above the new ones would
+     * composite a look nobody designed. `LCMD_REMOVE_LAYER` stamps a slot empty
+     * rather than shifting indices, so clearing is per-slot by definition.
+     *
+     * @return true if every write was accepted.
+     */
+    suspend fun installLayerStack(layers: List<LayerConfig>, saveToSlot: Byte? = null): Boolean {
+        val maxLayers = _deviceState.value.capabilities.maxLayers
+        if (layers.size > maxLayers) return false
+
+        for (slot in 0 until maxLayers) {
+            transport.writeCharacteristic(
+                CharacteristicUuids.LED_CMD,
+                LedCommands.removeLayer(slot.toByte())
+            )
+        }
+
+        layers.forEachIndexed { index, layer ->
+            val i = index.toByte()
+            transport.writeCharacteristic(
+                CharacteristicUuids.LED_CMD,
+                LedCommands.setLayerEffect(i, layer.effectId, layer.blendMode)
+            )
+            // Parameters after the effect: the firmware rejects a param write
+            // for a slot with no effect, which is the whole point of that check.
+            layer.params.forEachIndexed { paramId, value ->
+                transport.writeCharacteristic(
+                    CharacteristicUuids.LED_CMD,
+                    LedCommands.setEffectParam(i, paramId.toByte(), value)
+                )
+            }
+            if (layer.flipX || layer.flipY || layer.mirrorX || layer.mirrorY) {
+                transport.writeCharacteristic(
+                    CharacteristicUuids.LED_CMD,
+                    LedCommands.setLayerTransform(
+                        i, layer.flipX, layer.flipY, layer.mirrorX, layer.mirrorY
+                    )
+                )
+            }
+            if (layer.opacity != 255) {
+                transport.writeCharacteristic(
+                    CharacteristicUuids.LED_CMD,
+                    LedCommands.setLayerOpacity(i, layer.opacity)
+                )
+            }
+        }
+
+        refreshLedState()
+        if (saveToSlot != null) {
+            saveProfile(saveToSlot)
+            refreshProfiles()
+        }
+        return true
+    }
+
+    /** Sets the device's output stage: master brightness, gamma, current budget. */
+    suspend fun setOutputConfig(brightness: Int, gammaEnabled: Boolean, currentLimitMa: Int) {
+        transport.writeCharacteristic(
+            CharacteristicUuids.LED_CMD,
+            LedCommands.setOutputConfig(brightness, gammaEnabled, currentLimitMa)
+        )
+        _deviceState.update { state ->
+            val led = state.ledState ?: return@update state
+            val output = led.output ?: return@update state
+            state.copy(
+                ledState = led.copy(
+                    output = output.copy(
+                        brightness = brightness,
+                        gammaEnabled = gammaEnabled,
+                        currentLimitMa = currentLimitMa
+                    )
+                )
+            )
+        }
+    }
+
     fun setFftStreamActive(active: Boolean) {
         _deviceState.update { it.copy(fftStreamActive = active) }
     }

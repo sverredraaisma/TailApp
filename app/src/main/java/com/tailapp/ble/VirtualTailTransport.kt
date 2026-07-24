@@ -64,6 +64,10 @@ class VirtualTailTransport : BleTransport {
     private var motorsEnabled = true
     private var ackSequence = 0
 
+    private var outputBrightness = 255
+    private var outputGamma = true
+    private var outputLimitMa = 0
+
     private val profiles = arrayOfNulls<ProfileSnapshot>(Protocol.MAX_PROFILE_SLOTS)
 
     private class ProfileSnapshot(
@@ -241,6 +245,21 @@ class VirtualTailTransport : BleTransport {
             directMode = data[1].toInt() != 0
             RESULT_OK
         }
+        0x0A -> { // per-layer opacity
+            if (data.size < 3) return RESULT_BAD_LENGTH
+            val index = data[1].toInt() and 0xFF
+            layers.getOrNull(index)?.let {
+                layers[index] = it.copy(opacity = data[2].toInt() and 0xFF)
+            } ?: return RESULT_OUT_OF_RANGE
+            RESULT_OK
+        }
+        0x0B -> { // output stage
+            if (data.size < 5) return RESULT_BAD_LENGTH
+            outputBrightness = data[1].toInt() and 0xFF
+            outputGamma = data[2].toInt() != 0
+            outputLimitMa = (data[3].toInt() and 0xFF) or ((data[4].toInt() and 0xFF) shl 8)
+            RESULT_OK
+        }
         0x05, 0x08 -> RESULT_OK // image chunk / begin: accepted, no CRC to verify here
         else -> RESULT_OK
     } }
@@ -323,8 +342,16 @@ class VirtualTailTransport : BleTransport {
             bool(layer.enabled)
             bool(layer.flipX); bool(layer.flipY)
             bool(layer.mirrorX); bool(layer.mirrorY)
+            u8(layer.opacity)
             repeat(8) { f32(layer.params.getOrElse(it) { 0f }) }
         }
+        // Output stage (protocol v5). No strip to drive, so the power limiter
+        // never engages: last_power_scale is always 255 here.
+        u8(outputBrightness)
+        bool(outputGamma)
+        u8(outputLimitMa and 0xFF)
+        u8((outputLimitMa shr 8) and 0xFF)
+        u8(255)
     }.toByteArray()
 
     private fun systemInfoBytes(): ByteArray = Writer().apply {

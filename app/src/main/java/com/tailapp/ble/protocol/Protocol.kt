@@ -33,8 +33,11 @@ object Protocol {
     /** FF02 motion-state payload size (`MOTION_STATE_SIZE`). */
     const val MOTION_STATE_SIZE = 77
 
-    /** Bytes per layer entry in the FF04 LED-state payload. */
-    const val LED_LAYER_SIZE = 39
+    /**
+     * Bytes per layer entry in the FF04 LED-state payload: 8 header bytes
+     * (effect, blend, enabled, 4 transforms, opacity) plus 8 float params.
+     */
+    const val LED_LAYER_SIZE = 40
 
     /**
      * The largest ATT MTU worth planning for. The firmware requests a preferred

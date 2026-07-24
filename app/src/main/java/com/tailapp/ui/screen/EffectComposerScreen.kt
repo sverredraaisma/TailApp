@@ -35,6 +35,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
@@ -43,6 +44,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -53,7 +55,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.tailapp.ble.ConnectionState
+import com.tailapp.ble.protocol.Protocol
 import com.tailapp.composer.Composition
+import com.tailapp.composer.FirmwareExport
 import com.tailapp.composer.EffectCategory
 import com.tailapp.composer.EffectLayer
 import com.tailapp.composer.EffectParam
@@ -62,6 +67,7 @@ import com.tailapp.composer.GroupLayer
 import com.tailapp.composer.LayerNode
 import com.tailapp.composer.ReactiveEffects
 import com.tailapp.model.BlendMode
+import com.tailapp.model.ProfileSlot
 import com.tailapp.ui.components.LedPreviewPlaceholder
 import com.tailapp.ui.components.LedStrip
 import com.tailapp.viewmodel.EffectComposerViewModel
@@ -89,6 +95,7 @@ fun EffectComposerScreen(
     val composition by viewModel.composition.collectAsStateWithLifecycle()
     val frame by viewModel.frame.collectAsStateWithLifecycle()
     val deviceState by viewModel.deviceState.collectAsStateWithLifecycle()
+    val installResult by viewModel.installResult.collectAsStateWithLifecycle()
     val expandedLayerId by viewModel.expandedLayerId.collectAsStateWithLifecycle()
     val hasUnsavedChanges by viewModel.hasUnsavedChanges.collectAsStateWithLifecycle()
     val compositions by viewModel.compositions.collectAsStateWithLifecycle()
@@ -98,6 +105,7 @@ fun EffectComposerScreen(
     var showStackPicker by remember { mutableStateOf(false) }
     var showRenameDialog by remember { mutableStateOf(false) }
     var showMenu by remember { mutableStateOf(false) }
+    var showInstallDialog by remember { mutableStateOf(false) }
 
     val ledsPerRing = deviceState.ledState?.ledsPerRing.orEmpty()
 
@@ -136,6 +144,13 @@ fun EffectComposerScreen(
                             DropdownMenuItem(
                                 text = { Text("New stack") },
                                 onClick = { showMenu = false; viewModel.newComposition() }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Install on tail…") },
+                                // Needs a device: this writes the device's own
+                                // effect layers and a profile slot.
+                                enabled = deviceState.connectionState == ConnectionState.CONNECTED,
+                                onClick = { showMenu = false; showInstallDialog = true }
                             )
                             DropdownMenuItem(
                                 text = { Text("Discard changes") },
@@ -247,6 +262,83 @@ fun EffectComposerScreen(
             onDismiss = { showRenameDialog = false }
         )
     }
+
+    if (showInstallDialog) {
+        InstallOnTailDialog(
+            summary = remember(composition) { FirmwareExport.describe(viewModel.previewInstall()) },
+            profiles = deviceState.profiles,
+            onConfirm = { slot -> viewModel.installOnTail(slot); showInstallDialog = false },
+            onDismiss = { showInstallDialog = false }
+        )
+    }
+
+    // The install summary is long and worth reading, so it gets a dialog rather
+    // than a snackbar that slides away mid-sentence.
+    installResult?.let { message ->
+        AlertDialog(
+            onDismissRequest = viewModel::clearInstallResult,
+            title = { Text("Install on tail") },
+            text = { Text(message) },
+            confirmButton = {
+                TextButton(onClick = viewModel::clearInstallResult) { Text("OK") }
+            }
+        )
+    }
+}
+
+/**
+ * Confirms writing the current stack to the device's own layers and a profile
+ * slot.
+ *
+ * Leads with what will be lost. The device's effect set is much smaller than the
+ * composer's, so an install is an approximation — and the user is about to
+ * overwrite a profile slot on the strength of it.
+ */
+@Composable
+private fun InstallOnTailDialog(
+    summary: String,
+    profiles: List<ProfileSlot>,
+    onConfirm: (Byte) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var slot by remember { mutableIntStateOf(0) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Install on tail") },
+        text = {
+            Column {
+                Text(
+                    "The tail runs this by itself, with the phone disconnected. " +
+                        "It has a smaller effect set, so this is an approximation:",
+                    style = MaterialTheme.typography.bodySmall
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(summary, style = MaterialTheme.typography.bodyMedium)
+                Spacer(Modifier.height(16.dp))
+                Text("Save to profile slot:", style = MaterialTheme.typography.labelLarge)
+                for (i in 0 until Protocol.MAX_PROFILE_SLOTS) {
+                    val existing = profiles.getOrNull(i)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        RadioButton(selected = slot == i, onClick = { slot = i })
+                        Text(
+                            if (existing?.occupied == true) {
+                                "${existing.displayName} (will be overwritten)"
+                            } else {
+                                "Slot $i (empty)"
+                            }
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onConfirm(slot.toByte()) }) { Text("Install") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        }
+    )
 }
 
 // --- preview ---

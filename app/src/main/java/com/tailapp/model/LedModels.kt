@@ -107,7 +107,12 @@ data class LayerConfig(
     val flipY: Boolean,
     val mirrorX: Boolean,
     val mirrorY: Boolean,
-    val params: List<Float>
+    val params: List<Float>,
+    /**
+     * Per-layer mix, 0-255 (protocol v5). Defaulted to fully opaque so a layer
+     * built without one behaves as it did before opacity existed.
+     */
+    val opacity: Int = 255
 ) {
     val effect: LedEffect? get() = LedEffect.fromId(effectId)
     val blend: BlendMode? get() = BlendMode.fromId(blendMode)
@@ -132,10 +137,30 @@ data class LayerConfig(
     }
 }
 
+/**
+ * The device's output stage (protocol v5) — what happens to a composited frame
+ * on its way to the strip.
+ *
+ * @property lastPowerScale what the current limiter applied to the last frame,
+ *   0-255. Anything below 255 means the frame asked for more current than the
+ *   budget allows and was dimmed to fit, which is worth surfacing: the look the
+ *   user designed is not the look the tail is showing.
+ */
+data class LedOutputState(
+    val brightness: Int,
+    val gammaEnabled: Boolean,
+    val currentLimitMa: Int,
+    val lastPowerScale: Int
+) {
+    val isPowerLimited: Boolean get() = lastPowerScale < 255
+}
+
 data class LedState(
     val numRings: Int,
     val ledsPerRing: List<Int>,
-    val layers: List<LayerConfig>
+    val layers: List<LayerConfig>,
+    /** Null on firmware older than protocol v5, which does not publish it. */
+    val output: LedOutputState? = null
 ) {
     val totalLeds: Int get() = ledsPerRing.sum()
 

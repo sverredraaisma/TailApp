@@ -1,8 +1,10 @@
 package com.tailapp.viewmodel
 
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
 import com.tailapp.composer.Composition
 import com.tailapp.composer.CompositionLibrary
+import com.tailapp.composer.FirmwareExport
 import com.tailapp.composer.EffectCategory
 import com.tailapp.composer.EffectLayer
 import com.tailapp.composer.GroupLayer
@@ -26,6 +28,7 @@ import com.tailapp.repository.DeviceRepository
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 
 /**
  * Backs the effect composer: the editable layer/folder tree, and the edits the
@@ -46,7 +49,7 @@ class EffectComposerViewModel(
     private val engine: LightingEngine,
     private val library: CompositionLibrary,
     preview: PreviewLightingOutput,
-    deviceRepository: DeviceRepository
+    private val deviceRepository: DeviceRepository
 ) : ViewModel() {
 
     private val _composition = MutableStateFlow(library.active())
@@ -170,6 +173,47 @@ class EffectComposerViewModel(
     fun setBrightness(brightness: Float) = edit { it.copy(brightness = brightness.coerceIn(0f, 1f)) }
 
     fun setCompositionName(name: String) = edit { it.copy(name = name) }
+
+    /**
+     * What installing the current stack onto the tail would carry over.
+     *
+     * Computed up front so the confirmation can say which layers will be left
+     * behind *before* a profile slot is overwritten, rather than after.
+     */
+    fun previewInstall(): FirmwareExport.Result = FirmwareExport.export(_composition.value)
+
+    private val _installResult = MutableStateFlow<String?>(null)
+
+    /** Outcome of the last install, for a one-shot message. Cleared on read. */
+    val installResult: StateFlow<String?> = _installResult.asStateFlow()
+
+    fun clearInstallResult() {
+        _installResult.value = null
+    }
+
+    /**
+     * Writes the current stack to the device's own effect layers and saves it to
+     * [slot], so it runs with the phone disconnected.
+     *
+     * Approximate by construction — see [FirmwareExport]. The summary is
+     * surfaced rather than swallowed, because the difference between the
+     * preview and what the tail will actually show is the whole risk here.
+     */
+    fun installOnTail(slot: Byte) {
+        val export = FirmwareExport.export(_composition.value)
+        if (export.isEmpty) {
+            _installResult.value = FirmwareExport.describe(export)
+            return
+        }
+        viewModelScope.launch {
+            val ok = deviceRepository.installLayerStack(export.layers, saveToSlot = slot)
+            _installResult.value = if (ok) {
+                "Installed to slot $slot.\n\n${FirmwareExport.describe(export)}"
+            } else {
+                "Could not install: the stack does not fit the device's layer count."
+            }
+        }
+    }
 
     /** Writes the working tree back to the library and makes it the active stack. */
     fun save() {
