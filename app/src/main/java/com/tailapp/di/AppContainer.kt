@@ -101,15 +101,15 @@ class AppContainer(context: Context) {
      * running the CRNN means running a *second front-end* alongside the shared
      * one ([com.tailapp.audio.BeatNetFeatureExtractor]), and only the engine is
      * in a position to drive both off one audio stream and pair their frames.
-     * With no model installed — the normal case — nothing is constructed and the
-     * DSP activation runs exactly as before.
+     * With no model installed — or the CRNN disabled below — nothing is
+     * constructed and the DSP activation runs exactly as before.
      */
     val lightingEngine = LightingEngine(
         output = lightingOutput,
         ledLayout = ledLayout,
         scope = applicationScope,
         genreClassifier = genreClassifier,
-        beatModelStore = beatModelStore
+        beatModelStore = beatModelStore.takeIf { USE_CRNN_BEAT_ACTIVATION }
     )
 
     /**
@@ -122,4 +122,22 @@ class AppContainer(context: Context) {
 
     val beatLightPrefs: SharedPreferences =
         context.getSharedPreferences("beatlight_config", Context.MODE_PRIVATE)
+
+    private companion object {
+        /**
+         * Whether the installed BeatNet CRNN drives the beat activation. **Off**,
+         * deliberately: measured on a real phone mic (quiet, reverberant,
+         * out-of-distribution for a model trained on produced tracks) the CRNN's
+         * beat activation is weak and *temporally smeared* — beats only ~2x the
+         * baseline and spread across many frames — so the decoders never lock
+         * cleanly and the tempo drifts. No amount of amplitude normalisation
+         * sharpens a signal that is not sharp in time. The DSP spectral-flux
+         * activation is z-scored onset detection, robust to a low, noisy level,
+         * and gives a stable, correct BPM on exactly this input (verified end to
+         * end on mic-like audio). The CRNN stays installed, wired and tested for
+         * a cleaner source — line-in, or a mic-trained model — where its output
+         * is worth having; flip this to true there.
+         */
+        const val USE_CRNN_BEAT_ACTIVATION = false
+    }
 }

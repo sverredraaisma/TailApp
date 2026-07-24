@@ -295,8 +295,23 @@ class ParticleFilterBeatDecoder(
      * lock every couple of seconds. Real audio energy is continuous through a
      * bar, so keying silence off [FeatureFrame.rms] works for any activation
      * source; the light release bridges the rms dip between percussive hits.
+     *
+     * **Scale-invariant.** An absolute RMS floor is unusable here: a phone mic
+     * captures ambient music at an RMS around 0.005 — an order of magnitude below
+     * a naive "silence" threshold — and mic gain varies by device, so any fixed
+     * number is wrong somewhere. "Audible" is therefore relative: the current
+     * level against a slow-decaying peak ([audioPeak]) of what this session has
+     * heard. Steady music keeps the level near the peak; a real gap lets it fall
+     * away. A false "audible" during true silence is harmless — the concentration
+     * gate never fires without real periodic beats — so the measure errs toward
+     * audible, which is the safe direction: the failure that mattered was calling
+     * live music "silent" and never running the observation update at all.
      */
     private var audioLevel = 0f
+
+    /** Slow-decaying peak of [audioLevel]; the reference the presence test is relative to. */
+    private var audioPeak = 0f
+    private val audioPeakDecay = exp(-1f / (AUDIO_PEAK_SECONDS * framesPerSecond))
 
     /** Spare normal deviate from the last Marsaglia polar draw. */
     private var spareGaussian = Float.NaN
@@ -329,6 +344,7 @@ class ParticleFilterBeatDecoder(
         lastTimestampNanos = frame.timestampNanos
         downbeatHistory[(frameIndex % ACTIVATION_HISTORY).toInt()] = activation.downbeat
         audioLevel = maxOf(frame.rms, audioLevel * audioRelease)
+        audioPeak = maxOf(audioLevel, audioPeak * audioPeakDecay)
 
         // Stage two first: a beat whose instant has arrived can finally be scored,
         // and the bar phase it produces is what the next emission will use.
@@ -336,9 +352,11 @@ class ParticleFilterBeatDecoder(
 
         predict()
 
-        // Silence is judged from audio energy, not the beat activation — see
-        // [audioLevel]. The activation still drives the observation model below.
-        trackSilence(audioLevel)
+        // Silence is judged from audio energy relative to the recent peak, not the
+        // beat activation and not an absolute level — see [audioLevel]. The
+        // activation still drives the observation model below.
+        val audible = audioLevel > audioPeak * PRESENCE_FRACTION
+        trackSilence(audible)
         if (quietFrames <= silenceHoldFrames) {
             correct(activation.beat)
             resampleIfDepleted()
@@ -370,6 +388,7 @@ class ParticleFilterBeatDecoder(
         quietFrames = 0
         activeFrames = 0
         audioLevel = 0f
+        audioPeak = 0f
     }
 
     // --- initialisation ------------------------------------------------------
@@ -668,8 +687,8 @@ class ParticleFilterBeatDecoder(
      * is dropped and the cloud is re-spread, because a gap that long is a new
      * piece of music, not a bar's rest.
      */
-    private fun trackSilence(level: Float) {
-        if (level > RMS_SILENCE) {
+    private fun trackSilence(audible: Boolean) {
+        if (audible) {
             quietFrames = 0
             activeFrames++
             return
@@ -1066,15 +1085,18 @@ class ParticleFilterBeatDecoder(
         const val MIN_BEAT_SPACING = 0.5
 
         /**
-         * Below this audio RMS a frame counts as silent. An absolute floor, well
-         * under any music through a mic and above room tone; erring low is safe,
-         * since a false "active" only ever costs the lock the concentration gate,
-         * never a spurious tempo. Tunable if a very quiet source needs it.
+         * A frame is audible when its level is at least this fraction of the
+         * session's recent peak. Relative, so it holds at any mic gain; low, so
+         * steady music stays audible through its own dynamics and only a real gap
+         * reads as silence.
          */
-        const val RMS_SILENCE = 0.01f
+        const val PRESENCE_FRACTION = 0.15f
 
         /** Release time of the audio-presence envelope; bridges between-hit rms dips. */
         const val AUDIO_RELEASE_SECONDS = 0.5f
+
+        /** Decay time of the peak the presence test is measured against. */
+        const val AUDIO_PEAK_SECONDS = 8f
 
         /**
          * Quiet this long and the observation update is suspended. Longer than

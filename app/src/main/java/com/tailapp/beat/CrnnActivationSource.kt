@@ -70,6 +70,17 @@ class CrnnActivationSource internal constructor(
     private val cellState = FloatArray(STATE_SIZE)
 
     /**
+     * The CRNN's raw probabilities are weak and out-of-range on real mic audio
+     * (measured: beat peaks ~0.15 over a ~0.07 floor), too flat for the decoders
+     * to lock on. Adaptive peak-normalisation restores the contrast the model's
+     * uncertainty flattened, and does it per channel because the downbeat
+     * probability is weaker and sparser than the beat one. The spectral-flux
+     * source self-normalises through its z-score; this gives the CRNN the same.
+     */
+    private val beatNormalizer = AdaptivePeakNormalizer(framesPerSecond = FRAMES_PER_SECOND)
+    private val downbeatNormalizer = AdaptivePeakNormalizer(framesPerSecond = FRAMES_PER_SECOND)
+
+    /**
      * The LSTM's hidden and cell state, for the test that [reset] clears *both*.
      * Live arrays, in that order. Inference cannot run on the JVM, so poking
      * these is the only way to assert the thing that actually goes wrong —
@@ -124,6 +135,8 @@ class CrnnActivationSource internal constructor(
     fun reset() {
         hiddenState.fill(0f)
         cellState.fill(0f)
+        beatNormalizer.reset()
+        downbeatNormalizer.reset()
     }
 
     /** Releases the ONNX session. The source is unusable afterwards unless reloaded. */
@@ -154,7 +167,10 @@ class CrnnActivationSource internal constructor(
                         // rather than half-updated.
                         (result.get(OUTPUT_HN).get() as OnnxTensor).floatBuffer.get(hiddenState)
                         (result.get(OUTPUT_CN).get() as OnnxTensor).floatBuffer.get(cellState)
-                        return BeatActivation(beat, downbeat)
+                        return BeatActivation(
+                            beatNormalizer.normalize(beat),
+                            downbeatNormalizer.normalize(downbeat)
+                        )
                     }
                 }
             }
@@ -213,6 +229,9 @@ class CrnnActivationSource internal constructor(
 
     companion object {
         private const val TAG = "CrnnActivationSource"
+
+        /** Frame rate of BeatNet's front-end (441-sample hop at 22050 Hz). */
+        private const val FRAMES_PER_SECOND = 50f
 
         // --- BeatNet's geometry, owned by BeatNetFeatureExtractor -------------
 
