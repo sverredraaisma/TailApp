@@ -191,7 +191,8 @@ class ParticleFilterBeatDecoder(
     maxBpm: Float = MAX_BPM,
     private val observationTemperature: Float = OBSERVATION_TEMPERATURE,
     private val jumpProbability: Float = TEMPO_JUMP_PROBABILITY,
-    private val seed: Long = DEFAULT_SEED
+    private val seed: Long = DEFAULT_SEED,
+    private val octaveBias: OctaveBias = OctaveBias()
 ) : BeatDecoder {
     init {
         require(beatParticleCount >= 16) { "need at least 16 beat particles" }
@@ -457,6 +458,11 @@ class ParticleFilterBeatDecoder(
                 p = exp(lp)
                 period[i] = p
                 logPeriod[i] = lp
+                // Nudge the cloud toward the user's preferred tempo octave, once
+                // per beat per particle so it stays gentle. A no-op (weight 1)
+                // unless an OctaveBias is set, so the default behaviour — and the
+                // comparison test — is untouched.
+                weight[i] *= octaveBias.weight(framesPerSecond * 60f / p)
             }
             f += gaussian() * PHASE_DIFFUSION_FRAMES / p
             if (f >= 1f) f -= 1f

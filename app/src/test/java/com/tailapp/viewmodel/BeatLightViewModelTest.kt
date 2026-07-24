@@ -68,6 +68,55 @@ class BeatLightViewModelTest {
     )
 
     @Test
+    fun `the octave bias is off by default and does not touch the engine`() {
+        val engine = newEngine()
+        newViewModel(engine = engine)
+
+        assertFalse(engine.octaveBias.enabled)
+    }
+
+    @Test
+    fun `enabling the octave bias applies its settings to the engine`() {
+        val engine = newEngine()
+        val viewModel = newViewModel(engine = engine)
+
+        viewModel.setOctaveTargetBpm(175f)
+        viewModel.setOctaveStrength(0.8f)
+        viewModel.setOctaveBiasEnabled(true)
+
+        assertTrue(engine.octaveBias.enabled)
+        assertEquals(175f, engine.octaveBias.targetBpm, 0f)
+        assertEquals(0.8f, engine.octaveBias.strength, 0f)
+    }
+
+    @Test
+    fun `the octave bias settings persist across view model instances`() {
+        val prefs = com.tailapp.testutil.FakeSharedPreferences()
+        newViewModel(prefs = prefs).apply {
+            setOctaveTargetBpm(150f)
+            setOctaveStrength(0.6f)
+            setOctaveBiasEnabled(true)
+        }
+
+        val engine = newEngine()
+        newViewModel(prefs = prefs, engine = engine)
+
+        assertTrue(engine.octaveBias.enabled)
+        assertEquals(150f, engine.octaveBias.targetBpm, 0f)
+        assertEquals(0.6f, engine.octaveBias.strength, 0f)
+    }
+
+    @Test
+    fun `the octave target is clamped to the allowed range`() {
+        val engine = newEngine()
+        val viewModel = newViewModel(engine = engine)
+        viewModel.setOctaveBiasEnabled(true)
+
+        viewModel.setOctaveTargetBpm(5000f)
+        assertEquals(com.tailapp.beat.OctaveBias.MAX_TARGET_BPM, engine.octaveBias.targetBpm, 0f)
+    }
+
+    @Test
     fun `defaults to no calibration and an automatic profile`() {
         val viewModel = newViewModel()
 

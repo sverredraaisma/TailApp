@@ -33,8 +33,9 @@ import kotlin.math.abs
  */
 class BeatTracker(
     private val config: FeatureConfig = FeatureConfig(),
+    octaveBias: OctaveBias = OctaveBias(),
     private val activationSource: ActivationSource = SpectralFluxActivationSource(config),
-    private val tempo: TempoEstimator = TempoEstimator(config)
+    private val tempo: TempoEstimator = TempoEstimator(config, octaveBias = octaveBias)
 ) : BeatDecoder {
     private val framesPerSecond = config.framesPerSecond
     private val hopNanos: Long = (1_000_000_000.0 / framesPerSecond).toLong()

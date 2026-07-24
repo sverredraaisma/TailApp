@@ -16,6 +16,7 @@ import com.tailapp.beat.BeatEvent
 import com.tailapp.beat.BeatModelStore
 import com.tailapp.beat.BeatTracker
 import com.tailapp.beat.CrnnActivationSource
+import com.tailapp.beat.OctaveBias
 import com.tailapp.beat.ParticleFilterBeatDecoder
 import com.tailapp.drop.DropEvent
 import com.tailapp.drop.SectionState
@@ -220,6 +221,13 @@ class LightingEngine(
 
     /** Decoder used by the *next* session. Changing it does not disturb a running one. */
     var decoderKind: BeatDecoderKind = BeatDecoderKind.PHASE_LOCKED
+
+    /**
+     * The tempo-octave preference, shared with whichever decoder is running. A
+     * mutable holder read every frame, so [OctaveBias.copyFrom] applies a UI
+     * change live without restarting the session.
+     */
+    val octaveBias = OctaveBias()
     private val transients = TransientAnalyzer(featureConfig = featureConfig)
     private val renderer = ReactiveRenderer()
     private val controller = EffectController(renderer, output)
@@ -251,6 +259,13 @@ class LightingEngine(
         set(value) {
             controller.triggerOffsetMillis = value
         }
+
+    /** Applies a tempo-octave preference live, without restarting the session. */
+    fun setOctaveBias(enabled: Boolean, targetBpm: Float, strength: Float) {
+        octaveBias.enabled = enabled
+        octaveBias.targetBpm = targetBpm
+        octaveBias.strength = strength
+    }
 
     /** Pins a profile regardless of what the classifier says; null returns to automatic. */
     var manualProfile: EffectProfile?
@@ -519,8 +534,8 @@ class LightingEngine(
         pendingActivations.clear()
         beatNetActivationsDiscarded = 0
         beatTracker = when (decoderKind) {
-            BeatDecoderKind.PHASE_LOCKED -> BeatTracker(featureConfig)
-            BeatDecoderKind.PARTICLE_FILTER -> ParticleFilterBeatDecoder(featureConfig)
+            BeatDecoderKind.PHASE_LOCKED -> BeatTracker(featureConfig, octaveBias = octaveBias)
+            BeatDecoderKind.PARTICLE_FILTER -> ParticleFilterBeatDecoder(featureConfig, octaveBias = octaveBias)
         }
         beatTracker.reset()
         transients.reset()

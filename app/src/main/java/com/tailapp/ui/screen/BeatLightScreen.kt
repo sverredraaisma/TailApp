@@ -32,6 +32,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
+import androidx.compose.material3.Switch
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
@@ -51,6 +52,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.tailapp.beat.BeatEvent
+import com.tailapp.beat.OctaveBias
 import com.tailapp.ble.ConnectionState
 import com.tailapp.effects.BeatDecoderKind
 import com.tailapp.effects.BeatLightState
@@ -84,6 +86,9 @@ fun BeatLightScreen(
     val triggerOffsetMillis by viewModel.triggerOffsetMillis.collectAsStateWithLifecycle()
     val manualProfileId by viewModel.manualProfileId.collectAsStateWithLifecycle()
     val decoderKind by viewModel.decoderKind.collectAsStateWithLifecycle()
+    val octaveBiasEnabled by viewModel.octaveBiasEnabled.collectAsStateWithLifecycle()
+    val octaveTargetBpm by viewModel.octaveTargetBpm.collectAsStateWithLifecycle()
+    val octaveStrength by viewModel.octaveStrength.collectAsStateWithLifecycle()
 
     val snackbarHostState = remember { SnackbarHostState() }
 
@@ -173,7 +178,13 @@ fun BeatLightScreen(
                 triggerOffsetMillis = triggerOffsetMillis,
                 onOffsetChange = viewModel::setTriggerOffset,
                 decoderKind = decoderKind,
-                onDecoderChange = viewModel::setDecoder
+                onDecoderChange = viewModel::setDecoder,
+                octaveBiasEnabled = octaveBiasEnabled,
+                octaveTargetBpm = octaveTargetBpm,
+                octaveStrength = octaveStrength,
+                onOctaveEnabledChange = viewModel::setOctaveBiasEnabled,
+                onOctaveTargetChange = viewModel::setOctaveTargetBpm,
+                onOctaveStrengthChange = viewModel::setOctaveStrength
             )
 
             Spacer(Modifier.height(16.dp))
@@ -311,7 +322,13 @@ private fun CalibrationSection(
     triggerOffsetMillis: Float,
     onOffsetChange: (Float) -> Unit,
     decoderKind: BeatDecoderKind,
-    onDecoderChange: (BeatDecoderKind) -> Unit
+    onDecoderChange: (BeatDecoderKind) -> Unit,
+    octaveBiasEnabled: Boolean,
+    octaveTargetBpm: Float,
+    octaveStrength: Float,
+    onOctaveEnabledChange: (Boolean) -> Unit,
+    onOctaveTargetChange: (Float) -> Unit,
+    onOctaveStrengthChange: (Float) -> Unit
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
@@ -373,6 +390,54 @@ private fun CalibrationSection(
                         )
                     }
                 }
+            }
+
+            Spacer(Modifier.height(20.dp))
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Tempo octave lock", style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        "Beat tracking can't tell a tempo from its half or double. Turn this " +
+                            "on and set the tempo your music sits around — ambiguous tracks lean " +
+                            "toward it, but clearly slower or faster songs still win on their own.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(checked = octaveBiasEnabled, onCheckedChange = onOctaveEnabledChange)
+            }
+
+            if (octaveBiasEnabled) {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "Target tempo: ${"%.0f".format(octaveTargetBpm)} BPM",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                Slider(
+                    value = octaveTargetBpm,
+                    onValueChange = onOctaveTargetChange,
+                    valueRange = OctaveBias.MIN_TARGET_BPM..OctaveBias.MAX_TARGET_BPM,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Text(
+                    "Strength: ${"%.0f".format(octaveStrength * 100)}%",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                Text(
+                    "Higher pulls harder toward the target — raise it only if a set keeps " +
+                        "landing on the wrong octave.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Slider(
+                    value = octaveStrength,
+                    onValueChange = onOctaveStrengthChange,
+                    valueRange = 0f..1f,
+                    modifier = Modifier.fillMaxWidth()
+                )
             }
         }
     }

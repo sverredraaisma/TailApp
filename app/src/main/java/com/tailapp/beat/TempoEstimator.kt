@@ -37,7 +37,8 @@ class TempoEstimator(
     private val config: FeatureConfig = FeatureConfig(),
     private val minBpm: Float = 60f,
     private val maxBpm: Float = 200f,
-    historySeconds: Float = 8f
+    historySeconds: Float = 8f,
+    private val octaveBias: OctaveBias = OctaveBias()
 ) {
     private val framesPerSecond = config.framesPerSecond
     private val historySize = (historySeconds * framesPerSecond).toInt().coerceAtLeast(64)
@@ -218,11 +219,15 @@ class TempoEstimator(
 
     /**
      * Log-normal prior over tempo. Gentle on purpose: it should break a tie
-     * between a tempo and its double, not veto an unusual but genuine one.
+     * between a tempo and its double, not veto an unusual but genuine one. The
+     * built-in centre keeps the estimate in a plausible range; when the user has
+     * set an [OctaveBias], its preference is layered on top, so a set of fast
+     * music can be steered to stay fast without touching this default.
      */
     private fun tempoPrior(candidateBpm: Float): Float {
         val octaves = ln(candidateBpm / PRIOR_CENTRE_BPM) / LN_2
-        return exp(-0.5f * (octaves / PRIOR_WIDTH_OCTAVES) * (octaves / PRIOR_WIDTH_OCTAVES))
+        val base = exp(-0.5f * (octaves / PRIOR_WIDTH_OCTAVES) * (octaves / PRIOR_WIDTH_OCTAVES))
+        return base * octaveBias.weight(candidateBpm)
     }
 
     /** Sub-frame peak position by fitting a parabola through the peak's neighbours. */

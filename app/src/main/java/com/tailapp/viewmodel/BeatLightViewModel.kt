@@ -2,6 +2,7 @@ package com.tailapp.viewmodel
 
 import android.content.SharedPreferences
 import androidx.lifecycle.ViewModel
+import com.tailapp.beat.OctaveBias
 import com.tailapp.effects.BeatDecoderKind
 import com.tailapp.effects.BeatLightSession
 import com.tailapp.effects.BeatLightState
@@ -84,6 +85,27 @@ class BeatLightViewModel(
     /** Id of the pinned profile, or null while automatic (classifier-driven). */
     val manualProfileId: StateFlow<String?> = _manualProfileId.asStateFlow()
 
+    private val _octaveBiasEnabled =
+        MutableStateFlow(prefs?.getBoolean(KEY_OCTAVE_ENABLED, false) ?: false)
+    private val _octaveTargetBpm = MutableStateFlow(
+        (prefs?.getFloat(KEY_OCTAVE_TARGET, OctaveBias.DEFAULT_TARGET_BPM) ?: OctaveBias.DEFAULT_TARGET_BPM)
+            .coerceIn(OctaveBias.MIN_TARGET_BPM, OctaveBias.MAX_TARGET_BPM)
+    )
+    private val _octaveStrength = MutableStateFlow(
+        (prefs?.getFloat(KEY_OCTAVE_STRENGTH, OctaveBias.DEFAULT_STRENGTH) ?: OctaveBias.DEFAULT_STRENGTH)
+            .coerceIn(0f, 1f)
+    )
+
+    /**
+     * Tempo-octave preference — the fix for half/double drift. When on, the
+     * decoders lean toward [octaveTargetBpm] when the audio is octave-ambiguous,
+     * so a fast set stays fast; genuinely slow music still wins on its own
+     * evidence. Applied live to whichever decoder is running.
+     */
+    val octaveBiasEnabled: StateFlow<Boolean> = _octaveBiasEnabled.asStateFlow()
+    val octaveTargetBpm: StateFlow<Float> = _octaveTargetBpm.asStateFlow()
+    val octaveStrength: StateFlow<Float> = _octaveStrength.asStateFlow()
+
     init {
         // Apply the restored calibration to the engine immediately - a fresh
         // LightingEngine starts at triggerOffsetMillis = 0, so without this the
@@ -98,6 +120,11 @@ class BeatLightViewModel(
         engine.manualProfile = restored
 
         engine.decoderKind = _decoderKind.value
+        applyOctaveBias()
+    }
+
+    private fun applyOctaveBias() {
+        engine.setOctaveBias(_octaveBiasEnabled.value, _octaveTargetBpm.value, _octaveStrength.value)
     }
 
     fun start() {
@@ -122,6 +149,29 @@ class BeatLightViewModel(
         _triggerOffsetMillis.value = clamped
         engine.triggerOffsetMillis = clamped
         prefs?.edit()?.putFloat(KEY_TRIGGER_OFFSET, clamped)?.apply()
+    }
+
+    /** Turns the octave preference on or off, live and persisted. */
+    fun setOctaveBiasEnabled(enabled: Boolean) {
+        _octaveBiasEnabled.value = enabled
+        applyOctaveBias()
+        prefs?.edit()?.putBoolean(KEY_OCTAVE_ENABLED, enabled)?.apply()
+    }
+
+    /** Sets the preferred tempo the octave preference leans toward, live and persisted. */
+    fun setOctaveTargetBpm(bpm: Float) {
+        val clamped = bpm.coerceIn(OctaveBias.MIN_TARGET_BPM, OctaveBias.MAX_TARGET_BPM)
+        _octaveTargetBpm.value = clamped
+        applyOctaveBias()
+        prefs?.edit()?.putFloat(KEY_OCTAVE_TARGET, clamped)?.apply()
+    }
+
+    /** Sets how firmly the octave preference pulls, live and persisted. */
+    fun setOctaveStrength(strength: Float) {
+        val clamped = strength.coerceIn(0f, 1f)
+        _octaveStrength.value = clamped
+        applyOctaveBias()
+        prefs?.edit()?.putFloat(KEY_OCTAVE_STRENGTH, clamped)?.apply()
     }
 
     /**
@@ -162,5 +212,8 @@ class BeatLightViewModel(
         internal const val KEY_TRIGGER_OFFSET = "beatlight_trigger_offset_ms"
         internal const val KEY_MANUAL_PROFILE = "beatlight_manual_profile_id"
         internal const val KEY_DECODER = "beatlight_decoder"
+        internal const val KEY_OCTAVE_ENABLED = "beatlight_octave_enabled"
+        internal const val KEY_OCTAVE_TARGET = "beatlight_octave_target_bpm"
+        internal const val KEY_OCTAVE_STRENGTH = "beatlight_octave_strength"
     }
 }
