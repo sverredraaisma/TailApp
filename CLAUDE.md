@@ -57,7 +57,7 @@ com.tailapp/
 ├── drop/                   # Drop detection + section state (BeatLight)
 ├── genre/                  # Genre classification (BeatLight)
 ├── effects/                # LightingEngine + session/service (mic → analysis → frames)
-├── composer/               # The effect graph: ReactiveContext, layer/folder tree, 20 effects
+├── composer/               # The effect graph: ReactiveContext, layer/folder tree, 25 effects
 ├── lighting/               # LightingOutput + FF0A/preview implementations
 ├── led/                    # Kotlin port of the firmware LED render engine
 ├── viewmodel/              # Scan, DeviceOverview, MotionConfig, LedConfig, AudioConfig, BeatLight, EffectComposer
@@ -104,6 +104,15 @@ such thing as a non-reactive effect.
   mirrors TailFirmware's `led/` file for file, C++ integer truncation included,
   because both the live preview and the direct-mode renderer have to produce the
   pixels the device would. A divergence there is a preview that quietly lies.
+  That extends to the **output stage** (`LedOutputStage`): master brightness,
+  the current limiter, then gamma, in that order. A preview that skipped the
+  limiter would show a look that browns out on hardware as if it were fine.
+- **The composer reads the tail, not just the microphone.** Taps (FF07) and the
+  motion state (FF02) reach `ReactiveContext` alongside the audio, so an effect
+  can react to the device's own body. `TailTelemetryTracker` normalises raw
+  degrees against the *configured* travel and differentiates wag speed from the
+  real notify interval — FF02's nominal 20 Hz jitters, and dividing by an
+  assumed period turns connection hiccups into phantom wags.
 - **Analysis never runs on the main thread, and never twice at once.**
   `LightingEngine` takes its dispatcher as a parameter for exactly this reason —
   its analysis and render loops sharing a `FeatureExtractor` across threads
@@ -159,6 +168,7 @@ result, the readable FF07 event ring, and `RESULT_BUSY`.
 | FF08 | read/write | Profile slots (occupancy + names) |
 | FF09 | read + notify | Command result (ACK/error) for every non-FF05/FF0A write |
 | FF0A | write-no-response | Direct LED pixel stream (`DeviceRepository.streamDirectFrame`) |
+| FF0B | write-no-response | Live motion targets (`DeviceRepository.streamMotionTargets`) |
 
 Things worth remembering when touching this layer:
 
@@ -190,6 +200,17 @@ Things worth remembering when touching this layer:
 - **`servo_config_t` is a historical name.** The motors are TMC2209 steppers as
   of firmware `d4973bf`; the FF01/FF06 servo payloads were deliberately left
   unchanged, so nothing on this side needed to move.
+- **Two streams take over from the device, and both must time out.** FF0A pixels
+  suspend the compositor; FF0B targets suspend the motion pattern. The device
+  ages both out (2 s for pixels, 500 ms for targets) and falls back to its own
+  rendering, so a phone that walks away never leaves the tail holding a frame or
+  a pose. `TailDirectLedOutput`'s 1 s keepalive must stay *below* the pixel
+  timeout, or an idle-but-live stream is mistaken for an abandoned one.
+- **FF05 carries a beat trailer.** Three bytes after the bins — phase, BPM,
+  beat/downbeat/drop flags. The device has no microphone and no beat tracker, so
+  this is the only way its own effects and motion patterns can know the beat.
+  Additive: the firmware reads exactly `num_bins` of bin data and ignores the
+  rest, so old and new interoperate in both directions.
 - **FF0A packets pay for their own header.** `DirectPixelFrame.maxLedsPerPacket`
   computes `((mtu-3)-2)/3`, not the protocol doc's `(mtu-3)/3` — that
   approximation skips subtracting the 2-byte `start_index` header and
