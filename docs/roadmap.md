@@ -2,19 +2,26 @@
 
 > ## Delivery status
 >
-> Milestones **M1–M3 are complete on both sides**. M4 is complete on the device
-> and awaiting the app-side effect mirror; M5 and M6 are under way. Everything
-> below is the plan as written; the
-> [milestone table](#5-joint-milestones) carries the live status.
+> Milestones **M1–M4 are complete on both sides**. M5 has its streaming and
+> catalogue half; M6 has not started. Everything below is the plan as written;
+> the [milestone table](#5-joint-milestones) carries the live status.
 >
 > | Milestone | State |
 > |---|---|
 > | M1 — Honest tethered control | **done** |
 > | M2 — A body the effects can feel | **done** |
 > | M3 — One mic, one beat | **done** |
-> | M4 — Looks that survive the phone leaving | **device side done** — LED-1/2/4/7 plus LED-3's ten effects; the app's parity mirror (A3-2) is the remainder |
-> | M5 — Motion that dances | **streaming (MOT-11 + A4-2), the pattern catalogue (MOT-5), crossfade (MOT-7) and gravity fusion (MOT-9) done**; axis mixer, keyframes, behavior engine in progress |
-> | M6 — A shippable device | in progress — battery, diagnostics, device info, OTA and parameter descriptors under way |
+> | M4 — Looks that survive the phone leaving | **done** — LED-1/2/3/4/7, the app's parity mirror and the native export mapping (A3-1..3) |
+> | M5 — Motion that dances | **streaming (MOT-11 + A4-2), the visualizer (A4-1), the pattern catalogue (MOT-5), crossfade (MOT-7) and gravity fusion (MOT-9) done**; MOT-0, MOT-6, MOT-8 and A4-3/A4-4 outstanding |
+> | M6 — A shippable device | not started; A5-3's acknowledgement correlation landed early |
+>
+> **A parked branch, not lost work.** `TailFirmware` `wip/roadmap-phase2` holds an
+> interrupted first pass at MOT-2/3/4/6/8/10, SYS-1/2/3/6/9, LED-5/6 and QA-1/2.
+> It **does not build** and none of it has tests, which is why it is on its own
+> branch rather than merged: an untested firmware feature that looks finished is
+> worse than an absent one, because it gets trusted. Its commit message carries
+> the command-id allocation each feature was written against, so resuming one at
+> a time does not produce collisions.
 >
 > The device is no longer dependent on a paired phone for anything beyond a
 > rainbow: it has seventeen LED effects and ten motion patterns of its own, and
@@ -264,9 +271,9 @@ runs before/alongside M2 and must be complete before M4.
 | **M1 — Honest tethered control** | The app tells the truth about the device: stalls visible and recoverable, motion limits editable, no false banner | A0-1..4 | — (shipped) | **done** |
 | **M2 — A body the effects can feel** | Tap the tail and the lights ripple; wag it and they glow | A1-1..5 | HARD-9, SYS-7 | **done** (MOT-10 still later) |
 | **M3 — One mic, one beat** | BeatLight and the firmware's own effects run at once, and the device knows the beat | A2-1, A2-2 | LED-8, M2-fix (loudness wiring) | **done** |
-| **M4 — Looks that survive the phone leaving** | A composer look (or its honest approximation) installs to a profile and works standalone | A3-1..3 | HARD-2/3, LED-1, LED-2, LED-3, LED-4, LED-7 | **device side done** — the ten-effect catalogue and the palettes landed; A3-2's parity mirror is the remainder |
-| **M5 — Motion that dances** | The tail moves to the same analysis as the lights: streamed targets, keyframes, behavior engine | A4-1..4 | MOT-0, MOT-7, MOT-11, MOT-8, MOT-6 | **MOT-11, A4-1, A4-2, MOT-5, MOT-7, MOT-9 done**; MOT-0/6/8 and A4-3/A4-4 in progress |
-| **M6 — A shippable device** | OTA, battery, diagnostics, and one clean protocol break | A5-1..3 | SYS-1, SYS-2, SYS-3, SYS-6, SYS-8, SYS-9 | in progress; A6-3's liveness pairing landed early because it was a correctness gap, not a feature |
+| **M4 — Looks that survive the phone leaving** | A composer look (or its honest approximation) installs to a profile and works standalone | A3-1..3 | HARD-2/3, LED-1, LED-2, LED-3, LED-4, LED-7 | **done** — the ten-effect catalogue, the palettes, the app's parity mirror, and eight effects now exporting natively instead of degrading |
+| **M5 — Motion that dances** | The tail moves to the same analysis as the lights: streamed targets, keyframes, behavior engine | A4-1..4 | MOT-0, MOT-7, MOT-11, MOT-8, MOT-6 | **MOT-11, A4-1, A4-2, MOT-5, MOT-7, MOT-9 done**; MOT-0/6/8 and A4-3/A4-4 outstanding (first pass parked on `wip/roadmap-phase2`) |
+| **M6 — A shippable device** | OTA, battery, diagnostics, and one clean protocol break | A5-1..3 | SYS-1, SYS-2, SYS-3, SYS-6, SYS-8, SYS-9 | not started. Two pieces landed early because they were correctness gaps rather than features: A6-3's liveness pairing, and A5-3's FF09 acknowledgement correlation |
 
 ### What M4 delivered, and what it did not
 
