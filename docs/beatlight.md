@@ -151,9 +151,9 @@ covered by `gradlew.bat testDebugUnitTest`:
 | Arbitrary-size DFT (`BluesteinFft`) | done — 1411-point transform over the radix-2 `Fft`; 2.5e-7 worst relative error against a naive double-precision DFT |
 | BeatNet front-end (`BeatNetFeatureExtractor`) | done — madmom's pipeline ported; **max 1.1e-6** against madmom's own output over 81 328 values. ~0.1 ms per frame; both front-ends together ~0.15 ms of the 20 ms hop |
 | Front-end parity with BeatNet (the plan's Phase 2 gate) | **passed** — by a second, dedicated extractor. The shared `FeatureConfig` is deliberately unchanged and still 0.210 out, which is why there are two |
-| ONNX beat model (BeatNet CRNN) | exported, verified, and **switched on**: `LightingEngine` runs it whenever the model is installed, and falls back to spectral flux otherwise. See [beat-model.md](beat-model.md) |
-| Particle-filter beat decoder | done — `ParticleFilterBeatDecoder`, selectable alongside `BeatTracker`; see `BeatDecoderComparisonTest` |
-| Per-frame CRNN inference cost, and accuracy on real music | **not measured** — needs a phone; see [beatlight-manual-checks.md](beatlight-manual-checks.md) |
+| ONNX beat model (BeatNet CRNN) | exported, verified, wired — but **disabled by default** (`USE_CRNN_BEAT_ACTIVATION = false`). On a real phone mic its activation is weak and temporally smeared and the tempo drifts; spectral flux is the default and is stable. Re-enable for a cleaner source. See [beat-model.md](beat-model.md) |
+| Particle-filter beat decoder | done — `ParticleFilterBeatDecoder`, selectable alongside `BeatTracker`; see `BeatDecoderComparisonTest`. Confirmed stable on real mic audio via spectral flux |
+| Accuracy on real mic audio | measured on device: **spectral flux is stable** (steady BPM), **the CRNN is not** (drifts). Per-frame CRNN inference cost still unmeasured. |
 | On-device verification | see [beatlight-manual-checks.md](beatlight-manual-checks.md) — needs a phone and the tail |
 
 ### The DSP tracker is still the floor, not a leftover
