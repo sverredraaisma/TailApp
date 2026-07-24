@@ -1,5 +1,6 @@
 package com.tailapp.composer
 
+import com.tailapp.led.Palettes
 import com.tailapp.model.BlendMode
 import com.tailapp.model.LedEffect
 import org.junit.Assert.assertEquals
@@ -54,19 +55,146 @@ class FirmwareExportTest {
     }
 
     @Test
-    fun `a tail-reactive effect has no device counterpart and is reported`() {
-        // The device cannot do these at all: it has no notion of its own
-        // deflection, and no wavefront effect. Saying so is the point.
+    fun `the tail-reactive effects now map, because the device reads its own sensors`() {
+        // This assertion used to be the reverse: the device had no notion of its
+        // own movement, so these three were reported as impossible. LED-3 gave
+        // it a motion bus and effects that read it, which is the one category of
+        // effect no other lighting hardware can do at all.
         val result = FirmwareExport.export(
             composition(
                 effect("glow", "motion_glow"),
-                effect("level", "gravity_level")
+                effect("level", "gravity_level"),
+                effect("ripple", "tap_ripple", mapOf("color" to 0x00B4FF.toFloat()))
             )
         )
 
+        assertTrue(result.unmapped.isEmpty())
+        assertEquals(
+            listOf(LedEffect.MOTION_GLOW.id, LedEffect.GRAVITY_LEVEL.id, LedEffect.TAP_RIPPLE.id),
+            result.layers.map { it.effectId }
+        )
+        // The colour survives on the two that take one; motion glow takes a palette.
+        assertEquals(0f, result.layers[2].params[0], 0.5f)
+        assertEquals(180f, result.layers[2].params[1], 0.5f)
+        assertEquals(255f, result.layers[2].params[2], 0.5f)
+    }
+
+    @Test
+    fun `an effect with no device counterpart is still reported`() {
+        // Wag trail needs a history of where the tail has been; the device
+        // renders from the present frame only.
+        val result = FirmwareExport.export(composition(effect("trail", "wag_trail")))
+
         assertTrue(result.layers.isEmpty())
-        assertEquals(listOf("glow", "level"), result.unmapped)
+        assertEquals(listOf("trail"), result.unmapped)
         assertTrue(FirmwareExport.describe(result).contains("Nothing in this stack"))
+    }
+
+    @Test
+    fun `breathe maps onto the device's own glow rather than degrading to loudness`() {
+        // It used to become Audio Power, which followed the room instead of a
+        // timed curve - a breathing look that stopped breathing in a quiet room.
+        val result = FirmwareExport.export(
+            composition(
+                effect("breath", "breathe", mapOf("color" to 0x2060FF.toFloat(), "rate" to 0.25f, "floor" to 0.3f))
+            )
+        )
+
+        val layer = result.layers.single()
+        assertEquals(LedEffect.BREATHING_GLOW.id, layer.effectId)
+        assertEquals(32f, layer.params[0], 0.5f)
+        assertEquals(96f, layer.params[1], 0.5f)
+        assertEquals(255f, layer.params[2], 0.5f)
+        // The composer states a rate in Hz, the device a period in seconds.
+        assertEquals(4f, layer.params[3], 0.001f)
+        assertEquals(0.3f, layer.params[4], 0.001f)
+        assertTrue("a matching mapping should not be flagged lossy", result.notes.isEmpty())
+    }
+
+    @Test
+    fun `a palette-based effect carries its settings but flags the colour loss`() {
+        val result = FirmwareExport.export(
+            composition(
+                effect("flames", "fire", mapOf("intensity" to 1.4f, "speed" to 1.2f, "falloff" to 2f))
+            )
+        )
+
+        val layer = result.layers.single()
+        assertEquals(LedEffect.FIRE.id, layer.effectId)
+        // The composer's intensity runs to 3 and the device's to 1, so a blown-out
+        // setting clamps rather than rescaling every normal one.
+        assertEquals(1f, layer.params[0], 0.001f)
+        assertEquals(1.2f, layer.params[1], 0.001f)
+        assertEquals(2f, layer.params[2], 0.001f)
+        assertEquals(Palettes.FIRE.toFloat(), layer.params[3], 0.001f)
+        assertFalse("the colour loss must be visible to the user", result.isExact)
+        assertTrue(result.notes.any { it.contains("built-in palette") })
+    }
+
+    @Test
+    fun `a reversed gradient is exported forwards and says so`() {
+        // The device scrolls one way only. Silently reversing it would be a look
+        // that came back subtly wrong with nothing to explain why.
+        val result = FirmwareExport.export(
+            composition(effect("grad", "gradient", mapOf("speed" to -0.4f, "repeat" to 2f, "axis" to 1f)))
+        )
+
+        val layer = result.layers.single()
+        assertEquals(LedEffect.GRADIENT_SCROLL.id, layer.effectId)
+        assertEquals(0.4f, layer.params[1], 0.001f)
+        assertEquals(2f, layer.params[2], 0.001f)
+        assertEquals(1f, layer.params[3], 0.001f)
+        assertTrue(result.notes.any { it.contains("the other way") })
+    }
+
+    @Test
+    fun `a decay of zero cannot produce an infinite rate`() {
+        // Both reciprocal conversions are fed by user-editable sliders, and the
+        // device would take the resulting infinity as a parameter.
+        val result = FirmwareExport.export(
+            composition(
+                effect("spark", "sparkle", mapOf("density" to 0.5f, "decay" to 0f)),
+                effect("breath", "breathe", mapOf("rate" to 0f))
+            )
+        )
+
+        result.layers.forEach { layer ->
+            layer.params.forEach { value ->
+                assertTrue("parameter must stay finite, got $value", value.isFinite())
+            }
+        }
+    }
+
+    @Test
+    fun `every mapped parameter lands inside the device's declared range`() {
+        // A parameter outside its range is a slider the app draws in one place
+        // and the device runs from another. Every effect the mapping can emit is
+        // covered, so a new mapping is checked the day it lands.
+        val everyMappableEffect = listOf(
+            "solid", "rainbow", "spectrum_bars", "vu_meter", "bass_pulse", "breathe",
+            "beat_flash", "drop_flash", "strobe", "beat_ripple", "ring_chase", "bar_sweep",
+            "fire", "plasma", "gradient", "sparkle", "motion_glow", "tap_ripple", "gravity_level"
+        )
+        val result = FirmwareExport.export(
+            composition(*everyMappableEffect.map { effect(it, it) }.toTypedArray())
+        )
+
+        // Eight device slots, so this needs more than one pass to cover them all.
+        val exported = everyMappableEffect.chunked(FirmwareExport.MAX_LAYERS).flatMap { chunk ->
+            FirmwareExport.export(composition(*chunk.map { effect(it, it) }.toTypedArray())).layers
+        }
+        assertEquals(everyMappableEffect.size, exported.size)
+        exported.forEach { layer ->
+            val effect = LedEffect.fromId(layer.effectId)!!
+            effect.params.forEach { meta ->
+                val value = layer.params[meta.id]
+                assertTrue(
+                    "${effect.name}.${meta.name} exported as $value, outside ${meta.min}..${meta.max}",
+                    value in meta.min..meta.max
+                )
+            }
+        }
+        assertTrue(result.layers.isNotEmpty())
     }
 
     @Test
