@@ -22,6 +22,12 @@ import com.tailapp.repository.DeviceRepository
  */
 class TailDirectLedOutput(
     private val repository: DeviceRepository,
+    /**
+     * Must stay **below** the firmware's direct-mode stale-frame timeout
+     * (`ConfigManager::DIRECT_FRAME_TIMEOUT_US`, 2 s), or a genuinely idle but
+     * live stream would be mistaken for an abandoned one and the device would
+     * fall back to its own effect stack mid-session.
+     */
     private val keepaliveMillis: Long = 1000L
 ) : LightingOutput {
 

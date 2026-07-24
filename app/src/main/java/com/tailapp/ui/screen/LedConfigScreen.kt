@@ -49,6 +49,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.tailapp.model.BlendMode
 import com.tailapp.model.LedEffect
+import com.tailapp.ui.components.DebouncedSlider
 import com.tailapp.ui.components.EffectParameterSlider
 import com.tailapp.ui.components.LedPreview
 import com.tailapp.viewmodel.LedConfigViewModel
@@ -108,6 +109,17 @@ fun LedConfigScreen(
                 .verticalScroll(rememberScrollState())
                 .padding(16.dp)
         ) {
+            // Output stage (protocol v5). Absent on older firmware, and the
+            // controls are hidden rather than shown against invented values.
+            ledState?.output?.let { output ->
+                OutputStageCard(
+                    output = output,
+                    totalLeds = ledState.totalLeds,
+                    onChange = viewModel::setOutputConfig
+                )
+                Spacer(Modifier.height(16.dp))
+            }
+
             // Matrix Config
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(16.dp)) {
@@ -403,6 +415,85 @@ fun LedConfigScreen(
                     }
                 }
             }
+        }
+    }
+}
+
+/**
+ * Master brightness, gamma, and the current budget the device enforces.
+ *
+ * The budget is the control that matters: a WS2812B draws roughly 60 mA at full
+ * white, so a full-white frame on a long strip asks for amps no wearable
+ * regulator will supply. Without a limit the failure mode is the rail browning
+ * out and resetting the device mid-frame; with one, the picture dims to fit.
+ * The card shows the worst case for the strip actually attached so the number
+ * is a decision rather than a guess, and says when the limiter is engaging —
+ * otherwise "my look is dimmer than the preview" has no visible cause.
+ */
+@Composable
+private fun OutputStageCard(
+    output: com.tailapp.model.LedOutputState,
+    totalLeds: Int,
+    onChange: (Int, Boolean, Int) -> Unit
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text("Output", style = MaterialTheme.typography.titleMedium)
+
+            if (output.isPowerLimited) {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "Limiting to fit the current budget — the tail is showing about " +
+                        "${output.lastPowerScale * 100 / 255}% of what this look asks for.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
+                )
+            }
+
+            Spacer(Modifier.height(8.dp))
+            DebouncedSlider(
+                label = "Master brightness",
+                value = output.brightness.toFloat(),
+                onValueChange = {
+                    onChange(it.toInt(), output.gammaEnabled, output.currentLimitMa)
+                },
+                valueRange = 1f..255f,
+                valueFormat = "%.0f"
+            )
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Gamma correction", modifier = Modifier.weight(1f))
+                Switch(
+                    checked = output.gammaEnabled,
+                    onCheckedChange = {
+                        onChange(output.brightness, it, output.currentLimitMa)
+                    }
+                )
+            }
+            Text(
+                "Off looks brighter but crushes every dim shade into the first few steps.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            Spacer(Modifier.height(8.dp))
+            DebouncedSlider(
+                label = if (output.currentLimitMa == 0) "Current budget (off)" else "Current budget",
+                value = output.currentLimitMa.toFloat(),
+                onValueChange = {
+                    onChange(output.brightness, output.gammaEnabled, it.toInt())
+                },
+                valueRange = 0f..5000f,
+                unit = " mA",
+                valueFormat = "%.0f"
+            )
+            // ~60 mA per LED at full white, plus ~1 mA of controller draw.
+            Text(
+                "0 disables the limit. This strip draws about ${totalLeds * 61} mA " +
+                    "at full white.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
     }
 }

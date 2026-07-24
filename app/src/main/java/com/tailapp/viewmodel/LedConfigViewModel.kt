@@ -111,6 +111,21 @@ class LedConfigViewModel(
         viewModelScope.launch { deviceRepository.setLedMatrix(ledsPerRing) }
     }
 
+    /**
+     * Sets the device's output stage: master brightness, gamma, and the
+     * current budget.
+     *
+     * The budget is the one worth explaining to the user: a wearable's
+     * regulator cannot deliver what a full-white frame asks for, and without a
+     * limit the failure is the rail browning out mid-frame rather than the
+     * picture dimming.
+     */
+    fun setOutputConfig(brightness: Int, gammaEnabled: Boolean, currentLimitMa: Int) {
+        viewModelScope.launch {
+            deviceRepository.setOutputConfig(brightness, gammaEnabled, currentLimitMa)
+        }
+    }
+
     fun clearUploadError() {
         _uploadError.value = null
     }
