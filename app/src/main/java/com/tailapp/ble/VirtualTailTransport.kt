@@ -64,6 +64,12 @@ class VirtualTailTransport : BleTransport {
     private var motorsEnabled = true
     private var ackSequence = 0
 
+    /**
+     * A plausible mid-charge level. Fixed rather than draining: a simulator that
+     * discharged would make the low-battery policy fire during unrelated tests.
+     */
+    private var batteryPercent = 78
+
     private var outputBrightness = 255
     private var outputGamma = true
     private var outputLimitMa = 0
@@ -105,6 +111,14 @@ class VirtualTailTransport : BleTransport {
         CharacteristicUuids.LED_STATE -> ledStateBytes()
         CharacteristicUuids.SYSTEM_CONFIG -> systemInfoBytes()
         CharacteristicUuids.PROFILE_MGMT -> profileListBytes()
+        // The standard services, so a simulated tail exercises the same code
+        // path a real one does rather than only the FF00 custom service.
+        CharacteristicUuids.BATTERY_LEVEL -> byteArrayOf(batteryPercent.toByte())
+        CharacteristicUuids.DIS_MANUFACTURER -> "TailApp".toByteArray()
+        CharacteristicUuids.DIS_MODEL_NUMBER -> "Virtual Tail".toByteArray()
+        CharacteristicUuids.DIS_FIRMWARE_REV ->
+            "v${Protocol.SUPPORTED_PROTOCOL_VERSION}.0.0-sim".toByteArray()
+        CharacteristicUuids.DIS_HARDWARE_REV -> "sim".toByteArray()
         else -> null
     }
 

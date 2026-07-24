@@ -26,6 +26,23 @@ object CharacteristicUuids {
 
     val CCCD: UUID = UUID.fromString("00002902-0000-1000-8000-00805F9B34FB")
 
+    /**
+     * Standard SIG services the device publishes alongside FF00.
+     *
+     * Deliberately the standard UUIDs and not tail-specific ones: a phone's
+     * settings screen, a smartwatch or any generic BLE tool already knows how to
+     * read a battery level from 0x2A19, and none of them will ever learn a
+     * private characteristic.
+     */
+    val BATTERY_SERVICE: UUID = UUID.fromString("0000180F-0000-1000-8000-00805F9B34FB")
+    val BATTERY_LEVEL: UUID   = UUID.fromString("00002A19-0000-1000-8000-00805F9B34FB")
+
+    val DEVICE_INFO_SERVICE: UUID = UUID.fromString("0000180A-0000-1000-8000-00805F9B34FB")
+    val DIS_MANUFACTURER: UUID    = UUID.fromString("00002A29-0000-1000-8000-00805F9B34FB")
+    val DIS_MODEL_NUMBER: UUID    = UUID.fromString("00002A24-0000-1000-8000-00805F9B34FB")
+    val DIS_FIRMWARE_REV: UUID    = UUID.fromString("00002A26-0000-1000-8000-00805F9B34FB")
+    val DIS_HARDWARE_REV: UUID    = UUID.fromString("00002A27-0000-1000-8000-00805F9B34FB")
+
     /** Low byte of a characteristic UUID — how FF09 identifies the written characteristic. */
     fun shortId(uuid: UUID): Byte = ((uuid.mostSignificantBits shr 32) and 0xFF).toByte()
 }

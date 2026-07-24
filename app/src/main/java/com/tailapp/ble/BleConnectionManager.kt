@@ -387,7 +387,18 @@ class BleConnectionManager(private val context: Context) : BleTransport {
         }
     }
 
+    /**
+     * Resolves a characteristic by UUID, the tail's own service first.
+     *
+     * The fallback sweep is what makes the standard services reachable — Battery
+     * Service and Device Information live outside FF00, so a lookup scoped to
+     * FF00 alone reports them as absent on a device that is publishing them. The
+     * tail's service is still searched first: it is where everything hot lives,
+     * and a same-UUID collision there should resolve to ours.
+     */
     private fun findCharacteristic(uuid: UUID): BluetoothGattCharacteristic? {
-        return gatt?.getService(CharacteristicUuids.SERVICE)?.getCharacteristic(uuid)
+        val connection = gatt ?: return null
+        connection.getService(CharacteristicUuids.SERVICE)?.getCharacteristic(uuid)?.let { return it }
+        return connection.services?.firstNotNullOfOrNull { it.getCharacteristic(uuid) }
     }
 }
