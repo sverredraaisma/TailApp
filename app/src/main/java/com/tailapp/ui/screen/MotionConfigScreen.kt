@@ -1,6 +1,8 @@
 package com.tailapp.ui.screen
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -36,6 +38,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.tailapp.model.MotionLimits
@@ -144,6 +149,27 @@ fun MotionConfigScreen(
                                 motionState.gravityX, motionState.gravityY, motionState.gravityZ
                             ),
                             style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                }
+
+                Spacer(Modifier.height(16.dp))
+
+                // Manual drive (FF0B)
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text("Manual drive", style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            "Drag to steer the tail. It suspends the active pattern while " +
+                                "you hold, and hands back when you let go.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        PuppetPad(
+                            onDrag = viewModel::startPuppet,
+                            onRelease = viewModel::stopPuppet,
+                            modifier = Modifier.fillMaxWidth()
                         )
                     }
                 }
@@ -492,4 +518,79 @@ private fun ServoConfigRow(
             }
         }
     }
+}
+
+/**
+ * A drag pad that steers the tail directly.
+ *
+ * Reports position as a fraction of each axis's travel rather than in degrees,
+ * so the pad means the same thing whatever limits are configured — and so the
+ * corner of the pad is always exactly the corner of the mechanism's range.
+ *
+ * Releasing stops streaming rather than sending a centre position: the device's
+ * own timeout hands the tail back to its pattern, and letting go should return
+ * whatever the pattern was doing, not park the tail at zero.
+ */
+@Composable
+private fun PuppetPad(
+    onDrag: (Float, Float) -> Unit,
+    onRelease: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var knob by remember { mutableStateOf(Offset.Zero) }
+    var held by remember { mutableStateOf(false) }
+
+    val surface = MaterialTheme.colorScheme.surfaceVariant
+    val outline = MaterialTheme.colorScheme.outline
+    val accent = MaterialTheme.colorScheme.primary
+
+    Canvas(
+        modifier = modifier
+            .height(200.dp)
+            .pointerInput(Unit) {
+                detectDragGestures(
+                    onDragStart = { position ->
+                        held = true
+                        knob = position
+                        emitPuppet(position, size.width, size.height, onDrag)
+                    },
+                    onDrag = { change, _ ->
+                        change.consume()
+                        knob = change.position
+                        emitPuppet(change.position, size.width, size.height, onDrag)
+                    },
+                    onDragEnd = { held = false; onRelease() },
+                    onDragCancel = { held = false; onRelease() }
+                )
+            }
+    ) {
+        val cx = size.width / 2f
+        val cy = size.height / 2f
+        val radius = minOf(size.width, size.height) / 2f * 0.9f
+
+        drawCircle(surface, radius = radius, center = Offset(cx, cy))
+        drawCircle(outline, radius = radius, center = Offset(cx, cy), style = Stroke(width = 2f))
+        drawLine(outline, Offset(cx - radius, cy), Offset(cx + radius, cy), strokeWidth = 1f)
+        drawLine(outline, Offset(cx, cy - radius), Offset(cx, cy + radius), strokeWidth = 1f)
+
+        val point = if (held) knob else Offset(cx, cy)
+        drawCircle(accent, radius = 18f, center = point)
+    }
+}
+
+/** Maps a touch point to `-1..1` per axis and reports it. */
+private fun emitPuppet(
+    position: Offset,
+    width: Int,
+    height: Int,
+    onDrag: (Float, Float) -> Unit
+) {
+    val cx = width / 2f
+    val cy = height / 2f
+    val radius = minOf(width, height) / 2f * 0.9f
+    if (radius <= 0f) return
+    val x = ((position.x - cx) / radius).coerceIn(-1f, 1f)
+    // Screen y grows downward; up on the pad should be up on the tail.
+    val y = (-(position.y - cy) / radius).coerceIn(-1f, 1f)
+    onDrag(x, y)
 }
