@@ -36,21 +36,27 @@
 
 ### 1.1 The wire surface: who implements what
 
-The app was written against **protocol v3**; the firmware now ships **protocol v4**.
-Everything in v3 is covered end-to-end on both sides — commands, parsers, ACKs,
-capabilities, profiles with names, CRC'd image upload, FFT streaming, direct pixel
-streaming. The v4 additions are firmware-only today:
+> **Resolved.** This section described the state at the time of the review: the
+> app spoke **v3** while the firmware shipped **v4**, so a current device tripped
+> the compatibility banner on every connect, and five v4 features were
+> firmware-only. Worst of them, `SYS_EVENT_STALL` was *silently dropped* — a
+> stall latches every motor off, and the user's only clue was a tail that
+> stopped. All of it is closed; both sides now speak **v5**. Kept as the record
+> of what the drift cost, because it is the standing failure mode of a
+> two-repository protocol and will happen again.
 
-| Protocol v4 feature (firmware, shipped) | App status |
-|---|---|
-| `SYS_EVENT_STALL` (`0x04`) on FF07 — motor stalled, all motors freewheeled + latched | **Silently dropped.** `SystemEvent.fromCode` returns `null` for unknown codes; the user's only clue is a tail that stops moving. |
-| `MCMD_ENABLE_MOTORS` (`0x09`) — clear the stall latch / force freewheel | No builder, no UI. After a stall there is no in-app recovery. |
-| `MCMD_SET_MOTION_LIMITS` (`0x08`) — per-motor max vel/accel/jerk + StallGuard threshold | No builder, no UI. |
-| FF06 motion block — `motors_enabled` + per-motor motion limits read-back | Not parsed; `SystemInfoParser` stops after the capabilities block. |
-| PID marked vestigial (open-loop steppers) | App still presents Kp/Ki/Kd as first-class controls. |
+| Protocol v4 feature | Status at review | Now |
+|---|---|---|
+| `SYS_EVENT_STALL` (`0x04`) on FF07 | Silently dropped by `SystemEvent.fromCode` | Persistent banner + re-enable action |
+| `MCMD_ENABLE_MOTORS` (`0x09`) | No builder, no UI | Builder, repository method, recovery button |
+| `MCMD_SET_MOTION_LIMITS` (`0x08`) | No builder, no UI | Per-motor velocity/accel/jerk/StallGuard editor |
+| FF06 motion block | Not parsed | Parsed; absent block stays distinguishable from "motors off" |
+| PID marked vestigial | Presented as first-class controls | Collapsed into a "legacy" section |
 
-Because `SUPPORTED_PROTOCOL_VERSION = 3`, a current device also trips the
-compatibility banner on every connect even though v4 is additive.
+The v5 additions on top — the FF09 sequence byte and readable result, the
+readable FF07 ring, `RESULT_BUSY`, the FF05 beat trailer, per-layer opacity, the
+output stage, and FF0B motion targets — landed on both sides together, which is
+the point: the drift above happened because one side moved alone.
 
 ### 1.2 What the app has that the firmware plan barely accounts for
 
@@ -80,8 +86,13 @@ work along exactly that line.
 
 ### 1.3 Device data the app receives but never lets effects see
 
+> **Resolved by milestone M2.** Taps and the motion state now reach
+> `ReactiveContext`, and five effects read them. Kept because the *shape* of the
+> gap is worth remembering: every one of these was already parsed and displayed,
+> and stopped one layer short of being useful.
+
 The composer's design principle is "there is no such thing as an effect that cannot
-react" — yet the device's own body is invisible to it:
+react" — yet the device's own body was invisible to it:
 
 | Data | Arrives as | Today | Missing |
 |---|---|---|---|
@@ -95,6 +106,9 @@ already exists for all of it, and the composer's registry-wide tests mean each n
 effect is covered the day it lands.
 
 ### 1.4 Duplications worth resolving
+
+> **Resolved by M3 and M4.** One capture now feeds both consumers, and a
+> composer look can be installed onto the device's own layer stack.
 
 - **Two mic captures, mutually exclusive.** The FF05 visualiser stream
   (`FftStreamManager`) and BeatLight (`LightingEngine`) each open their own capture;
