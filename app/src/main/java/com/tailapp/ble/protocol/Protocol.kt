@@ -11,8 +11,12 @@ object Protocol {
      * v3 corrected the image-upload CRC-32 to the standard polynomial. Talking to
      * a v2 device with a v3 app means every BEGIN-armed upload is rejected, so the
      * mismatch banner is load-bearing, not cosmetic.
+     *
+     * v4 added the stall event, motor enable/disable, per-motor motion limits,
+     * and the FF06 motion block. v5 added the FF09 sequence byte and readable
+     * result, the readable FF07 event ring, and `RESULT_BUSY`.
      */
-    const val SUPPORTED_PROTOCOL_VERSION = 3
+    const val SUPPORTED_PROTOCOL_VERSION = 5
 
     /** Profile slots the firmware exposes on FF08 (`MAX_PROFILE_SLOTS`). */
     const val MAX_PROFILE_SLOTS = 4
@@ -52,7 +56,11 @@ enum class CommandResultCode(val code: Byte) {
     UNKNOWN_ID(0x03),
     OUT_OF_RANGE(0x04),
     BAD_STATE(0x05),
+    BUSY(0x06),
     UNKNOWN(0xFF.toByte());
+
+    /** True for a rejection the same command could succeed at if resent. */
+    val isRetryable: Boolean get() = this == BUSY
 
     val isSuccess: Boolean get() = this == OK
 
@@ -64,6 +72,7 @@ enum class CommandResultCode(val code: Byte) {
             UNKNOWN_ID -> "Unknown pattern/effect id"
             OUT_OF_RANGE -> "Index out of range"
             BAD_STATE -> "Rejected: bad state (image checksum or empty profile slot)"
+            BUSY -> "Device busy — command queue full, retry"
             UNKNOWN -> "Unrecognised result code"
         }
 
@@ -72,11 +81,20 @@ enum class CommandResultCode(val code: Byte) {
     }
 }
 
-/** Acknowledgement notified on FF09: `[char_uuid_lo][command_id][result]`. */
+/**
+ * Acknowledgement on FF09: `[char_uuid_lo][command_id][result][seq]`.
+ *
+ * [sequence] is a device-side counter (protocol v5), not something the app
+ * supplies — this protocol's commands are variable-length, so there is nowhere
+ * unambiguous to put an app token. It still distinguishes two identical
+ * in-flight commands, since acknowledgements arrive in submission order, and a
+ * gap in it means a notify was dropped. Null when talking to older firmware.
+ */
 data class CommandResult(
     val characteristicId: Byte,
     val commandId: Byte,
-    val result: CommandResultCode
+    val result: CommandResultCode,
+    val sequence: Int? = null
 ) {
     val isSuccess: Boolean get() = result.isSuccess
 
@@ -85,11 +103,19 @@ data class CommandResult(
         get() = "FF%02X".format(characteristicId)
 }
 
-/** Event notified on FF07. */
+/** Event notified on FF07, and readable there as a recent-event ring (v5). */
 enum class SystemEvent(val code: Byte) {
     TAP_BASE(0x01),
     TAP_TIP(0x02),
-    CONFIG_CHANGED(0x03);
+    CONFIG_CHANGED(0x03),
+
+    /**
+     * StallGuard tripped: the firmware dropped every motor to freewheel and
+     * latched them off until explicitly re-enabled. Until the app handled this,
+     * a stall looked like a tail that stopped for no stated reason — the only
+     * other trace is `motors_enabled` in the FF06 read.
+     */
+    STALL(0x04);
 
     companion object {
         fun fromCode(code: Byte): SystemEvent? = entries.find { it.code == code }

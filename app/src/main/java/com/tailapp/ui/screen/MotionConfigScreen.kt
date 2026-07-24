@@ -38,6 +38,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.tailapp.model.MotionLimits
 import com.tailapp.model.MotionPattern
 import com.tailapp.model.ServoConfig
 import com.tailapp.ui.components.DebouncedSlider
@@ -203,7 +204,15 @@ fun MotionConfigScreen(
                         Spacer(Modifier.height(8.dp))
 
                         systemInfo.servos.forEachIndexed { i, servo ->
-                            ServoConfigRow(index = i, servo = servo, viewModel = viewModel)
+                            ServoConfigRow(
+                                index = i,
+                                servo = servo,
+                                // Null on firmware that predates the FF06 motion
+                                // block; the limit controls are hidden rather
+                                // than shown against invented values.
+                                limits = systemInfo.motion?.limits?.getOrNull(i),
+                                viewModel = viewModel
+                            )
                             if (i < systemInfo.servos.lastIndex) HorizontalDivider()
                         }
                     }
@@ -272,6 +281,7 @@ fun MotionConfigScreen(
 private fun ServoConfigRow(
     index: Int,
     servo: ServoConfig,
+    limits: MotionLimits?,
     viewModel: MotionConfigViewModel
 ) {
     var expanded by remember { mutableStateOf(false) }
@@ -367,29 +377,110 @@ private fun ServoConfigRow(
                 valueFormat = "%.0f"
             )
 
-            // PID Gains
-            Text("PID Gains", style = MaterialTheme.typography.bodyMedium)
-            DebouncedSlider(
-                label = "Kp",
-                value = servo.pid.kp,
-                onValueChange = { viewModel.setPidGains(index.toByte(), it, servo.pid.ki, servo.pid.kd) },
-                valueRange = 0f..10f,
-                valueFormat = "%.2f"
-            )
-            DebouncedSlider(
-                label = "Ki",
-                value = servo.pid.ki,
-                onValueChange = { viewModel.setPidGains(index.toByte(), servo.pid.kp, it, servo.pid.kd) },
-                valueRange = 0f..1f,
-                valueFormat = "%.3f"
-            )
-            DebouncedSlider(
-                label = "Kd",
-                value = servo.pid.kd,
-                onValueChange = { viewModel.setPidGains(index.toByte(), servo.pid.kp, servo.pid.ki, it) },
-                valueRange = 0f..5f,
-                valueFormat = "%.2f"
-            )
+            // Motion limits — what actually shapes movement on this firmware.
+            // The steppers run open-loop through a jerk-limited profile, so
+            // these are the real controls; PID below is vestigial.
+            if (limits != null) {
+                Spacer(Modifier.height(8.dp))
+                Text("Motion limits", style = MaterialTheme.typography.bodyMedium)
+                DebouncedSlider(
+                    label = "Max velocity (deg/s)",
+                    value = limits.maxVelocity,
+                    onValueChange = {
+                        viewModel.setMotionLimits(
+                            index.toByte(), it, limits.maxAcceleration, limits.maxJerk,
+                            limits.stallThreshold.toByte()
+                        )
+                    },
+                    valueRange = 0f..1440f,
+                    valueFormat = "%.0f"
+                )
+                DebouncedSlider(
+                    label = "Max acceleration (deg/s²)",
+                    value = limits.maxAcceleration,
+                    onValueChange = {
+                        viewModel.setMotionLimits(
+                            index.toByte(), limits.maxVelocity, it, limits.maxJerk,
+                            limits.stallThreshold.toByte()
+                        )
+                    },
+                    valueRange = 0f..10000f,
+                    valueFormat = "%.0f"
+                )
+                DebouncedSlider(
+                    label = "Max jerk (deg/s³)",
+                    value = limits.maxJerk,
+                    onValueChange = {
+                        viewModel.setMotionLimits(
+                            index.toByte(), limits.maxVelocity, limits.maxAcceleration, it,
+                            limits.stallThreshold.toByte()
+                        )
+                    },
+                    valueRange = 0f..100000f,
+                    valueFormat = "%.0f"
+                )
+                DebouncedSlider(
+                    label = if (limits.stallDetectionEnabled) {
+                        "Stall sensitivity (SGTHRS)"
+                    } else {
+                        "Stall sensitivity (off)"
+                    },
+                    value = limits.stallThreshold.toFloat(),
+                    onValueChange = {
+                        viewModel.setMotionLimits(
+                            index.toByte(), limits.maxVelocity, limits.maxAcceleration,
+                            limits.maxJerk, it.toInt().toByte()
+                        )
+                    },
+                    valueRange = 0f..255f,
+                    valueFormat = "%.0f"
+                )
+                Text(
+                    "0 disables stall detection. Too high freewheels the tail at rest; " +
+                        "too low never catches a real jam — tune against your mechanics.",
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+
+            // Vestigial: the motors are TMC2209 steppers driven open-loop as of
+            // firmware d4973bf, so these gains are stored and reported but no
+            // longer affect motion. Collapsed rather than removed because the
+            // firmware still accepts them and old profiles carry values.
+            var showLegacy by remember { mutableStateOf(false) }
+            Spacer(Modifier.height(8.dp))
+            TextButton(onClick = { showLegacy = !showLegacy }) {
+                Text(if (showLegacy) "Hide legacy PID gains" else "Show legacy PID gains")
+            }
+            AnimatedVisibility(visible = showLegacy) {
+                Column {
+                    Text(
+                        "Not used for control — the motors run open-loop. Kept for " +
+                            "compatibility with the FF06 layout.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    DebouncedSlider(
+                        label = "Kp",
+                        value = servo.pid.kp,
+                        onValueChange = { viewModel.setPidGains(index.toByte(), it, servo.pid.ki, servo.pid.kd) },
+                        valueRange = 0f..10f,
+                        valueFormat = "%.2f"
+                    )
+                    DebouncedSlider(
+                        label = "Ki",
+                        value = servo.pid.ki,
+                        onValueChange = { viewModel.setPidGains(index.toByte(), servo.pid.kp, it, servo.pid.kd) },
+                        valueRange = 0f..1f,
+                        valueFormat = "%.3f"
+                    )
+                    DebouncedSlider(
+                        label = "Kd",
+                        value = servo.pid.kd,
+                        onValueChange = { viewModel.setPidGains(index.toByte(), servo.pid.kp, servo.pid.ki, it) },
+                        valueRange = 0f..5f,
+                        valueFormat = "%.2f"
+                    )
+                }
+            }
         }
     }
 }

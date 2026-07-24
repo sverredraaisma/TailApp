@@ -73,8 +73,11 @@ class SystemInfoParserTest {
     }
 
     @Test
-    fun `full default payload is 97 bytes as documented`() {
-        assertEquals(97, FirmwarePayloads.systemInfo().size)
+    fun `full default payload is 150 bytes as documented`() {
+        // 97 through the capabilities block, then the protocol-v4 motion block:
+        // 1 motors_enabled byte + 4 motors x 13 bytes.
+        assertEquals(150, FirmwarePayloads.systemInfo().size)
+        assertEquals(97, FirmwarePayloads.systemInfo(motion = null).size)
     }
 
     @Test
@@ -122,11 +125,23 @@ class SystemInfoParserTest {
 
     @Test
     fun `truncated capability block is dropped instead of throwing`() {
-        val full = FirmwarePayloads.systemInfo()
+        // Truncate a payload that ends at the capability block, so this cuts
+        // into the capabilities rather than the motion block that follows them.
+        val full = FirmwarePayloads.systemInfo(motion = null)
         val truncated = full.copyOfRange(0, full.size - 3)
         val info = SystemInfoParser.parse(truncated)
         assertNotNull(info)
         assertNull(requireNotNull(info).capabilities)
+    }
+
+    @Test
+    fun `a dropped capability block takes the motion block with it`() {
+        // The motion block sits after the capabilities and is only locatable by
+        // walking them, so it must not be parsed from whatever bytes follow.
+        val full = FirmwarePayloads.systemInfo(motion = null)
+        val info = requireNotNull(SystemInfoParser.parse(full.copyOfRange(0, full.size - 3)))
+        assertNull(info.capabilities)
+        assertNull(info.motion)
     }
 
     @Test
@@ -156,7 +171,63 @@ class SystemInfoParserTest {
         assertFalse(older.isProtocolSupported)
         assertEquals(2, older.protocolVersion)
 
-        val future = requireNotNull(SystemInfoParser.parse(FirmwarePayloads.systemInfo(protocolVersion = 4)))
+        val future = requireNotNull(
+            SystemInfoParser.parse(
+                FirmwarePayloads.systemInfo(
+                    protocolVersion = Protocol.SUPPORTED_PROTOCOL_VERSION + 1
+                )
+            )
+        )
         assertFalse(future.isProtocolSupported)
+    }
+
+    @Test
+    fun `parses the motion block appended after the capabilities`() {
+        val info = requireNotNull(SystemInfoParser.parse(FirmwarePayloads.systemInfo()))
+        val motion = requireNotNull(info.motion)
+
+        assertTrue(motion.motorsEnabled)
+        assertEquals(4, motion.limits.size)
+        assertEquals(720f, motion.limits[0].maxVelocity, 0f)
+        assertEquals(3600f, motion.limits[0].maxAcceleration, 0f)
+        assertEquals(36000f, motion.limits[0].maxJerk, 0f)
+        assertEquals(0, motion.limits[0].stallThreshold)
+        // Motors 2 and 3 carry a different, stall-armed profile, so this would
+        // catch the whole block being parsed from one motor's bytes.
+        assertEquals(360f, motion.limits[2].maxVelocity, 0f)
+        assertEquals(60, motion.limits[2].stallThreshold)
+        assertTrue(motion.limits[2].stallDetectionEnabled)
+        assertFalse(motion.limits[0].stallDetectionEnabled)
+    }
+
+    @Test
+    fun `motors latched off is reported as stalled`() {
+        val latched = FirmwarePayloads.DEFAULT_MOTION.copy(motorsEnabled = false)
+        val info = requireNotNull(
+            SystemInfoParser.parse(FirmwarePayloads.systemInfo(motion = latched))
+        )
+        assertTrue(info.motorsStalled)
+    }
+
+    @Test
+    fun `firmware without a motion block is not reported as stalled`() {
+        // Absence of evidence is not a stall: pre-v4 firmware publishes nothing
+        // here, and rendering that as "motors stopped" would be a lie.
+        val info = requireNotNull(
+            SystemInfoParser.parse(FirmwarePayloads.systemInfo(motion = null))
+        )
+        assertNull(info.motion)
+        assertFalse(info.motorsStalled)
+    }
+
+    @Test
+    fun `a truncated motion block is dropped rather than half-parsed`() {
+        val full = FirmwarePayloads.systemInfo()
+        val truncated = full.copyOf(full.size - 5)
+        val info = requireNotNull(SystemInfoParser.parse(truncated))
+
+        assertNotNull(info.capabilities) // everything before it still parsed
+        assertNull(info.motion)
+        assertFalse(info.motorsStalled)
     }
 }

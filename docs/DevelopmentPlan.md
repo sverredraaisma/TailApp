@@ -1,7 +1,9 @@
 # TailApp Development Plan
 
-> **Status:** Planning
-> **Last updated:** 2026-03-30
+> **Status:** Historical — all twelve phases below are implemented (plus the BeatLight
+> analysis pipeline and the effect composer, which post-date this plan). Forward
+> planning lives in [`roadmap.md`](roadmap.md).
+> **Last updated:** 2026-07-24 (status header only; plan content is as written 2026-03-30)
 
 ## Table of Contents
 

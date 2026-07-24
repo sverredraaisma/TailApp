@@ -4,6 +4,8 @@ import com.tailapp.ble.protocol.Protocol
 import com.tailapp.model.Capabilities
 import com.tailapp.model.ImuConfig
 import com.tailapp.model.LayerConfig
+import com.tailapp.model.MotionLimits
+import com.tailapp.model.MotionSystemState
 import com.tailapp.model.PidGains
 import com.tailapp.model.ServoConfig
 import java.io.ByteArrayOutputStream
@@ -92,7 +94,23 @@ object FirmwarePayloads {
         params: List<Float> = List(8) { 0f }
     ) = LayerConfig(effectId, blendMode, enabled, flipX, flipY, mirrorX, mirrorY, params)
 
-    /** FF06 system info + capabilities. Pass `capabilities = null` for pre-capability firmware. */
+    val DEFAULT_MOTION: MotionSystemState = MotionSystemState(
+        motorsEnabled = true,
+        limits = listOf(
+            MotionLimits(720f, 3600f, 36000f, stallThreshold = 0),
+            MotionLimits(720f, 3600f, 36000f, stallThreshold = 0),
+            MotionLimits(360f, 1800f, 18000f, stallThreshold = 60),
+            MotionLimits(360f, 1800f, 18000f, stallThreshold = 60)
+        )
+    )
+
+    /**
+     * FF06 system info + capabilities + motion block.
+     *
+     * Pass `capabilities = null` for pre-capability firmware, or `motion = null`
+     * for firmware older than protocol v4. The motion block is only emitted when
+     * the capability block is, matching the device's own layout.
+     */
     fun systemInfo(
         protocolVersion: Int = Protocol.SUPPORTED_PROTOCOL_VERSION,
         firmwareMajor: Int = 1,
@@ -100,7 +118,8 @@ object FirmwarePayloads {
         firmwarePatch: Int = 0,
         servos: List<ServoConfig> = DEFAULT_SERVOS,
         imus: List<ImuConfig>? = DEFAULT_IMUS,
-        capabilities: Capabilities? = Capabilities.DEFAULT
+        capabilities: Capabilities? = Capabilities.DEFAULT,
+        motion: MotionSystemState? = DEFAULT_MOTION
     ): ByteArray {
         val w = Writer()
         w.u8(protocolVersion)
@@ -131,6 +150,21 @@ object FirmwarePayloads {
         w.u8(capabilities.maxImus)
         w.u8(capabilities.maxLedRings)
         w.u8(capabilities.imageMaxDim)
+        if (motion == null) return w.toByteArray()
+        w.bool(motion.motorsEnabled)
+        repeat(servos.size) { i ->
+            val lim = motion.limits.getOrElse(i) { MotionLimits.FIRMWARE_DEFAULT }
+            w.f32(lim.maxVelocity).f32(lim.maxAcceleration).f32(lim.maxJerk)
+            w.u8(lim.stallThreshold)
+        }
+        return w.toByteArray()
+    }
+
+    /** FF07 read payload — the device's recent-event ring, `[count][event]...`. */
+    fun eventLog(events: List<Int>): ByteArray {
+        val w = Writer()
+        w.u8(events.size)
+        events.forEach { w.u8(it) }
         return w.toByteArray()
     }
 
@@ -146,7 +180,19 @@ object FirmwarePayloads {
         return w.toByteArray()
     }
 
-    /** FF09 command result. */
-    fun commandResult(characteristicLowByte: Int, commandId: Int, result: Int): ByteArray =
-        byteArrayOf(characteristicLowByte.toByte(), commandId.toByte(), result.toByte())
+    /**
+     * FF09 command result. Pass `sequence = null` to build the 3-byte payload
+     * pre-v5 firmware sends, so the parser's tolerance of it stays covered.
+     */
+    fun commandResult(
+        characteristicLowByte: Int,
+        commandId: Int,
+        result: Int,
+        sequence: Int? = 0
+    ): ByteArray {
+        val w = Writer()
+        w.u8(characteristicLowByte).u8(commandId).u8(result)
+        if (sequence != null) w.u8(sequence)
+        return w.toByteArray()
+    }
 }

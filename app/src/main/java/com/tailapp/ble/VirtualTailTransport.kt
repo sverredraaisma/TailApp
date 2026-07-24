@@ -3,8 +3,11 @@ package com.tailapp.ble
 import android.util.Log
 import com.tailapp.ble.protocol.CharacteristicUuids
 import com.tailapp.ble.protocol.Protocol
+import com.tailapp.ble.protocol.SystemEvent
 import com.tailapp.model.Capabilities
 import com.tailapp.model.LayerConfig
+import com.tailapp.model.MotionLimits
+import com.tailapp.model.MotionPattern
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -55,6 +58,11 @@ class VirtualTailTransport : BleTransport {
 
     private var patternId = 0x01 // wagging, so the motion screen shows something moving
     private val motionParams = FloatArray(8)
+
+    /** Per-motor open-loop limits, seeded with the firmware profile's defaults. */
+    private val motionLimits = MutableList(4) { MotionLimits.FIRMWARE_DEFAULT }
+    private var motorsEnabled = true
+    private var ackSequence = 0
 
     private val profiles = arrayOfNulls<ProfileSnapshot>(Protocol.MAX_PROFILE_SLOTS)
 
@@ -117,20 +125,58 @@ class VirtualTailTransport : BleTransport {
     // --- command application ---
 
     private fun applyMotion(data: ByteArray): Int { return when (data[0].toInt()) {
-        0x01 -> { // select pattern — the firmware zeroes the pattern params
+        0x01 -> { // select pattern — adopts the pattern's own defaults
             if (data.size < 2) return RESULT_BAD_LENGTH
             patternId = data[1].toInt() and 0xFF
+            val defaults = MotionPattern.fromId(data[1])?.params?.map { it.default }
             motionParams.fill(0f)
+            defaults?.forEachIndexed { i, v -> if (i in motionParams.indices) motionParams[i] = v }
+            // Selecting a pattern is an explicit run intent, so it clears a
+            // stall latch — same as the firmware.
+            motorsEnabled = true
             RESULT_OK
         }
         0x02 -> { // set pattern parameter
             if (data.size < 6) return RESULT_BAD_LENGTH
             val id = data[1].toInt() and 0xFF
-            if (id in motionParams.indices) motionParams[id] = data.f32(2)
+            if (id !in motionParams.indices) return RESULT_OUT_OF_RANGE
+            motionParams[id] = data.f32(2)
             RESULT_OK
         }
-        else -> RESULT_OK // calibrate, PID, limits, tap: accepted, not modelled
+        0x06 -> { // set axis limits — an inverted window pins the axis to one end
+            if (data.size < 10) return RESULT_BAD_LENGTH
+            if (data.f32(2) >= data.f32(6)) RESULT_OUT_OF_RANGE else RESULT_OK
+        }
+        0x08 -> { // set motion limits
+            if (data.size < 15) return RESULT_BAD_LENGTH
+            val id = data[1].toInt() and 0xFF
+            if (id !in motionLimits.indices) return RESULT_OUT_OF_RANGE
+            motionLimits[id] = MotionLimits(
+                maxVelocity = data.f32(2),
+                maxAcceleration = data.f32(6),
+                maxJerk = data.f32(10),
+                stallThreshold = data[14].toInt() and 0xFF
+            )
+            RESULT_OK
+        }
+        0x09 -> { // enable/disable motors (clears a stall latch)
+            if (data.size < 2) return RESULT_BAD_LENGTH
+            motorsEnabled = data[1].toInt() != 0
+            RESULT_OK
+        }
+        0x05 -> { motorsEnabled = true; RESULT_OK } // calibrate also clears the latch
+        else -> RESULT_OK // PID, tap: accepted, not modelled
     } }
+
+    /**
+     * Simulates a stall: motors freewheel and latch off until re-enabled.
+     * Exposed so the stall banner and recovery flow can be exercised without
+     * physically jamming a tail.
+     */
+    fun simulateStall() {
+        motorsEnabled = false
+        emit(CharacteristicUuids.SYSTEM_EVENTS, byteArrayOf(SystemEvent.STALL.code))
+    }
 
     private fun applyLed(data: ByteArray): Int { return when (data[0].toInt()) {
         0x01 -> { // set layer effect
@@ -304,6 +350,14 @@ class VirtualTailTransport : BleTransport {
         u8(caps.maxImus)
         u8(caps.maxLedRings)
         u8(caps.imageMaxDim)
+        // Motion block (protocol v4): live motor state + per-motor open-loop
+        // limits. Reporting the profile's real defaults rather than zeros, the
+        // way the firmware does.
+        bool(motorsEnabled)
+        motionLimits.forEach { lim ->
+            f32(lim.maxVelocity).f32(lim.maxAcceleration).f32(lim.maxJerk)
+            u8(lim.stallThreshold)
+        }
     }.toByteArray()
 
     private fun profileListBytes(): ByteArray = Writer().apply {
@@ -315,11 +369,18 @@ class VirtualTailTransport : BleTransport {
         }
     }.toByteArray()
 
-    private fun ack(uuid: UUID, commandId: Byte, result: Int) =
+    // Protocol v5 acknowledgement: the trailing sequence byte is what lets the
+    // app tell two identical in-flight commands apart.
+    private fun ack(uuid: UUID, commandId: Byte, result: Int) {
+        val seq = ackSequence
+        ackSequence = (ackSequence + 1) and 0xFF
         emit(
             CharacteristicUuids.CMD_RESULT,
-            byteArrayOf(CharacteristicUuids.shortId(uuid), commandId, result.toByte())
+            byteArrayOf(
+                CharacteristicUuids.shortId(uuid), commandId, result.toByte(), seq.toByte()
+            )
         )
+    }
 
     private fun emit(uuid: UUID, value: ByteArray) {
         _characteristicUpdate.tryEmit(CharacteristicUpdate(uuid, value))

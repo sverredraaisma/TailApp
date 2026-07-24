@@ -56,6 +56,40 @@ data class Capabilities(
     }
 }
 
+/**
+ * Open-loop motion limits and stall sensitivity for one motor (FF06 motion
+ * block, protocol v4).
+ *
+ * These replaced PID as the way motion is shaped: the motors are TMC2209
+ * steppers driven open-loop through a jerk-limited profile, so velocity,
+ * acceleration and jerk are the real controls. A value of `0` means the
+ * firmware substitutes its own default.
+ */
+data class MotionLimits(
+    val maxVelocity: Float,
+    val maxAcceleration: Float,
+    val maxJerk: Float,
+    /** TMC2209 SGTHRS; `0` = stall detection off for this motor. */
+    val stallThreshold: Int
+) {
+    val stallDetectionEnabled: Boolean get() = stallThreshold > 0
+
+    companion object {
+        /** What the firmware's profile falls back to when a limit is 0. */
+        val FIRMWARE_DEFAULT = MotionLimits(720f, 3600f, 36000f, 0)
+    }
+}
+
+/** Live motor state from the FF06 motion block (protocol v4). */
+data class MotionSystemState(
+    /**
+     * False while the motors are latched off after a stall. Nothing will move
+     * until the app sends `enableMotors(true)`.
+     */
+    val motorsEnabled: Boolean,
+    val limits: List<MotionLimits>
+)
+
 data class SystemInfo(
     val protocolVersion: Int,
     val firmwareMajor: Int,
@@ -63,9 +97,18 @@ data class SystemInfo(
     val firmwarePatch: Int,
     val servos: List<ServoConfig>,
     val imus: List<ImuConfig>,
-    val capabilities: Capabilities?
+    val capabilities: Capabilities?,
+    /** Null on firmware older than protocol v4, which does not publish it. */
+    val motion: MotionSystemState? = null
 ) {
     val firmwareVersion: String get() = "$firmwareMajor.$firmwareMinor.$firmwarePatch"
+
+    /**
+     * True only when the device explicitly reports its motors latched off.
+     * Firmware that predates the motion block reports nothing, and absence of
+     * evidence must not render as a stall banner.
+     */
+    val motorsStalled: Boolean get() = motion?.motorsEnabled == false
 
     /** Capability block if the device published one, otherwise conservative defaults. */
     val effectiveCapabilities: Capabilities get() = capabilities ?: Capabilities.DEFAULT

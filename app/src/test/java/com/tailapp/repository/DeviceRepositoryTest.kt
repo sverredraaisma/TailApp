@@ -754,6 +754,74 @@ class DeviceRepositoryTest {
         val info = requireNotNull(repository.deviceState.value.systemInfo)
         assertEquals(99, info.protocolVersion)
         assertFalse(info.isProtocolSupported)
-        assertEquals(3, Protocol.SUPPORTED_PROTOCOL_VERSION)
+        assertEquals(5, Protocol.SUPPORTED_PROTOCOL_VERSION)
+    }
+
+    // ── Stall handling ─────────────────────────────────────────────
+
+    @Test
+    fun `a stall event marks the motors off without waiting for a refresh`() = runTest {
+        val transport = FakeBleTransport()
+        val repository = connected(transport)
+        assertFalse(requireNotNull(repository.deviceState.value.systemInfo).motorsStalled)
+
+        transport.notify(CharacteristicUuids.SYSTEM_EVENTS, byteArrayOf(SystemEvent.STALL.code))
+        advanceUntilIdle()
+
+        // The FF06 read only refreshes about once a second. Waiting for it would
+        // leave the tail visibly dead with the UI still claiming all is well.
+        assertTrue(requireNotNull(repository.deviceState.value.systemInfo).motorsStalled)
+    }
+
+    @Test
+    fun `re-enabling the motors clears the stall immediately`() = runTest {
+        val transport = FakeBleTransport()
+        val repository = connected(transport)
+
+        transport.notify(CharacteristicUuids.SYSTEM_EVENTS, byteArrayOf(SystemEvent.STALL.code))
+        advanceUntilIdle()
+
+        repository.setMotorsEnabled(true)
+        advanceUntilIdle()
+
+        val write = transport.writes.last { it.uuid == CharacteristicUuids.MOTION_CMD }
+        assertArrayEquals(byteArrayOf(0x09, 0x01), write.data)
+        // Optimistic: the banner has to go away when the user acts on it, not a
+        // second later when the device gets around to saying so.
+        assertFalse(requireNotNull(repository.deviceState.value.systemInfo).motorsStalled)
+    }
+
+    @Test
+    fun `setting motion limits writes the command and updates the cached block`() = runTest {
+        val transport = FakeBleTransport()
+        val repository = connected(transport)
+
+        repository.setMotionLimits(1, 480f, 2400f, 24000f, 75)
+        advanceUntilIdle()
+
+        val write = transport.writes.last { it.uuid == CharacteristicUuids.MOTION_CMD }
+        assertEquals(0x08.toByte(), write.data[0])
+        assertEquals(0x01.toByte(), write.data[1])
+
+        val limits = requireNotNull(repository.deviceState.value.systemInfo?.motion).limits
+        assertEquals(480f, limits[1].maxVelocity, 0f)
+        assertEquals(75, limits[1].stallThreshold)
+        // Only the addressed motor moves.
+        assertEquals(720f, limits[0].maxVelocity, 0f)
+    }
+
+    @Test
+    fun `a stall against firmware without a motion block does not fabricate one`() = runTest {
+        val transport = FakeBleTransport()
+        val repository = connected(transport) {
+            seedDefaultReads(systemInfo = FirmwarePayloads.systemInfo(motion = null))
+        }
+
+        transport.notify(CharacteristicUuids.SYSTEM_EVENTS, byteArrayOf(SystemEvent.STALL.code))
+        advanceUntilIdle()
+
+        // Nothing to update, and inventing a motion block would claim limits the
+        // device never reported.
+        assertNull(repository.deviceState.value.systemInfo?.motion)
     }
 }

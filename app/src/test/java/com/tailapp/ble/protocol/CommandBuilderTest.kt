@@ -84,6 +84,31 @@ class CommandBuilderTest {
         assertArrayEquals(byteArrayOf(0x07, 0x00, 0x00), MotionCommands.setImuTap(0, false))
     }
 
+    @Test
+    fun `setMotionLimits packs three floats and a stall threshold`() {
+        val cmd = MotionCommands.setMotionLimits(
+            servoId = 2,
+            maxVelocity = 360f,
+            maxAcceleration = 1800f,
+            maxJerk = 18000f,
+            stallThreshold = 60
+        )
+
+        assertEquals(15, cmd.size)
+        assertEquals(0x08.toByte(), cmd[0])
+        assertEquals(0x02.toByte(), cmd[1])
+        assertEquals(360f, cmd.f32At(2), 0f)
+        assertEquals(1800f, cmd.f32At(6), 0f)
+        assertEquals(18000f, cmd.f32At(10), 0f)
+        assertEquals(60.toByte(), cmd[14])
+    }
+
+    @Test
+    fun `enableMotors is two bytes`() {
+        assertArrayEquals(byteArrayOf(0x09, 0x01), MotionCommands.enableMotors(true))
+        assertArrayEquals(byteArrayOf(0x09, 0x00), MotionCommands.enableMotors(false))
+    }
+
     // ── FF03 LED ───────────────────────────────────────────────────
 
     @Test

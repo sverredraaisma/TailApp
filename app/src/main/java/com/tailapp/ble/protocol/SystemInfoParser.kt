@@ -2,6 +2,8 @@ package com.tailapp.ble.protocol
 
 import com.tailapp.model.Capabilities
 import com.tailapp.model.ImuConfig
+import com.tailapp.model.MotionLimits
+import com.tailapp.model.MotionSystemState
 import com.tailapp.model.PidGains
 import com.tailapp.model.ServoConfig
 import com.tailapp.model.SystemInfo
@@ -24,15 +26,21 @@ import java.nio.ByteOrder
  * [num_effects u8][effect_ids...]
  * [num_blend_modes u8][blend_ids...]
  * [max_layers u8][max_servos u8][max_imus u8][max_led_rings u8][image_max_dim u8]
+ * -- motion (protocol v4) --
+ * [motors_enabled u8]
+ * per motor (13 B): [max_vel f32][max_accel f32][max_jerk f32][stall_thresh u8]
  * ```
  *
- * The capability block is optional: firmware that predates it still yields a
- * valid [SystemInfo] with `capabilities == null`.
+ * Both trailing blocks are optional: firmware that predates either still yields
+ * a valid [SystemInfo], with that block null. Absence has to stay
+ * distinguishable from "motors are off" — a null motion block must not be
+ * reported to the user as a stall.
  */
 object SystemInfoParser {
 
     private const val SERVO_ENTRY_SIZE = 16
     private const val IMU_ENTRY_SIZE = 2
+    private const val MOTION_ENTRY_SIZE = 13
     private const val HEADER_SIZE = 5
 
     fun parse(data: ByteArray): SystemInfo? {
@@ -73,7 +81,25 @@ object SystemInfoParser {
         }
 
         val capabilities = parseCapabilities(buf)
-        return SystemInfo(protocolVersion, major, minor, patch, servos, imus, capabilities)
+        val motion = if (capabilities != null) parseMotion(buf, numServos) else null
+        return SystemInfo(protocolVersion, major, minor, patch, servos, imus, capabilities, motion)
+    }
+
+    /**
+     * Returns null when the motion block is absent (pre-v4 firmware) or
+     * truncated. It sits after the capability block, so it is only reachable
+     * once that parsed.
+     */
+    private fun parseMotion(buf: ByteBuffer, numServos: Int): MotionSystemState? {
+        if (buf.remaining() < 1 + numServos * MOTION_ENTRY_SIZE) return null
+        val motorsEnabled = buf.u8() != 0
+        val limits = List(numServos) {
+            val maxVelocity = buf.float
+            val maxAcceleration = buf.float
+            val maxJerk = buf.float
+            MotionLimits(maxVelocity, maxAcceleration, maxJerk, buf.u8())
+        }
+        return MotionSystemState(motorsEnabled, limits)
     }
 
     /** Returns null (rather than throwing) when the capability block is absent or truncated. */

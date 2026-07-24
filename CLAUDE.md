@@ -134,13 +134,18 @@ such thing as a non-reactive effect.
 nav argument. `composer` (the layer/folder editor) is reached from the BeatLight
 screen's "Edit" button rather than from the overview.
 
-## BLE protocol (v3)
+## BLE protocol (v5)
 
 `Protocol.SUPPORTED_PROTOCOL_VERSION` is the contract version this app targets;
 the device reports its own as the **first byte** of the FF06 read. A mismatch is
 surfaced as a banner on the overview screen, and it is load-bearing: v2 devices
 compute the image CRC with a different polynomial, so uploads to one silently
 fail with `BAD_STATE`.
+
+Version history that still matters here: **v3** fixed the image CRC polynomial;
+**v4** added the stall event, motor enable/disable, per-motor motion limits and
+the FF06 motion block; **v5** added the FF09 sequence byte and readable last
+result, the readable FF07 event ring, and `RESULT_BUSY`.
 
 | UUID | Direction | Purpose |
 |---|---|---|
@@ -150,7 +155,7 @@ fail with `BAD_STATE`.
 | FF04 | read + notify | LED state |
 | FF05 | write-no-response | FFT audio stream |
 | FF06 | read/write | System info + capabilities |
-| FF07 | read + notify | Events: tap base/tip, config changed |
+| FF07 | read + notify | Events: tap base/tip, config changed, stall. The read returns a recent-event ring (`[count][evt]...`) |
 | FF08 | read/write | Profile slots (occupancy + names) |
 | FF09 | read + notify | Command result (ACK/error) for every non-FF05/FF0A write |
 | FF0A | write-no-response | Direct LED pixel stream (`DeviceRepository.streamDirectFrame`) |
@@ -161,7 +166,20 @@ Things worth remembering when touching this layer:
   `effect_id = 0xFF` in place and leaves `num_layers` alone. Treat cleared slots
   as `LayerConfig.isEmpty`, never as removed list entries.
 - **Every write is acknowledged on FF09.** Don't assume a write succeeded; a
-  rejected command reports a `CommandResultCode` there.
+  rejected command reports a `CommandResultCode` there. The payload carries a
+  device-side sequence byte (v5) so two identical in-flight commands are
+  distinguishable and a dropped notify shows up as a gap; the last result is
+  also readable, because a notify is best-effort.
+- **A stall latches every motor off.** `SYS_EVENT_STALL` on FF07 means
+  StallGuard tripped and the firmware released the shared enable line. Nothing
+  moves again until `MCMD_ENABLE_MOTORS`, a calibrate, or a pattern select. The
+  FF06 motion block's `motors_enabled` byte mirrors the latch — but only v4+
+  firmware publishes that block, so `SystemInfo.motorsStalled` is deliberately
+  false when it is absent rather than treating "unknown" as "stalled".
+- **PID is vestigial.** The motors are open-loop steppers; `MCMD_SET_MOTION_LIMITS`
+  (velocity/acceleration/jerk + StallGuard threshold) is what shapes motion now.
+  The PID commands and FF06 fields are retained for wire compatibility only, and
+  the UI keeps them behind a collapsed "legacy" section.
 - **Image uploads use BEGIN → chunks → FINALIZE.** BEGIN (`0x08`) arms a length
   and CRC check that FINALIZE verifies.
 - **The image CRC is standard CRC-32 as of v3** (`java.util.zip.CRC32`).

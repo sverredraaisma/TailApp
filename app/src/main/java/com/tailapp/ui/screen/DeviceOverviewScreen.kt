@@ -84,6 +84,10 @@ fun DeviceOverviewScreen(
                 SystemEvent.TAP_BASE -> snackbarHostState.showSnackbar("Tap detected (base)")
                 SystemEvent.TAP_TIP -> snackbarHostState.showSnackbar("Tap detected (tip)")
                 SystemEvent.CONFIG_CHANGED -> snackbarHostState.showSnackbar("Device config reloaded")
+                // Deliberately not a snackbar: a stall latches every motor off
+                // until the user acts, so it needs a banner that persists (see
+                // below) rather than a message that disappears on its own.
+                SystemEvent.STALL -> Unit
             }
         }
     }
@@ -170,6 +174,32 @@ fun DeviceOverviewScreen(
                 Spacer(Modifier.height(16.dp))
             }
 
+            // A stall drops every motor to freewheel and latches them off until
+            // explicitly re-enabled. Without this the tail simply stops and the
+            // app says nothing about why, or how to recover.
+            if (si != null && si.motorsStalled) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer
+                    )
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text("Motors stopped", style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            "A motor stalled, so all motors were released and will stay off " +
+                                "until re-enabled. Clear whatever is blocking the tail first.",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Button(onClick = { viewModel.setMotorsEnabled(true) }) {
+                            Text("Re-enable motors")
+                        }
+                    }
+                }
+                Spacer(Modifier.height(16.dp))
+            }
+
             // Subsystem Status
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(16.dp)) {
@@ -179,8 +209,16 @@ fun DeviceOverviewScreen(
                     SubsystemStatusCard("Bluetooth", "Connected", StatusGreen)
                     SubsystemStatusCard(
                         "Servos",
-                        if (si != null) "${si.servos.size} configured" else "Unknown",
-                        if (si != null) StatusGreen else StatusRed
+                        when {
+                            si == null -> "Unknown"
+                            si.motorsStalled -> "${si.servos.size} configured — stalled, off"
+                            else -> "${si.servos.size} configured"
+                        },
+                        when {
+                            si == null -> StatusRed
+                            si.motorsStalled -> StatusRed
+                            else -> StatusGreen
+                        }
                     )
                     SubsystemStatusCard(
                         "LEDs",

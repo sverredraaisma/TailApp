@@ -33,6 +33,11 @@ class DeviceOverviewViewModel(
         deviceRepository.disconnect()
     }
 
+    /** Clears a stall latch and re-energizes, or forces the motors to freewheel. */
+    fun setMotorsEnabled(enabled: Boolean) {
+        viewModelScope.launch { deviceRepository.setMotorsEnabled(enabled) }
+    }
+
     fun saveProfile(slot: Byte) {
         viewModelScope.launch { deviceRepository.saveProfile(slot) }
     }

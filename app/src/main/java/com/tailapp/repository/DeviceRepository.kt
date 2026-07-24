@@ -24,6 +24,7 @@ import com.tailapp.led.PixelBuffer
 import com.tailapp.model.DeviceState
 import com.tailapp.model.LayerConfig
 import com.tailapp.model.LedState
+import com.tailapp.model.MotionLimits
 import com.tailapp.model.ProfileSlot
 import com.tailapp.model.ServoConfig
 import kotlinx.coroutines.CoroutineScope
@@ -124,8 +125,22 @@ class DeviceRepository(
                     SystemEventParser.parse(update.value)?.let { event ->
                         Log.d(TAG, "system event: $event")
                         _systemEvents.tryEmit(event)
-                        // A profile load replaces the whole config on the device.
-                        if (event == SystemEvent.CONFIG_CHANGED) refreshAll()
+                        when (event) {
+                            // A profile load replaces the whole config on the device.
+                            SystemEvent.CONFIG_CHANGED -> refreshAll()
+                            // Every motor is now latched off. Reflect that
+                            // immediately rather than waiting up to a second for
+                            // the next FF06 refresh to say so.
+                            SystemEvent.STALL -> _deviceState.update { state ->
+                                val motion = state.systemInfo?.motion ?: return@update state
+                                state.copy(
+                                    systemInfo = state.systemInfo.copy(
+                                        motion = motion.copy(motorsEnabled = false)
+                                    )
+                                )
+                            }
+                            else -> Unit
+                        }
                     }
 
                 CharacteristicUuids.CMD_RESULT ->
@@ -287,6 +302,53 @@ class DeviceRepository(
             } else {
                 state.copy(motionState = ms.copy(yAxisMin = min, yAxisMax = max))
             }
+        }
+    }
+
+    /**
+     * Sets the open-loop motion limits and stall sensitivity for one motor.
+     *
+     * These are what shape motion on the current firmware; [setPidGains] is kept
+     * only for wire compatibility with the vestigial FF06 fields.
+     */
+    suspend fun setMotionLimits(
+        servoId: Byte,
+        maxVelocity: Float,
+        maxAcceleration: Float,
+        maxJerk: Float,
+        stallThreshold: Byte
+    ) {
+        transport.writeCharacteristic(
+            CharacteristicUuids.MOTION_CMD,
+            MotionCommands.setMotionLimits(servoId, maxVelocity, maxAcceleration, maxJerk, stallThreshold)
+        )
+        _deviceState.update { state ->
+            val motion = state.systemInfo?.motion ?: return@update state
+            val idx = servoId.toInt()
+            if (idx !in motion.limits.indices) return@update state
+            val limits = motion.limits.toMutableList()
+            limits[idx] = MotionLimits(
+                maxVelocity, maxAcceleration, maxJerk, stallThreshold.toInt() and 0xFF
+            )
+            state.copy(systemInfo = state.systemInfo.copy(motion = motion.copy(limits = limits)))
+        }
+    }
+
+    /**
+     * Re-energizes the motors and clears a stall latch, or forces freewheel.
+     *
+     * After a stall the device latches every motor off and nothing moves until
+     * this arrives, so the optimistic update matters: the UI has to stop showing
+     * a stall the moment the user acts on it.
+     */
+    suspend fun setMotorsEnabled(enabled: Boolean) {
+        transport.writeCharacteristic(
+            CharacteristicUuids.MOTION_CMD,
+            MotionCommands.enableMotors(enabled)
+        )
+        _deviceState.update { state ->
+            val motion = state.systemInfo?.motion ?: return@update state
+            state.copy(systemInfo = state.systemInfo.copy(motion = motion.copy(motorsEnabled = enabled)))
         }
     }
 
