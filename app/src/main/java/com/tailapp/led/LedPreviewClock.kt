@@ -22,16 +22,18 @@ import com.tailapp.model.LedState
  * tests; [com.tailapp.ui.components.LedPreview] is the only caller that deals
  * with actual frame timing (`withFrameNanos`).
  *
- * [audio] is exposed so callers (the LED config view model) can push FFT
- * frames into it - see [AudioLevelSource.write] - without needing a separate
- * reference to whatever [AudioLevelSource] this preview's renderer happens to
- * be using internally.
+ * [audio] and [motion] are exposed so callers (the LED config view model) can
+ * push FFT frames and FF02/FF07 tail state into them - see
+ * [AudioLevelSource.write] and [MotionStateSource.publish] - without needing a
+ * separate reference to whatever sources this preview's renderer happens to be
+ * using internally.
  */
 class LedPreviewClock(
     val audio: AudioLevelSource = AudioLevelSource(),
+    val motion: MotionStateSource = MotionStateSource(),
     imageSupplier: () -> ImageData? = { null },
 ) {
-    private val renderer = LedStackRenderer(audio, imageSupplier)
+    private val renderer = LedStackRenderer(audio, motion, imageSupplier)
 
     private var lastFrameNanos: Long = NO_FRAME_YET
 

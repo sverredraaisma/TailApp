@@ -39,6 +39,7 @@ data class ImageData(val rgb: ByteArray, val width: Int, val height: Int)
  */
 class LedStackRenderer(
     private val audio: AudioLevelSource,
+    private val motion: MotionStateSource = MotionStateSource(),
     private val imageSupplier: () -> ImageData?,
 ) {
     private var ledsPerRing: List<Int> = emptyList()
@@ -68,7 +69,7 @@ class LedStackRenderer(
                 updateInPlace(previousRenderer, config)
                 previousRenderer
             } else {
-                FirmwareEffectFactory.create(config, audio)
+                FirmwareEffectFactory.create(config, audio, motion)
             }
 
             val blendMode = config.blend ?: BlendMode.OVERWRITE

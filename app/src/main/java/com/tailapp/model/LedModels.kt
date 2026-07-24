@@ -66,6 +66,103 @@ enum class LedEffect(val id: Byte, val displayName: String, val params: List<Par
             ParamMetadata(4, "Downbeat boost", 1.0f, 1f, 3f),
             ParamMetadata(5, "Sweep", 0f, 0f, 1f)
         )
+    ),
+
+    // The LED-3 catalogue. Defaults mirror each effect's own constructor in
+    // TailFirmware `main/led/effects/`; a mismatch here would show the user a
+    // slider position the device is not actually at. Ranges follow each
+    // effect's own clamp in `render()` where it has one.
+    //
+    // A "Palette" slot tops out at PALETTE_BUILTIN_COUNT-1: the four user
+    // slots exist in `palette.h`, but no BLE command writes them, so an id
+    // above 5 samples black on the device and in the preview alike.
+    FIRE(
+        0x07, "Fire", listOf(
+            ParamMetadata(0, "Intensity", 1.0f, 0f, 1f),
+            ParamMetadata(1, "Speed", 0.6f, 0f, 3f),
+            ParamMetadata(2, "Cooling", 1.2f, 0f, 4f),
+            ParamMetadata(3, "Palette", 0f, 0f, 5f)
+        )
+    ),
+    BREATHING_GLOW(
+        0x08, "Breathing Glow", listOf(
+            ParamMetadata(0, "Red", 255f, 0f, 255f),
+            ParamMetadata(1, "Green", 220f, 0f, 255f),
+            ParamMetadata(2, "Blue", 180f, 0f, 255f),
+            ParamMetadata(3, "Period", 4.0f, 0.1f, 30f, "s"),
+            ParamMetadata(4, "Min brightness", 0.08f, 0f, 1f)
+        )
+    ),
+    COMET(
+        0x09, "Comet", listOf(
+            ParamMetadata(0, "Red", 0f, 0f, 255f),
+            ParamMetadata(1, "Green", 160f, 0f, 255f),
+            ParamMetadata(2, "Blue", 255f, 0f, 255f),
+            // Sign sets the direction of travel, so the range straddles zero.
+            ParamMetadata(3, "Speed", 0.4f, -3f, 3f, "/s"),
+            ParamMetadata(4, "Tail length", 0.25f, 0.01f, 1f),
+            ParamMetadata(5, "Bounce", 0f, 0f, 1f)
+        )
+    ),
+    TWINKLE(
+        0x0A, "Twinkle", listOf(
+            ParamMetadata(0, "Density", 0.12f, 0f, 1f),
+            ParamMetadata(1, "Fade speed", 1.0f, 0.05f, 5f, "/s"),
+            ParamMetadata(2, "Palette", 2f, 0f, 5f)
+        )
+    ),
+    GRADIENT_SCROLL(
+        0x0B, "Gradient Scroll", listOf(
+            ParamMetadata(0, "Palette", 2f, 0f, 5f),
+            ParamMetadata(1, "Speed", 0.15f, 0f, 2f, "/s"),
+            ParamMetadata(2, "Scale", 1.0f, 0.1f, 10f),
+            ParamMetadata(3, "Axis", 0f, 0f, 1f)
+        )
+    ),
+    PLASMA(
+        0x0C, "Plasma", listOf(
+            ParamMetadata(0, "Palette", 3f, 0f, 5f),
+            ParamMetadata(1, "Scale", 2.0f, 0.1f, 10f),
+            ParamMetadata(2, "Speed", 0.3f, 0f, 2f, "/s")
+        )
+    ),
+    CANDLE_FLICKER(
+        0x0D, "Candle Flicker", listOf(
+            ParamMetadata(0, "Colour temp", 0.5f, 0f, 1f),
+            ParamMetadata(1, "Intensity", 0.85f, 0f, 1f),
+            ParamMetadata(2, "Wind", 0.2f, 0f, 1f)
+        )
+    ),
+
+    /**
+     * The three effects below read the tail's own motion sensors — the one
+     * category no other lighting hardware can do. They are dark or at rest
+     * (never wrong) when the app has told the preview nothing about the body;
+     * on the device they read `MotionBus` directly.
+     */
+    MOTION_GLOW(
+        0x0E, "Motion Glow", listOf(
+            ParamMetadata(0, "Palette", 2f, 0f, 5f),
+            ParamMetadata(1, "Speed gain", 1.0f, 0f, 5f),
+            ParamMetadata(2, "Floor", 0.15f, 0f, 1f)
+        )
+    ),
+    TAP_RIPPLE(
+        0x0F, "Tap Ripple", listOf(
+            ParamMetadata(0, "Red", 0f, 0f, 255f),
+            ParamMetadata(1, "Green", 180f, 0f, 255f),
+            ParamMetadata(2, "Blue", 255f, 0f, 255f),
+            ParamMetadata(3, "Speed", 1.2f, 0.1f, 5f, "/s"),
+            ParamMetadata(4, "Width", 0.3f, 0.01f, 1f)
+        )
+    ),
+    GRAVITY_LEVEL(
+        0x10, "Gravity Level", listOf(
+            ParamMetadata(0, "Red", 0f, 0f, 255f),
+            ParamMetadata(1, "Green", 140f, 0f, 255f),
+            ParamMetadata(2, "Blue", 255f, 0f, 255f),
+            ParamMetadata(3, "Contrast", 1.2f, 0f, 3f)
+        )
     );
 
     companion object {

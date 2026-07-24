@@ -9,15 +9,20 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.tailapp.audio.FftResult
 import com.tailapp.audio.FftStreamManager
+import com.tailapp.ble.protocol.SystemEvent
+import com.tailapp.composer.TailTelemetryTracker
 import com.tailapp.led.ImageData
 import com.tailapp.led.LedPreviewClock
 import com.tailapp.model.DeviceState
+import com.tailapp.model.MotionState
 import com.tailapp.repository.DeviceRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -49,6 +54,12 @@ class LedConfigViewModel(
     /** Drives [com.tailapp.ui.components.LedPreview]; see its and [LedPreviewClock]'s KDoc. */
     val previewClock = LedPreviewClock(imageSupplier = { lastUploadedImage })
 
+    /**
+     * Derives the `motion_energy` the firmware's motion task publishes but FF02
+     * does not carry, from how fast the reported deflection is changing.
+     */
+    private val telemetryTracker = TailTelemetryTracker()
+
     init {
         // Feed the same FFT frames the app streams to the device (FF05) into
         // the preview's audio source, so Audio Power/Bar/Freq Bars layers
@@ -62,6 +73,47 @@ class LedConfigViewModel(
                 manager.latestResult.filterNotNull().collect { onFftResult(it) }
             }
         }
+
+        // The tail-reactive layers (Motion Glow, Tap Ripple, Gravity Level)
+        // read the device's own body on hardware. Feeding the preview the same
+        // FF02/FF07 inputs is what keeps it from showing a permanently
+        // at-rest tail while the real one is being waved around.
+        viewModelScope.launch {
+            deviceRepository.systemEvents.collect { event ->
+                when (event) {
+                    SystemEvent.TAP_BASE -> previewClock.motion.tapBase()
+                    SystemEvent.TAP_TIP -> previewClock.motion.tapTip()
+                    else -> Unit
+                }
+            }
+        }
+        viewModelScope.launch {
+            deviceRepository.deviceState
+                .map { it.motionState }
+                .filterNotNull()
+                // FF02 notifies at ~20 Hz whether or not anything moved.
+                .distinctUntilChanged()
+                .collect { onMotionState(it, System.nanoTime()) }
+        }
+    }
+
+    /**
+     * Maps one FF02 motion state into [previewClock]'s
+     * [com.tailapp.led.MotionStateSource], the way the firmware's motion task
+     * fills `motion_snapshot_t`. Positions stay in raw degrees because
+     * `motion_glow_effect.cpp` maps degrees across a fixed window — normalising
+     * them here would make the preview's hue disagree with the tail's.
+     * Internal so it is unit-testable without a live BLE stack.
+     */
+    internal fun onMotionState(state: MotionState, nowNanos: Long) {
+        val telemetry = telemetryTracker.update(state, nowNanos)
+        previewClock.motion.publish(
+            positions = state.encoderPositions.toFloatArray(),
+            gravityX = state.gravityX,
+            gravityY = state.gravityY,
+            gravityZ = state.gravityZ,
+            motionEnergy = telemetry.wagSpeed
+        )
     }
 
     /**
