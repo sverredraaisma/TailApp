@@ -110,7 +110,11 @@ class AppContainer(context: Context) {
         ledLayout = ledLayout,
         scope = applicationScope,
         genreClassifier = genreClassifier,
-        beatModelStore = beatModelStore.takeIf { USE_CRNN_BEAT_ACTIVATION }
+        beatModelStore = beatModelStore.takeIf { USE_CRNN_BEAT_ACTIVATION },
+        // A running session derives the device's FF05 frames from analysis it
+        // already does, so the device's own audio effects keep working instead
+        // of being starved of the microphone by the session.
+        deviceStream = deviceRepository
     )
 
     /**

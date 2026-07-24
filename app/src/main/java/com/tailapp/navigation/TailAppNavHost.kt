@@ -91,7 +91,12 @@ fun TailAppNavHost(
             arguments = listOf(navArgument("address") { type = NavType.StringType })
         ) {
             val vm: AudioConfigViewModel = viewModel(factory = factory {
-                AudioConfigViewModel(container.deviceRepository, container.fftStreamManager, container.audioPrefs)
+                AudioConfigViewModel(
+                    container.deviceRepository,
+                    container.fftStreamManager,
+                    container.audioPrefs,
+                    container.lightingEngine
+                )
             })
             AudioConfigScreen(viewModel = vm, onBack = { navController.popBackStack() })
         }

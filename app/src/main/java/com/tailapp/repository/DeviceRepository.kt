@@ -21,6 +21,7 @@ import com.tailapp.ble.protocol.SystemEvent
 import com.tailapp.ble.protocol.SystemEventParser
 import com.tailapp.ble.protocol.SystemInfoParser
 import com.tailapp.led.PixelBuffer
+import com.tailapp.effects.DeviceAudioStream
 import com.tailapp.model.DeviceState
 import com.tailapp.model.LayerConfig
 import com.tailapp.model.LedState
@@ -42,7 +43,7 @@ import kotlinx.coroutines.launch
 class DeviceRepository(
     private val transport: BleTransport,
     private val scope: CoroutineScope
-) {
+) : DeviceAudioStream {
     private val _deviceState = MutableStateFlow(DeviceState())
     val deviceState: StateFlow<DeviceState> = _deviceState.asStateFlow()
 
@@ -512,6 +513,27 @@ class DeviceRepository(
         transport.writeWithoutResponse(
             CharacteristicUuids.FFT_STREAM,
             FftFrameBuilder.build(loudness, bins)
+        )
+    }
+
+    /**
+     * Streams an audio frame with the beat trailer, so the device's own effects
+     * and motion patterns can react to the beat.
+     *
+     * Three extra bytes per frame buy the device something it cannot compute:
+     * it has no microphone, so without this the tempo is simply unknown to it.
+     * Additive on the wire, so this is safe against firmware that ignores it.
+     */
+    override fun sendFftFrameWithBeat(
+        loudness: Byte,
+        bins: ByteArray,
+        beatPhase: Float,
+        bpm: Float,
+        flags: Int
+    ) {
+        transport.writeWithoutResponse(
+            CharacteristicUuids.FFT_STREAM,
+            FftFrameBuilder.buildWithBeat(loudness, bins, beatPhase, bpm, flags)
         )
     }
 

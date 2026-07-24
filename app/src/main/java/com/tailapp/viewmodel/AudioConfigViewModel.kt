@@ -3,7 +3,9 @@ package com.tailapp.viewmodel
 import android.content.SharedPreferences
 import androidx.lifecycle.ViewModel
 import com.tailapp.audio.FftProcessor
+import com.tailapp.audio.FftSettings
 import com.tailapp.audio.FftStreamManager
+import com.tailapp.effects.LightingEngine
 import com.tailapp.model.DeviceState
 import com.tailapp.repository.DeviceRepository
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -13,7 +15,14 @@ import kotlinx.coroutines.flow.asStateFlow
 class AudioConfigViewModel(
     private val deviceRepository: DeviceRepository,
     private val fftStreamManager: FftStreamManager? = null,
-    private val prefs: SharedPreferences? = null
+    private val prefs: SharedPreferences? = null,
+    /**
+     * The BeatLight engine, which derives the device's FF05 frames from its own
+     * analysis while a session runs. These settings describe the frame the
+     * device receives, so they have to reach both producers or the spectrum
+     * would change shape depending on which one happened to be streaming.
+     */
+    private val lightingEngine: LightingEngine? = null
 ) : ViewModel() {
 
     val deviceState: StateFlow<DeviceState> = deviceRepository.deviceState
@@ -60,12 +69,26 @@ class AudioConfigViewModel(
         processor?.normalizationSpeed = initNorm
         processor?.freqRangeStart = initStart
         processor?.freqRangeEnd = initEnd
+        applyToEngine()
+    }
+
+    /**
+     * Mirrors the settings onto the engine's encoder, so the device sees the
+     * same frame shape whichever producer is streaming.
+     */
+    private fun applyToEngine() {
+        lightingEngine?.fftSettings = FftSettings(
+            binCount = _numBins.value,
+            frequencyStartHz = _freqStart.value,
+            frequencyEndHz = _freqEnd.value
+        )
     }
 
     fun setNumBins(value: Int) {
         val clamped = value.coerceIn(FftProcessor.MIN_BINS, FftProcessor.MAX_BINS)
         _numBins.value = clamped
         fftStreamManager?.fftProcessor?.numBins = clamped
+        applyToEngine()
         prefs?.edit()?.putInt(KEY_NUM_BINS, clamped)?.apply()
     }
 
@@ -78,12 +101,14 @@ class AudioConfigViewModel(
     fun setFreqStart(value: Float) {
         _freqStart.value = value
         fftStreamManager?.fftProcessor?.freqRangeStart = value
+        applyToEngine()
         prefs?.edit()?.putFloat(KEY_FREQ_START, value)?.apply()
     }
 
     fun setFreqEnd(value: Float) {
         _freqEnd.value = value
         fftStreamManager?.fftProcessor?.freqRangeEnd = value
+        applyToEngine()
         prefs?.edit()?.putFloat(KEY_FREQ_END, value)?.apply()
     }
 

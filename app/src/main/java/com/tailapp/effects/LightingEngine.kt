@@ -7,7 +7,11 @@ import com.tailapp.audio.AudioSource
 import com.tailapp.audio.AudioSources
 import com.tailapp.audio.BeatNetFeatureExtractor
 import com.tailapp.audio.FeatureConfig
+import com.tailapp.audio.FeatureFrameFftEncoder
+import com.tailapp.audio.FftSettings
+import com.tailapp.ble.protocol.FftFrameBuilder
 import com.tailapp.audio.FeatureExtractor
+import com.tailapp.audio.FeatureFrame
 import com.tailapp.audio.OboeAudioSource
 import com.tailapp.audio.dsp.Resampler
 import com.tailapp.beat.BeatActivation
@@ -84,6 +88,23 @@ enum class BeatActivationKind(val displayName: String) {
 /**
  * Everything the monitoring UI shows about a running session.
  */
+/**
+ * The seam through which a session feeds the device's own audio effects.
+ *
+ * Narrow on purpose: [LightingEngine] should not know what BLE is, and this
+ * keeps the engine testable with a recording stand-in.
+ * [com.tailapp.repository.DeviceRepository] is the real implementation.
+ */
+interface DeviceAudioStream {
+    fun sendFftFrameWithBeat(
+        loudness: Byte,
+        bins: ByteArray,
+        beatPhase: Float,
+        bpm: Float,
+        flags: Int
+    )
+}
+
 data class BeatLightState(
     val isRunning: Boolean = false,
     val bpm: Float = 0f,
@@ -198,7 +219,13 @@ class LightingEngine(
     beatModelStore: BeatModelStore? = null,
     private val workDispatcher: CoroutineDispatcher = Dispatchers.Default.limitedParallelism(1),
     private val audioSourceFactory: (Int) -> AudioSource = { rate -> AudioSources.create(rate) },
-    private val clock: () -> Long = System::nanoTime
+    private val clock: () -> Long = System::nanoTime,
+    /**
+     * Where the device's own FF05 audio frames go. Optional so the engine and
+     * its tests stay independent of BLE; without it the session simply does not
+     * feed the device's built-in effects.
+     */
+    private val deviceStream: DeviceAudioStream? = null
 ) {
     private val extractor = FeatureExtractor(featureConfig)
 
@@ -256,6 +283,26 @@ class LightingEngine(
      * clock: wag speed is a derivative, and the notify interval jitters.
      */
     private val telemetryTracker = TailTelemetryTracker()
+
+    /**
+     * Derives the device's FF05 frame from the same analysis this session
+     * already runs, so the device's own audio effects work while a session is
+     * live instead of being starved of the microphone by it.
+     */
+    private val fftEncoder = FeatureFrameFftEncoder(featureConfig)
+
+    /** How the FF05 frame is built; mirrors the Audio Config screen. */
+    var fftSettings: FftSettings
+        get() = fftEncoder.settings
+        set(value) { fftEncoder.settings = value }
+
+    // Analysis runs at ~50 fps; the device's staleness window and render rate
+    // are built for ~30, so forward roughly every other frame.
+    private val streamDecimation: Int =
+        (featureConfig.framesPerSecond / DEVICE_STREAM_FPS).toInt().coerceAtLeast(1)
+    private var streamFrameCounter = 0
+    private var pendingStreamBeat = false
+    private var pendingStreamDrop = false
 
     private val _state = MutableStateFlow(BeatLightState(activationSource = activationKind()))
     val state: StateFlow<BeatLightState> = _state.asStateFlow()
@@ -447,14 +494,18 @@ class LightingEngine(
                     scene.onBeat(beat)
                     latestBeat = beat
                 }
+                var dropThisFrame = false
                 transients.process(frame)?.let { result ->
                     result.drop?.let {
                         scene.onDrop(it)
                         latestDrop = it
+                        dropThisFrame = true
                     }
                     scene.onSection(result.section)
                     latestRamp = result.section.ramp
                 }
+
+                forwardToDeviceStream(frame, beats.isNotEmpty(), dropThisFrame)
             }
             // A short read means the buffer is drained; anything more would spin.
             if (read < readBuffer.size) break
@@ -466,6 +517,54 @@ class LightingEngine(
     /** Renders and dispatches one frame. */
     internal fun renderFrame(nowNanos: Long) {
         scene.render(nowNanos)
+    }
+
+    /**
+     * Sends the device its own FF05 audio frame, derived from this analysis
+     * frame rather than from a second microphone capture.
+     *
+     * This is what lets the device's built-in effects run *while* a BeatLight
+     * session does: the two used to fight over the mic, and the session won by
+     * stopping the FF05 stream outright. Nothing here opens a capture, so there
+     * is nothing left to conflict.
+     *
+     * Decimated to roughly 30 fps because that is what the firmware's staleness
+     * window and render rate are built around; forwarding all 50 analysis
+     * frames a second would just burn radio time.
+     */
+    private fun forwardToDeviceStream(frame: FeatureFrame, onBeat: Boolean, onDrop: Boolean) {
+        val sink = deviceStream ?: return
+
+        // Latch the events so a beat landing on a skipped frame is still
+        // reported on the next one that goes out, rather than being lost to
+        // decimation.
+        if (onBeat) pendingStreamBeat = true
+        if (onDrop) pendingStreamDrop = true
+
+        streamFrameCounter++
+        if (streamFrameCounter < streamDecimation) return
+        streamFrameCounter = 0
+
+        val encoded = fftEncoder.encode(frame)
+        val beat = latestBeat
+        val bpm = beat?.bpm ?: 0f
+        val phase = if (beat != null && bpm > 0f) {
+            val since = (frame.timestampNanos - beat.timestampNanos) / 1_000_000_000f
+            if (since < 0f) 0f else (since / (60f / bpm)) % 1f
+        } else {
+            0f
+        }
+
+        var flags = 0
+        if (pendingStreamBeat) {
+            flags = flags or FftFrameBuilder.FLAG_BEAT
+            if (beat?.isDownbeat == true) flags = flags or FftFrameBuilder.FLAG_DOWNBEAT
+        }
+        if (pendingStreamDrop) flags = flags or FftFrameBuilder.FLAG_DROP
+        pendingStreamBeat = false
+        pendingStreamDrop = false
+
+        sink.sendFftFrameWithBeat(encoded.loudness, encoded.bins, phase, bpm, flags)
     }
 
     /**
@@ -595,6 +694,10 @@ class LightingEngine(
         resampler?.reset()
         scene.reset()
         telemetryTracker.reset()
+        fftEncoder.reset()
+        streamFrameCounter = 0
+        pendingStreamBeat = false
+        pendingStreamDrop = false
         genreWindowFill = 0
         latestBeat = null
         latestDrop = null
@@ -612,5 +715,12 @@ class LightingEngine(
 
         /** ~30 fps, matching the device's own LED refresh. */
         const val FRAME_INTERVAL_MILLIS = 33L
+
+        /**
+         * Rate at which FF05 audio frames are forwarded to the device. Its
+         * staleness window and render loop are built for this; sending all ~50
+         * analysis frames a second would only burn radio time.
+         */
+        const val DEVICE_STREAM_FPS = 30f
     }
 }

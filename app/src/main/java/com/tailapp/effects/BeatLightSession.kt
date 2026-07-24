@@ -71,14 +71,16 @@ class BeatLightSession(
         _isActive.value = true
         _error.value = null
 
-        // The FF05 visualiser stream and this session both want the microphone,
-        // and a second capture generally gets silence rather than an error. They
-        // are mutually exclusive anyway: direct mode bypasses the effect stack
-        // the FFT stream feeds, so leaving it running would only burn battery
-        // sending frames nothing renders.
+        // The standalone FF05 capture is stopped, but the device does not lose
+        // its audio: the session now derives FF05 frames from the analysis it
+        // already runs and streams them itself (LightingEngine.deviceStream).
+        // Two captures would still be one too many — a second one generally
+        // returns silence rather than an error — but the device's own effects
+        // no longer go dark for the duration of a session, which is what used
+        // to make these genuinely exclusive.
         val fftWasStreaming = fftStreamManager?.isStreaming?.value == true
         if (fftWasStreaming) {
-            Log.i(TAG, "stopping the FF05 stream: it and this session cannot share the mic")
+            Log.i(TAG, "taking over the FF05 stream: one capture now feeds both")
             fftStreamManager?.stop()
         }
 

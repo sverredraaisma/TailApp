@@ -48,6 +48,29 @@ This document is the map. The wire protocol lives in TailFirmware's
         TailDirectLedOutput (FF0A)                        Compose preview
 ```
 
+## One microphone, two consumers
+
+The FF05 visualiser stream and a BeatLight session used to open separate mic
+captures, which made them mutually exclusive — a second capture generally
+returns silence rather than an error, so starting a session silently killed the
+device's own audio effects.
+
+They share one capture now. `FeatureFrameFftEncoder` derives the device's FF05
+frame from the analysis frames the session already produces: the log-spaced
+filterbank is regrouped into the configured bin count over the configured
+frequency window (taking each group's **peak**, since a mean washes a narrow
+peak out and the device's bar effects are drawing peaks), and the same
+`AdaptivePeakNormalizer` the composer uses maps levels onto `0..255` so bars
+reach full height at conversational volume rather than only when clipping.
+
+Each frame also carries a **beat trailer** — phase, BPM, and beat/downbeat/drop
+flags. The device has no microphone and no beat tracker, so without this its
+own effects and motion patterns cannot know where the beat is; three bytes a
+frame hand them the phone's tracker's output. It is additive on the wire: the
+firmware reads exactly `num_bins` of bin data and ignores anything after, so new
+apps work with old firmware and vice versa. Forwarding is decimated to ~30 fps
+to match what the firmware's staleness window and render loop are built for.
+
 **Everything above the scene is analysis; everything below it is the composer.**
 The three tiers produce beats, transients and a genre label; `CompositionScene`
 folds those — plus the loudness and FFT spectrum from the same feature frames —
@@ -75,7 +98,7 @@ three apart with a 0.86 ms residual — see [beat-model.md](beat-model.md).
 | `com.tailapp.beat` | `ActivationSource`, `SpectralFluxActivationSource`, `CrnnActivationSource`, `BeatModelStore`, `TempoEstimator`, `BeatDecoder` (`BeatTracker`, `ParticleFilterBeatDecoder`), `BeatEvent` — see [beat-model.md](beat-model.md) |
 | `com.tailapp.drop` | transient detector, section-state tracker, `DropEvent`, `SectionState` |
 | `com.tailapp.genre` | `GenreState`, `GenreClassifier`, `EffnetMelSpectrogram`, `OnnxGenreClassifier`, `GenreModelStore` — see [genre-model.md](genre-model.md) |
-| `com.tailapp.effects` | `LightingEngine`, `BeatLightSession`, `BeatLightService` |
+| `com.tailapp.effects` | `LightingEngine`, `BeatLightSession`, `BeatLightService`, `DeviceAudioStream` |
 | `com.tailapp.composer` | the effect graph: `ReactiveContext`, `ReactiveEffect`, `CompositionRenderer`, `CompositionScene`, the 20 effects — see [composer.md](composer.md) |
 | `com.tailapp.lighting` | `LightingOutput`, `TailDirectLedOutput`, preview sink |
 | `com.tailapp.led` | Kotlin port of the firmware LED engine — coordinates, effects, compositor |
