@@ -2,7 +2,6 @@ package com.tailapp.testutil
 
 import com.tailapp.beat.BeatEvent
 import com.tailapp.drop.DropEvent
-import com.tailapp.effects.EffectProfile
 import com.tailapp.led.PixelBuffer
 import com.tailapp.lighting.LightingOutput
 
@@ -18,7 +17,6 @@ class RecordingLightingOutput : LightingOutput {
     val frameTimestamps = mutableListOf<Long>()
     val beats = mutableListOf<BeatEvent>()
     val drops = mutableListOf<DropEvent>()
-    val profiles = mutableListOf<EffectProfile>()
 
     var openedWithLedCount: Int? = null
     var closed = false
@@ -44,15 +42,10 @@ class RecordingLightingOutput : LightingOutput {
         drops.add(event)
     }
 
-    override fun onProfileChange(profile: EffectProfile) {
-        profiles.add(profile)
-    }
-
     fun clear() {
         frames.clear()
         frameTimestamps.clear()
         beats.clear()
         drops.clear()
-        profiles.clear()
     }
 }

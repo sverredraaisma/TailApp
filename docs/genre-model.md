@@ -1,8 +1,10 @@
 # The genre model
 
-BeatLight's context tier recognises what kind of music is playing so
-`EffectController` can pick a lighting profile. It runs a pretrained neural
-classifier **entirely on the phone**. No audio, no features and no embeddings
+BeatLight's context tier recognises what kind of music is playing and publishes
+it on [`ReactiveContext`](composer.md), where any effect in the user's stack may
+read it. (It used to select a lighting profile outright; the composer replaced
+that, so the genre is now an input rather than a switch.) It runs a pretrained
+neural classifier **entirely on the phone**. No audio, no features and no embeddings
 leave the device, ever — that is a hard requirement of this feature, not a
 preference, and it is why there is no "just call an API" path anywhere in here.
 
@@ -201,8 +203,8 @@ A fresh install has no models. That is the normal case, not an error:
   what a "models not installed" UI shows.
 - `OnnxGenreClassifier.create` returns null, and `AppContainer` falls back to
   `NoGenreClassifier`.
-- The pipeline runs end to end on the default profile; manual profile override
-  still works.
+- The pipeline runs end to end and every stack still renders; effects simply see
+  a genre of `unknown`.
 
 A model that is *present but unloadable* degrades the same way, once: the failure
 is logged at first use, `isAvailable` goes false, and every later window

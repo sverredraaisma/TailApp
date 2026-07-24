@@ -2,7 +2,6 @@ package com.tailapp.lighting
 
 import com.tailapp.beat.BeatEvent
 import com.tailapp.drop.DropEvent
-import com.tailapp.effects.EffectProfile
 import com.tailapp.led.PixelBuffer
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -21,9 +20,6 @@ class PreviewLightingOutput : LightingOutput {
     private val _frame = MutableStateFlow<PixelBuffer?>(null)
     val frame: StateFlow<PixelBuffer?> = _frame.asStateFlow()
 
-    private val _profile = MutableStateFlow<EffectProfile?>(null)
-    val profile: StateFlow<EffectProfile?> = _profile.asStateFlow()
-
     private val _lastBeat = MutableStateFlow<BeatEvent?>(null)
     val lastBeat: StateFlow<BeatEvent?> = _lastBeat.asStateFlow()
 
@@ -40,9 +36,5 @@ class PreviewLightingOutput : LightingOutput {
 
     override fun onDrop(event: DropEvent) {
         _lastDrop.value = event
-    }
-
-    override fun onProfileChange(profile: EffectProfile) {
-        _profile.value = profile
     }
 }

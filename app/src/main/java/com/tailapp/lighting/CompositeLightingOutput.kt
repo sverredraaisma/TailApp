@@ -2,7 +2,6 @@ package com.tailapp.lighting
 
 import com.tailapp.beat.BeatEvent
 import com.tailapp.drop.DropEvent
-import com.tailapp.effects.EffectProfile
 import com.tailapp.led.PixelBuffer
 
 /**
@@ -29,7 +28,4 @@ class CompositeLightingOutput(
     override fun onBeat(event: BeatEvent) = outputs.forEach { it.onBeat(event) }
 
     override fun onDrop(event: DropEvent) = outputs.forEach { it.onDrop(event) }
-
-    override fun onProfileChange(profile: EffectProfile) =
-        outputs.forEach { it.onProfileChange(profile) }
 }

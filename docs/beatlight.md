@@ -36,17 +36,23 @@ This document is the map. The wire protocol lives in TailFirmware's
     BeatEvent                        DropEvent / SectionStateUpdate   GenreState
         └─────────────────────────────────────┴──────────────────────────┴────────┘
                                               ▼
-                                      EffectController
-                                    (profile per genre, debounced)
+                                       CompositionScene
+                            (builds a ReactiveContext for the frame)
                                               ▼
-                                        ReactiveRenderer
-                                     (renders into a PixelBuffer)
+                                      CompositionRenderer
+                     (the user's tree of layers and folders — see composer.md)
                                               ▼
                                         LightingOutput
                      ┌────────────────────────┴────────────────────────┐
                      ▼                                                 ▼
         TailDirectLedOutput (FF0A)                        Compose preview
 ```
+
+**Everything above the scene is analysis; everything below it is the composer.**
+The three tiers produce beats, transients and a genre label; `CompositionScene`
+folds those — plus the loudness and FFT spectrum from the same feature frames —
+into one `ReactiveContext` per rendered frame, and every layer in the user's
+stack reads it. [composer.md](composer.md) is the map of that half.
 
 **Two front-ends, one beat tier.** The shared `FeatureExtractor` feeds everything
 — tempo, transients, timestamps, and the fallback activation. When the BeatNet
@@ -59,7 +65,7 @@ three apart with a 0.86 ms residual — see [beat-model.md](beat-model.md).
 |---|---|---|---|
 | Beat | 50 fps (441-sample hop @ 22050 Hz) | `BeatEvent` | per-beat triggers |
 | Transient | ~5-10 Hz | `DropEvent`, `SectionStateUpdate` | drop hits, build-up ramps, breakdown dimming |
-| Context | every 3 s (one 2.048 s Discogs-EffNet patch) | `GenreState` | which effect profile is active |
+| Context | every 3 s (one 2.048 s Discogs-EffNet patch) | `GenreState` | an input effects may read; shown on the monitor |
 
 ## Module map
 
@@ -69,7 +75,8 @@ three apart with a 0.86 ms residual — see [beat-model.md](beat-model.md).
 | `com.tailapp.beat` | `ActivationSource`, `SpectralFluxActivationSource`, `CrnnActivationSource`, `BeatModelStore`, `TempoEstimator`, `BeatDecoder` (`BeatTracker`, `ParticleFilterBeatDecoder`), `BeatEvent` — see [beat-model.md](beat-model.md) |
 | `com.tailapp.drop` | transient detector, section-state tracker, `DropEvent`, `SectionState` |
 | `com.tailapp.genre` | `GenreState`, `GenreClassifier`, `EffnetMelSpectrogram`, `OnnxGenreClassifier`, `GenreModelStore` — see [genre-model.md](genre-model.md) |
-| `com.tailapp.effects` | `EffectProfile`, `EffectController`, `ReactiveRenderer` |
+| `com.tailapp.effects` | `LightingEngine`, `BeatLightSession`, `BeatLightService` |
+| `com.tailapp.composer` | the effect graph: `ReactiveContext`, `ReactiveEffect`, `CompositionRenderer`, `CompositionScene`, the 20 effects — see [composer.md](composer.md) |
 | `com.tailapp.lighting` | `LightingOutput`, `TailDirectLedOutput`, preview sink |
 | `com.tailapp.led` | Kotlin port of the firmware LED engine — coordinates, effects, compositor |
 | `app/src/main/cpp` | Oboe capture + lock-free ring buffer |
@@ -97,6 +104,7 @@ to TailApp changed four things; each was a deliberate call, not a shortcut.
 
 | Plan said | Built instead | Why |
 |---|---|---|
+| One lighting profile auto-selected per genre | A user-built tree of layers and folders (the **composer**), with genre demoted to one more input effects may read | A profile was knobs on a single hard-coded renderer, so every new look meant a new render path — and only the handful of things that renderer already did were reachable. The composer makes a look an *arrangement* of independent effects instead, and gives every one of them the beat, BPM, loudness and FFT. See [composer.md](composer.md). |
 | WLED over UDP/OSC as the lighting output | The tail over BLE FF0A direct pixel streaming | The lighting hardware is the tail. `LightingOutput` stays the seam, so a WLED backend is still a drop-in. |
 | BeatNet+ CRNN (ONNX) from the start | DSP onset/tempo tracker first; the CRNN now runs alongside it when installed | Ships a working, fully-tested pipeline without a multi-gigabyte Python toolchain in the critical path. The CRNN replaces only the activation function, and only when its model is on the device. |
 | Genre head trained on the owner's labelled library | Essentia's Discogs-EffNet + `genre_discogs400`, unmodified | Requested: no personally-trained model. Its weights are CC BY-NC-ND, so they are fetched and converted by `tools/`, never committed — the app ships the code and the models are installed onto the device. |
@@ -144,9 +152,10 @@ covered by `gradlew.bat testDebugUnitTest`:
 | Drop / build-up / breakdown | done |
 | FF0A direct pixel streaming | done |
 | LED engine port + live preview | done |
-| Effect profiles, controller, renderer | done |
+| Effect profiles, controller, renderer | **replaced** by the composer — see [composer.md](composer.md) |
+| Effect composer (layer/folder graph, 20 effects, editor, persistence) | done |
 | LightingEngine + session + service | done |
-| BeatLight screen (monitor, calibration, profiles) | done |
+| BeatLight screen (monitor, calibration, stack selection) | done |
 | ONNX genre model (Discogs-EffNet) | done — installed onto the device, not shipped; falls back to `NoGenreClassifier` when absent |
 | Arbitrary-size DFT (`BluesteinFft`) | done — 1411-point transform over the radix-2 `Fft`; 2.5e-7 worst relative error against a naive double-precision DFT |
 | BeatNet front-end (`BeatNetFeatureExtractor`) | done — madmom's pipeline ported; **max 1.1e-6** against madmom's own output over 81 328 values. ~0.1 ms per frame; both front-ends together ~0.15 ms of the 20 ms hop |

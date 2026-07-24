@@ -13,12 +13,14 @@ import com.tailapp.di.AppContainer
 import com.tailapp.ui.screen.AudioConfigScreen
 import com.tailapp.ui.screen.BeatLightScreen
 import com.tailapp.ui.screen.DeviceOverviewScreen
+import com.tailapp.ui.screen.EffectComposerScreen
 import com.tailapp.ui.screen.LedConfigScreen
 import com.tailapp.ui.screen.MotionConfigScreen
 import com.tailapp.ui.screen.ScanScreen
 import com.tailapp.viewmodel.AudioConfigViewModel
 import com.tailapp.viewmodel.BeatLightViewModel
 import com.tailapp.viewmodel.DeviceOverviewViewModel
+import com.tailapp.viewmodel.EffectComposerViewModel
 import com.tailapp.viewmodel.LedConfigViewModel
 import com.tailapp.viewmodel.MotionConfigViewModel
 import com.tailapp.viewmodel.ScanViewModel
@@ -97,17 +99,40 @@ fun TailAppNavHost(
         composable(
             route = NavRoutes.BeatLight.route,
             arguments = listOf(navArgument("address") { type = NavType.StringType })
-        ) {
+        ) { backStackEntry ->
+            val address = NavRoutes.decodeAddress(
+                backStackEntry.arguments?.getString("address")
+            ) ?: return@composable
             val vm: BeatLightViewModel = viewModel(factory = factory {
                 BeatLightViewModel(
                     container.deviceRepository,
                     container.lightingEngine,
                     container.lightingPreview,
+                    container.compositionLibrary,
                     container.beatLightSession,
                     container.beatLightPrefs
                 )
             })
-            BeatLightScreen(viewModel = vm, onBack = { navController.popBackStack() })
+            BeatLightScreen(
+                viewModel = vm,
+                onEditStack = { navController.navigate(NavRoutes.EffectComposer.create(address)) },
+                onBack = { navController.popBackStack() }
+            )
+        }
+
+        composable(
+            route = NavRoutes.EffectComposer.route,
+            arguments = listOf(navArgument("address") { type = NavType.StringType })
+        ) {
+            val vm: EffectComposerViewModel = viewModel(factory = factory {
+                EffectComposerViewModel(
+                    container.lightingEngine,
+                    container.compositionLibrary,
+                    container.lightingPreview,
+                    container.deviceRepository
+                )
+            })
+            EffectComposerScreen(viewModel = vm, onBack = { navController.popBackStack() })
         }
     }
 }

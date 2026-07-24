@@ -142,8 +142,8 @@ class SectionStateTracker(
         if (busier && louder && bassHeldBack) return SectionState.BUILDUP
 
         // Steady full-energy playing reads as the drop section; the taxonomy has
-        // no separate "groove" state and this is what the lighting profiles treat
-        // as the default full-intensity mode.
+        // no separate "groove" state and this is what the section modulator
+        // treats as the default full-intensity mode.
         if (snapshot.rmsZ > -0.2f && everHighEnergy) return SectionState.DROP
 
         return if (committed == SectionState.UNKNOWN) SectionState.INTRO else committed

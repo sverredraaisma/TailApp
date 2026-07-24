@@ -56,7 +56,10 @@ import com.tailapp.beat.OctaveBias
 import com.tailapp.ble.ConnectionState
 import com.tailapp.effects.BeatDecoderKind
 import com.tailapp.effects.BeatLightState
-import com.tailapp.effects.EffectProfile
+import com.tailapp.composer.Composition
+import com.tailapp.composer.EffectLayer
+import com.tailapp.composer.GroupLayer
+import com.tailapp.composer.LayerNode
 import com.tailapp.genre.GenreState
 import com.tailapp.led.PixelBuffer
 import com.tailapp.ui.components.LedPreviewPlaceholder
@@ -76,6 +79,7 @@ import com.tailapp.viewmodel.BeatLightViewModel
 @Composable
 fun BeatLightScreen(
     viewModel: BeatLightViewModel,
+    onEditStack: () -> Unit,
     onBack: () -> Unit
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
@@ -84,7 +88,8 @@ fun BeatLightScreen(
     val frame by viewModel.frame.collectAsStateWithLifecycle()
     val deviceState by viewModel.deviceState.collectAsStateWithLifecycle()
     val triggerOffsetMillis by viewModel.triggerOffsetMillis.collectAsStateWithLifecycle()
-    val manualProfileId by viewModel.manualProfileId.collectAsStateWithLifecycle()
+    val compositions by viewModel.compositions.collectAsStateWithLifecycle()
+    val activeCompositionId by viewModel.activeCompositionId.collectAsStateWithLifecycle()
     val decoderKind by viewModel.decoderKind.collectAsStateWithLifecycle()
     val octaveBiasEnabled by viewModel.octaveBiasEnabled.collectAsStateWithLifecycle()
     val octaveTargetBpm by viewModel.octaveTargetBpm.collectAsStateWithLifecycle()
@@ -188,12 +193,11 @@ fun BeatLightScreen(
             )
 
             Spacer(Modifier.height(16.dp))
-            ProfilesSection(
-                profiles = viewModel.profiles,
-                manualProfileId = manualProfileId,
-                activeProfileName = state.profileName,
-                isOverridden = state.isProfileOverridden,
-                onSelect = viewModel::setManualProfile
+            CompositionsSection(
+                compositions = compositions,
+                activeId = activeCompositionId,
+                onSelect = viewModel::setActiveComposition,
+                onEditStack = onEditStack
             )
         }
     }
@@ -444,77 +448,76 @@ private fun CalibrationSection(
 }
 
 @Composable
-private fun ProfilesSection(
-    profiles: List<EffectProfile>,
-    manualProfileId: String?,
-    activeProfileName: String,
-    isOverridden: Boolean,
-    onSelect: (EffectProfile?) -> Unit
+private fun CompositionsSection(
+    compositions: List<Composition>,
+    activeId: String,
+    onSelect: (String) -> Unit,
+    onEditStack: () -> Unit
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
-            Text("Profiles", style = MaterialTheme.typography.titleMedium)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "Effect stack",
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.weight(1f)
+                )
+                Button(onClick = onEditStack) { Text("Edit") }
+            }
             Spacer(Modifier.height(4.dp))
             Text(
-                if (isOverridden) "Active: $activeProfileName (pinned)" else "Active: $activeProfileName (auto)",
+                "Layers and folders, composed on the phone and streamed to the tail.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             Spacer(Modifier.height(8.dp))
 
-            ProfileRow(
-                displayName = "Automatic",
-                palette = emptyList(),
-                selected = manualProfileId == null,
-                onClick = { onSelect(null) }
-            )
-
-            profiles.forEach { profile ->
-                ProfileRow(
-                    displayName = profile.displayName,
-                    palette = profile.palette,
-                    selected = manualProfileId == profile.id,
-                    onClick = { onSelect(profile) }
-                )
+            compositions.forEach { composition ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    RadioButton(
+                        selected = composition.id == activeId,
+                        onClick = { onSelect(composition.id) }
+                    )
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(composition.name, style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            composition.summary(),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
             }
         }
     }
 }
 
-@Composable
-private fun ProfileRow(
-    displayName: String,
-    palette: List<Int>,
-    selected: Boolean,
-    onClick: () -> Unit
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 4.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        RadioButton(selected = selected, onClick = onClick)
-        Text(
-            text = displayName,
-            style = MaterialTheme.typography.bodyMedium,
-            modifier = Modifier.weight(1f)
-        )
-        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            palette.forEach { packed ->
-                Box(
-                    modifier = Modifier
-                        .size(16.dp)
-                        .clip(RoundedCornerShape(4.dp))
-                        // Palette entries are packed 0xRRGGBB with no alpha byte;
-                        // OR in an opaque one rather than relying on a bare
-                        // 0xFF000000 Int literal, which Kotlin rejects as
-                        // out-of-range.
-                        .background(Color((0xFF shl 24) or packed))
-                )
+/** "3 layers · 1 folder" — enough to tell two stacks apart in the picker. */
+private fun Composition.summary(): String {
+    var effects = 0
+    var folders = 0
+
+    fun walk(nodes: List<LayerNode>) {
+        nodes.forEach { node ->
+            when (node) {
+                is GroupLayer -> {
+                    folders++
+                    walk(node.children)
+                }
+                is EffectLayer -> effects++
             }
         }
     }
+    walk(layers)
+
+    val layerText = "$effects layer" + if (effects == 1) "" else "s"
+    val folderText = if (folders == 0) "" else " · $folders folder" + if (folders == 1) "" else "s"
+    return layerText + folderText
 }
 
 private const val PULSE_DURATION_MILLIS = 250f

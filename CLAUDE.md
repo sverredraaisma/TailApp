@@ -56,10 +56,11 @@ com.tailapp/
 ├── beat/                   # Beat/downbeat/tempo tracking (BeatLight)
 ├── drop/                   # Drop detection + section state (BeatLight)
 ├── genre/                  # Genre classification (BeatLight)
-├── effects/                # EffectProfile, controller, renderer, LightingEngine
+├── effects/                # LightingEngine + session/service (mic → analysis → frames)
+├── composer/               # The effect graph: ReactiveContext, layer/folder tree, 20 effects
 ├── lighting/               # LightingOutput + FF0A/preview implementations
 ├── led/                    # Kotlin port of the firmware LED render engine
-├── viewmodel/              # Scan, DeviceOverview, MotionConfig, LedConfig, AudioConfig, BeatLight
+├── viewmodel/              # Scan, DeviceOverview, MotionConfig, LedConfig, AudioConfig, BeatLight, EffectComposer
 ├── navigation/             # NavRoutes (sealed class), TailAppNavHost
 ├── ui/{theme,screen,components}
 ├── di/AppContainer
@@ -70,10 +71,16 @@ app/src/main/cpp/           # Oboe capture + lock-free ring buffer (JNI)
 tools/                      # Python: model download/export, reference data
 ```
 
-**BeatLight** — the beat/drop/genre-reactive lighting feature — spans
-`audio` → `beat`/`drop`/`genre` → `effects` → `lighting`, and renders through the
-firmware mirror in `led`. `docs/beatlight.md` is its map; read it before touching
-any of those packages.
+**BeatLight** — the beat/drop-reactive lighting feature — spans
+`audio` → `beat`/`drop`/`genre` → `effects` → `composer` → `lighting`, and
+renders through the firmware mirror in `led`. `docs/beatlight.md` maps the
+analysis half; `docs/composer.md` maps the rendering half. Read both before
+touching any of those packages.
+
+The seam between them is `composer/ReactiveContext`: one snapshot of the analysis
+(beat timing, BPM, beat/bar phase, loudness, the FFT spectrum, drops, section,
+genre) rebuilt each frame, which **every** effect reads. There is deliberately no
+such thing as a non-reactive effect.
 
 ### Key patterns
 
@@ -101,12 +108,31 @@ any of those packages.
   `LightingEngine` takes its dispatcher as a parameter for exactly this reason —
   its analysis and render loops sharing a `FeatureExtractor` across threads
   corrupts the extractor's ring buffer.
+- **A composition is immutable; the renderer's effect instances are not.** The
+  editor rebuilds the whole tree per edit and hands it to
+  `CompositionScene.setComposition`, which parks it in a `@Volatile` and swaps it
+  in on the render thread at the next frame — so the loop never sees a
+  half-applied edit. `CompositionRenderer` then diffs it against its live effect
+  instances **by layer id**, reusing any layer whose effect id is unchanged so
+  decay envelopes and animation phase survive a slider drag. That is
+  `LedStackRenderer.setState`'s rule, generalised to a tree. Layer ids must be
+  unique across the whole tree, or two layers share one instance.
+- **Adding an effect is one file and one registry row.** A new
+  `ReactiveEffect` with a `SPEC` plus a line in `ReactiveEffects.ALL`; the
+  compositor, the editor (which builds its controls from the declared
+  `EffectParam` schema), persistence and the registry-wide tests all follow.
+  Never rename an existing `EffectSpec.id` — it is persisted inside saved stacks.
+- **Saved compositions parse with a hand-written JSON reader**
+  (`composer/Json.kt`), for the same reason `GenreLabels` does:
+  `unitTests.isReturnDefaultValues = true` stubs every `org.json` call to return
+  zeros, so a round-trip could not be tested through the platform library.
 
 ### Navigation
 
 `scan` (start destination), `device/{address}`, and the config screens
-`device/{address}/{motion,led,audio,beatlight}`. The device address is a nav
-argument.
+`device/{address}/{motion,led,audio,beatlight,composer}`. The device address is a
+nav argument. `composer` (the layer/folder editor) is reached from the BeatLight
+screen's "Edit" button rather than from the overview.
 
 ## BLE protocol (v3)
 
@@ -173,9 +199,22 @@ JVM unit tests live in `app/src/test/`. There are no instrumented tests.
   `testutil/PlaybackAudioSource` replays a buffer as an `AudioSource`;
   `testutil/RecordingLightingOutput` records everything the renderer emits. Between
   them the whole BeatLight pipeline runs offline, with no mic and no device.
+- `composer/ComposerTestSupport` builds a `ReactiveContext` with everything
+  defaulted to "nothing is happening", so an effect test states only the inputs it
+  cares about. Effects read the context and nothing else, so a hand-built one is a
+  complete stand-in for the whole analysis pipeline.
 - **The DSP suites assert numbers, not shapes.** Tempo within ±2 BPM, beats within
   ±70 ms of the true grid, LED colours equal to the firmware's integer arithmetic.
   A change that makes one of those merely "close" has broken something.
+  `CompositionRendererTest` holds the same line for blending: every expected pixel
+  is worked out by hand from `ColorMath`, never recorded from a run.
+- **Registry-wide tests mean a new effect is covered the day it lands.**
+  `ReactiveEffectsTest` renders *every* registered effect against silence, a loud
+  downbeat and a predicted-but-unarrived beat, and asserts no throwing, no
+  out-of-range channel, determinism, and that modulators emit neutral grey.
+  `CompositionLibraryTest` validates the built-in stacks as data — every parameter
+  key exists in its effect's schema and every value is inside its declared range,
+  because a typo'd key would otherwise silently fall back to the default.
 - **Anything driven by a clock takes the clock as a parameter.** The renderer, the
   audio level source and the engine all do; that is what makes their behaviour
   assertable rather than timing-dependent.

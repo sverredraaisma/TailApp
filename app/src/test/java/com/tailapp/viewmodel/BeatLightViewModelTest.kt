@@ -1,7 +1,7 @@
 package com.tailapp.viewmodel
 
+import com.tailapp.composer.CompositionLibrary
 import com.tailapp.effects.BeatDecoderKind
-import com.tailapp.effects.EffectProfiles
 import com.tailapp.effects.LightingEngine
 import com.tailapp.lighting.PreviewLightingOutput
 import com.tailapp.repository.DeviceRepository
@@ -58,11 +58,13 @@ class BeatLightViewModelTest {
 
     private fun newViewModel(
         prefs: FakeSharedPreferences = FakeSharedPreferences(),
-        engine: LightingEngine = newEngine()
+        engine: LightingEngine = newEngine(),
+        library: CompositionLibrary = CompositionLibrary(FakeSharedPreferences())
     ): BeatLightViewModel = BeatLightViewModel(
         deviceRepository = newRepository(),
         engine = engine,
         preview = PreviewLightingOutput(),
+        library = library,
         session = null,
         prefs = prefs
     )
@@ -117,12 +119,15 @@ class BeatLightViewModelTest {
     }
 
     @Test
-    fun `defaults to no calibration and an automatic profile`() {
-        val viewModel = newViewModel()
+    fun `defaults to no calibration and the first built-in stack`() {
+        val engine = newEngine()
+        val viewModel = newViewModel(engine = engine)
 
         assertEquals(0f, viewModel.triggerOffsetMillis.value, 0f)
-        assertNull(viewModel.manualProfileId.value)
-        assertFalse(viewModel.state.value.isProfileOverridden)
+        assertEquals(CompositionLibrary.BUILT_INS.first().id, viewModel.activeCompositionId.value)
+        // The engine must actually be holding it, not just the UI-facing flow —
+        // otherwise a session started straight away would render black.
+        assertEquals(CompositionLibrary.BUILT_INS.first().id, engine.composition.id)
     }
 
     @Test
@@ -179,67 +184,61 @@ class BeatLightViewModelTest {
     }
 
     @Test
-    fun `setManualProfile reaches the engine and marks the profile overridden`() {
+    fun `selecting a composition applies it to the engine and reports it`() {
         val engine = newEngine()
         val viewModel = newViewModel(engine = engine)
+        val target = CompositionLibrary.BUILT_INS[1]
 
-        viewModel.setManualProfile(EffectProfiles.HARDSTYLE)
+        viewModel.setActiveComposition(target.id)
 
-        assertEquals(EffectProfiles.HARDSTYLE.id, viewModel.manualProfileId.value)
-        assertEquals(EffectProfiles.HARDSTYLE.id, engine.manualProfile?.id)
-        assertEquals(EffectProfiles.HARDSTYLE.id, viewModel.state.value.profileId)
-        assertTrue(viewModel.state.value.isProfileOverridden)
+        assertEquals(target.id, viewModel.activeCompositionId.value)
+        assertEquals(target.id, engine.composition.id)
+        assertEquals(target.id, viewModel.state.value.compositionId)
+        assertEquals(target.name, viewModel.state.value.compositionName)
     }
 
     @Test
-    fun `setManualProfile null clears the override and returns to automatic`() {
-        val engine = newEngine()
-        val viewModel = newViewModel(engine = engine)
-        viewModel.setManualProfile(EffectProfiles.TRANCE)
+    fun `the selected composition persists and reaches a fresh engine`() {
+        val libraryPrefs = FakeSharedPreferences()
+        val target = CompositionLibrary.BUILT_INS[2]
 
-        viewModel.setManualProfile(null)
-
-        assertNull(viewModel.manualProfileId.value)
-        assertNull(engine.manualProfile)
-        assertFalse(viewModel.state.value.isProfileOverridden)
-        assertEquals(EffectProfiles.DEFAULT.id, viewModel.state.value.profileId)
-    }
-
-    @Test
-    fun `manual profile selection persists and is restored, reaching a fresh engine`() {
-        val prefs = FakeSharedPreferences()
-        newViewModel(prefs = prefs).setManualProfile(EffectProfiles.BASS)
+        newViewModel(library = CompositionLibrary(libraryPrefs)).setActiveComposition(target.id)
 
         val restoredEngine = newEngine()
-        val restored = newViewModel(prefs = prefs, engine = restoredEngine)
+        val restored = newViewModel(
+            engine = restoredEngine,
+            library = CompositionLibrary(libraryPrefs)
+        )
 
-        assertEquals(EffectProfiles.BASS.id, restored.manualProfileId.value)
-        assertEquals(EffectProfiles.BASS.id, restoredEngine.manualProfile?.id)
-        assertTrue(restored.state.value.isProfileOverridden)
+        assertEquals(target.id, restored.activeCompositionId.value)
+        assertEquals(target.id, restoredEngine.composition.id)
     }
 
     @Test
-    fun `clearing the manual profile removes it from persistence`() {
-        val prefs = FakeSharedPreferences()
-        val viewModel = newViewModel(prefs = prefs)
-        viewModel.setManualProfile(EffectProfiles.AMBIENT)
+    fun `a saved composition id that no longer resolves falls back to a built-in`() {
+        // A stack removed by an app update must not leave the session rendering
+        // nothing.
+        val libraryPrefs = FakeSharedPreferences()
+        libraryPrefs.edit().putString(CompositionLibrary.KEY_ACTIVE, "not-a-real-stack").apply()
 
-        viewModel.setManualProfile(null)
+        val engine = newEngine()
+        val viewModel = newViewModel(engine = engine, library = CompositionLibrary(libraryPrefs))
 
-        val restored = newViewModel(prefs = prefs, engine = newEngine())
-        assertNull(restored.manualProfileId.value)
-        assertFalse(restored.state.value.isProfileOverridden)
+        assertEquals(CompositionLibrary.BUILT_INS.first().id, viewModel.activeCompositionId.value)
+        assertEquals(CompositionLibrary.BUILT_INS.first().id, engine.composition.id)
     }
 
     @Test
-    fun `a persisted profile id that no longer resolves falls back to automatic`() {
-        val prefs = FakeSharedPreferences()
-        prefs.edit().putString(BeatLightViewModel.KEY_MANUAL_PROFILE, "not-a-real-profile").apply()
+    fun `a user edit of a built-in is the version applied`() {
+        val libraryPrefs = FakeSharedPreferences()
+        val builtIn = CompositionLibrary.BUILT_INS.first()
+        CompositionLibrary(libraryPrefs).save(builtIn.copy(name = "My Pulse"))
 
-        val viewModel = newViewModel(prefs = prefs)
+        val engine = newEngine()
+        newViewModel(engine = engine, library = CompositionLibrary(libraryPrefs))
 
-        assertNull(viewModel.manualProfileId.value)
-        assertFalse(viewModel.state.value.isProfileOverridden)
+        assertEquals(builtIn.id, engine.composition.id)
+        assertEquals("My Pulse", engine.composition.name)
     }
 
     @Test

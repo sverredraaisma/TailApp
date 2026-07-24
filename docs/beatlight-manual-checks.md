@@ -125,16 +125,43 @@ whether the model helps on real music — and how much it costs on your phone.
 - [ ] Change a layer parameter and confirm the preview updates immediately while
       the running effect state (rainbow phase, bar levels) does not visibly reset.
 
+## 6b. The composer
+
+The layer/folder editor. Everything here is covered by JVM tests
+(`docs/composer.md` lists them); what a phone adds is whether the *looks* work
+and whether editing while the tail is running feels immediate.
+
+- [ ] Each of the six built-in stacks, against music it suits: does it read as
+      deliberate, or as noise? Name any that fall flat and why.
+- [ ] Edits are live: drag a colour or a decay slider with the session running
+      and confirm the tail changes under your finger, with no restart.
+- [ ] Editing a parameter does **not** restart the stack's animations — a running
+      rainbow or spectrum bar should keep its phase and levels. This is the
+      instance-reuse rule; a visible reset means the diff rebuilt the layer.
+- [ ] Folders: put a Beat Mask (MULTIPLY) at the top of a folder and confirm it
+      pulses only that folder's contents, leaving layers beneath it untouched.
+      Then move the same modulator to the top level and confirm it now gates the
+      whole frame. That contrast is the feature.
+- [ ] Blend modes behave as on the firmware stack: ADD brightens, MULTIPLY
+      darkens/gates, OVERWRITE replaces anything non-black.
+- [ ] Opacity on a folder mixes the whole group at once, not layer by layer.
+- [ ] Save, switch to another stack, switch back: the edit is still there.
+      Reset a built-in and confirm the shipped version returns.
+- [ ] Frame rate holds up on a deep stack — build something with ~10 layers
+      across 2-3 folders and check the tail is still smooth and the phone is not
+      getting hot. Note the layer count where it stops being comfortable.
+
 ## 7. Genre
 
 Only meaningful once the model artifacts are installed; see `docs/genre-model.md`.
 
 - [ ] With the models installed, play a few tracks of clearly different genres and
       note what the classifier says and how long it takes to settle.
-- [ ] Confirm the profile does *not* flicker during a transition between tracks —
-      that is what the 12-second rolling majority is for.
-- [ ] Note any genre that consistently selects a profile that feels wrong. The
-      genre→profile mapping is pure data in `EffectProfiles` and easy to change.
+- [ ] Confirm the reported label settles rather than flickering during a
+      transition between tracks.
+- [ ] The genre no longer switches the lighting on its own — it is one more input
+      an effect may read, and a label on the monitor. Note whether the label is
+      accurate enough to be worth building an effect against.
 
 ## 8. Soak
 

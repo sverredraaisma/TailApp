@@ -23,7 +23,7 @@ import java.io.InputStream
  * automatically and no audio ever leaves the device.
  *
  * Until all three files are present [isInstalled] is false, `AppContainer` keeps
- * [NoGenreClassifier], and the pipeline runs on the default lighting profile.
+ * [NoGenreClassifier], and the pipeline runs with the genre reported as unknown.
  *
  * @param directory where the three artifacts live; created lazily by [install].
  */

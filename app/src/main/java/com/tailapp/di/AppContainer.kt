@@ -9,6 +9,7 @@ import com.tailapp.ble.BleConnectionManager
 import com.tailapp.ble.BleScanner
 import com.tailapp.ble.RoutingBleTransport
 import com.tailapp.ble.VirtualTailTransport
+import com.tailapp.composer.CompositionLibrary
 import com.tailapp.effects.BeatLightSession
 import com.tailapp.effects.LightingEngine
 import com.tailapp.genre.GenreClassifier
@@ -122,6 +123,25 @@ class AppContainer(context: Context) {
 
     val beatLightPrefs: SharedPreferences =
         context.getSharedPreferences("beatlight_config", Context.MODE_PRIVATE)
+
+    /**
+     * The user's effect stacks, and which one is active.
+     *
+     * One instance for the whole app on purpose: the BeatLight screen selects a
+     * stack and the composer edits it, and they have to be looking at the same
+     * list. Its own preferences file, separate from `beatlight_config`, because
+     * saved compositions are user content rather than calibration.
+     */
+    val compositionLibrary = CompositionLibrary(
+        context.getSharedPreferences("composer_config", Context.MODE_PRIVATE)
+    )
+
+    init {
+        // The engine renders black until it is given a tree. The view models set
+        // this too, but only once their screen is opened — without this a session
+        // started from anywhere else would light nothing.
+        lightingEngine.composition = compositionLibrary.active()
+    }
 
     private companion object {
         /**

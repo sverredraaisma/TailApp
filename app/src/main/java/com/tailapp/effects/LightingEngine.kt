@@ -18,6 +18,8 @@ import com.tailapp.beat.BeatTracker
 import com.tailapp.beat.CrnnActivationSource
 import com.tailapp.beat.OctaveBias
 import com.tailapp.beat.ParticleFilterBeatDecoder
+import com.tailapp.composer.Composition
+import com.tailapp.composer.CompositionScene
 import com.tailapp.drop.DropEvent
 import com.tailapp.drop.SectionState
 import com.tailapp.drop.TransientAnalyzer
@@ -87,9 +89,8 @@ data class BeatLightState(
     val section: SectionState = SectionState.UNKNOWN,
     val sectionRamp: Float = 0f,
     val genre: GenreState = GenreState.unknown(),
-    val profileId: String = EffectProfiles.DEFAULT.id,
-    val profileName: String = EffectProfiles.DEFAULT.displayName,
-    val isProfileOverridden: Boolean = false,
+    val compositionId: String = Composition.EMPTY.id,
+    val compositionName: String = Composition.EMPTY.name,
     val inputLatencyMillis: Float = 0f,
     val droppedSamples: Long = 0L,
     val decoder: BeatDecoderKind = BeatDecoderKind.PHASE_LOCKED,
@@ -229,8 +230,12 @@ class LightingEngine(
      */
     val octaveBias = OctaveBias()
     private val transients = TransientAnalyzer(featureConfig = featureConfig)
-    private val renderer = ReactiveRenderer()
-    private val controller = EffectController(renderer, output)
+
+    /**
+     * The whole render path: builds a `ReactiveContext` from the analysis and
+     * draws the active composition's layer/folder tree through it.
+     */
+    private val scene = CompositionScene(output, featureConfig)
 
     private val _state = MutableStateFlow(BeatLightState(activationSource = activationKind()))
     val state: StateFlow<BeatLightState> = _state.asStateFlow()
@@ -255,9 +260,9 @@ class LightingEngine(
 
     /** User calibration in milliseconds; negative fires earlier. */
     var triggerOffsetMillis: Float
-        get() = controller.triggerOffsetMillis
+        get() = scene.triggerOffsetMillis
         set(value) {
-            controller.triggerOffsetMillis = value
+            scene.triggerOffsetMillis = value
         }
 
     /** Applies a tempo-octave preference live, without restarting the session. */
@@ -267,12 +272,18 @@ class LightingEngine(
         octaveBias.strength = strength
     }
 
-    /** Pins a profile regardless of what the classifier says; null returns to automatic. */
-    var manualProfile: EffectProfile?
-        get() = controller.manualProfile
+    /**
+     * The layer/folder stack being rendered.
+     *
+     * Safe to set from the UI thread while a session runs: the tree is immutable
+     * and the scene swaps it in at the next frame boundary, so an edit can never
+     * be seen half-applied.
+     */
+    var composition: Composition
+        get() = scene.composition
         set(value) {
-            controller.manualProfile = value
-            publishProfile()
+            scene.setComposition(value)
+            publishComposition()
         }
 
     val isRunning: Boolean get() = analysisJob?.isActive == true
@@ -303,16 +314,16 @@ class LightingEngine(
             null
         }
 
-        controller.setLayout(ledLayout.value)
-        output.open(renderer.ledCount)
+        scene.setLayout(ledLayout.value)
+        output.open(scene.ledCount)
 
         _state.update {
             it.copy(isRunning = true, error = null, inputLatencyMillis = audio.latencyMillis)
         }
-        // reset() overwrote _state with the DEFAULT profile fields; publish the
-        // controller's real active profile so a manual override set before the
-        // session shows on the monitor immediately, not only at the next trigger.
-        publishProfile()
+        // reset() overwrote _state with the EMPTY composition's fields; publish
+        // the one actually loaded so the monitor names it immediately rather than
+        // only after the next edit.
+        publishComposition()
 
         analysisJob = scope.launch(workDispatcher) {
             while (isActive) {
@@ -331,7 +342,7 @@ class LightingEngine(
         // On workDispatcher too: setLayout mutates the renderer's arrays, which
         // the render loop reads. Off the shared single thread it would race them.
         layoutJob = scope.launch(workDispatcher) {
-            ledLayout.collect { controller.setLayout(it) }
+            ledLayout.collect { scene.setLayout(it) }
         }
     }
 
@@ -385,20 +396,24 @@ class LightingEngine(
             pumpBeatNet(samples, count, nowNanos)
 
             for (frame in extractor.push(samples, count, nowNanos)) {
+                // Every frame, beat or not: this is what puts loudness and the
+                // FFT spectrum in front of every effect in the stack.
+                scene.onAudioFrame(frame)
+
                 val activation = if (crnnLive) pendingActivations.removeFirstOrNull() else null
                 val beats =
                     if (activation != null) beatTracker.process(frame, activation)
                     else beatTracker.process(frame)
                 for (beat in beats) {
-                    controller.onBeat(beat)
+                    scene.onBeat(beat)
                     latestBeat = beat
                 }
                 transients.process(frame)?.let { result ->
                     result.drop?.let {
-                        controller.onDrop(it)
+                        scene.onDrop(it)
                         latestDrop = it
                     }
-                    controller.onSection(result.section)
+                    scene.onSection(result.section)
                     latestRamp = result.section.ramp
                 }
             }
@@ -410,7 +425,9 @@ class LightingEngine(
     }
 
     /** Renders and dispatches one frame. */
-    internal fun renderFrame(nowNanos: Long) = controller.renderFrame(nowNanos)
+    internal fun renderFrame(nowNanos: Long) {
+        scene.render(nowNanos)
+    }
 
     /**
      * Runs the BeatNet front-end and the CRNN over the same chunk, queueing one
@@ -484,9 +501,10 @@ class LightingEngine(
                     .onFailure { Log.w(TAG, "genre classification failed", it) }
                     .getOrNull()
                     ?.let { prediction ->
-                        controller.onGenre(prediction)
+                        // Genre no longer selects anything — it is one more input
+                        // effects may read, and a label for the monitor.
+                        scene.onGenre(prediction)
                         _state.update { it.copy(genre = prediction) }
-                        publishProfile()
                     }
             }
         }
@@ -509,14 +527,10 @@ class LightingEngine(
         }
     }
 
-    private fun publishProfile() {
-        val profile = controller.activeProfile
+    private fun publishComposition() {
+        val active = scene.composition
         _state.update {
-            it.copy(
-                profileId = profile.id,
-                profileName = profile.displayName,
-                isProfileOverridden = controller.isOverridden
-            )
+            it.copy(compositionId = active.id, compositionName = active.name)
         }
     }
 
@@ -540,7 +554,7 @@ class LightingEngine(
         beatTracker.reset()
         transients.reset()
         resampler?.reset()
-        controller.reset()
+        scene.reset()
         genreWindowFill = 0
         latestBeat = null
         latestDrop = null

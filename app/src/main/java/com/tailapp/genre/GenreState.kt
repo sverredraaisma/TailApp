@@ -4,8 +4,8 @@ package com.tailapp.genre
  * The genre currently believed to be playing.
  *
  * Produced by a generalised (not user-trained) classifier on the context tier,
- * every 1-3 seconds, and debounced by `EffectController` before it is allowed to
- * switch the active effect profile.
+ * every 1-3 seconds, and published on `ReactiveContext` for any effect in the
+ * user's stack to read. It no longer selects anything on its own.
  *
  * @param label classifier label, e.g. `"Electronic---Trance"`.
  * @param confidence `0..1` softmax/sigmoid score for [label].

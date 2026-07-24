@@ -36,10 +36,10 @@ interface GenreClassifier {
 /**
  * Stand-in used until the ONNX classifier lands.
  *
- * Deliberately inert rather than guessing: a wrong genre picks a wrong lighting
- * profile, and the effect controller's debounce is designed to resist exactly
- * that. With this in place the pipeline runs end to end on the default profile,
- * and a manual override remains available.
+ * Deliberately inert rather than guessing: the genre reaches every effect through
+ * `ReactiveContext`, so a confident wrong answer is worse than an honest
+ * `unknown`. With this in place the pipeline runs end to end and every stack
+ * still renders — effects that read the genre simply see `unknown`.
  */
 object NoGenreClassifier : GenreClassifier {
     override val windowSeconds: Float = 3f

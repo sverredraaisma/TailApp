@@ -2,7 +2,6 @@ package com.tailapp.lighting
 
 import com.tailapp.beat.BeatEvent
 import com.tailapp.drop.DropEvent
-import com.tailapp.effects.EffectProfile
 import com.tailapp.led.PixelBuffer
 
 /**
@@ -36,7 +35,4 @@ interface LightingOutput {
 
     /** A detected drop. */
     fun onDrop(event: DropEvent) {}
-
-    /** The active effect profile changed (debounced genre switch or manual override). */
-    fun onProfileChange(profile: EffectProfile) {}
 }

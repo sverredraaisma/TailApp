@@ -3,11 +3,11 @@ package com.tailapp.viewmodel
 import android.content.SharedPreferences
 import androidx.lifecycle.ViewModel
 import com.tailapp.beat.OctaveBias
+import com.tailapp.composer.Composition
+import com.tailapp.composer.CompositionLibrary
 import com.tailapp.effects.BeatDecoderKind
 import com.tailapp.effects.BeatLightSession
 import com.tailapp.effects.BeatLightState
-import com.tailapp.effects.EffectProfile
-import com.tailapp.effects.EffectProfiles
 import com.tailapp.effects.LightingEngine
 import com.tailapp.led.PixelBuffer
 import com.tailapp.lighting.PreviewLightingOutput
@@ -38,6 +38,7 @@ class BeatLightViewModel(
     private val deviceRepository: DeviceRepository,
     private val engine: LightingEngine,
     preview: PreviewLightingOutput,
+    private val library: CompositionLibrary,
     private val session: BeatLightSession? = null,
     private val prefs: SharedPreferences? = null
 ) : ViewModel() {
@@ -57,8 +58,11 @@ class BeatLightViewModel(
     /** Connection state + LED layout live here; the screen reads what it needs. */
     val deviceState: StateFlow<DeviceState> = deviceRepository.deviceState
 
-    /** Every built-in look, most specific first — see [EffectProfiles.ALL]. */
-    val profiles: List<EffectProfile> = EffectProfiles.ALL
+    /** Every stack the user can select, built-ins first. */
+    val compositions: StateFlow<List<Composition>> = library.compositions
+
+    /** Which stack the session renders. */
+    val activeCompositionId: StateFlow<String> = library.activeId
 
     private val _triggerOffsetMillis = MutableStateFlow(
         (prefs?.getFloat(KEY_TRIGGER_OFFSET, 0f) ?: 0f).coerceIn(MIN_OFFSET_MS, MAX_OFFSET_MS)
@@ -79,11 +83,6 @@ class BeatLightViewModel(
      * settle it is to hear both against the same music.
      */
     val decoderKind: StateFlow<BeatDecoderKind> = _decoderKind.asStateFlow()
-
-    private val _manualProfileId = MutableStateFlow<String?>(null)
-
-    /** Id of the pinned profile, or null while automatic (classifier-driven). */
-    val manualProfileId: StateFlow<String?> = _manualProfileId.asStateFlow()
 
     private val _octaveBiasEnabled =
         MutableStateFlow(prefs?.getBoolean(KEY_OCTAVE_ENABLED, false) ?: false)
@@ -112,12 +111,10 @@ class BeatLightViewModel(
         // slider would show the saved value while the pipeline ignored it.
         engine.triggerOffsetMillis = _triggerOffsetMillis.value
 
-        // A profile id saved by an older build (or one an app update removed)
-        // has nowhere to go — fall back to automatic rather than crash or pin
-        // a null-named profile.
-        val restored = prefs?.getString(KEY_MANUAL_PROFILE, null)?.let(EffectProfiles::byId)
-        _manualProfileId.value = restored?.id
-        engine.manualProfile = restored
+        // The library has already resolved a saved id that no longer exists (an
+        // update removed it, or the user deleted it) down to a built-in, so this
+        // is always something renderable.
+        engine.composition = library.active()
 
         engine.decoderKind = _decoderKind.value
         applyOctaveBias()
@@ -193,13 +190,20 @@ class BeatLightViewModel(
         }
     }
 
-    /** Pins [profile], or returns to the classifier when it is null. */
-    fun setManualProfile(profile: EffectProfile?) {
-        _manualProfileId.value = profile?.id
-        engine.manualProfile = profile
-        val editor = prefs?.edit() ?: return
-        if (profile != null) editor.putString(KEY_MANUAL_PROFILE, profile.id) else editor.remove(KEY_MANUAL_PROFILE)
-        editor.apply()
+    /**
+     * Switches which stack the session renders, live.
+     *
+     * No restart needed: the scene swaps the tree at the next frame boundary, so
+     * the change lands within a frame and the analysis keeps its tempo lock.
+     */
+    fun setActiveComposition(id: String) {
+        library.setActive(id)
+        engine.composition = library.active()
+    }
+
+    /** Re-applies the active stack, e.g. after the composer saved an edit to it. */
+    fun refreshComposition() {
+        engine.composition = library.active()
     }
 
     companion object {
@@ -210,7 +214,6 @@ class BeatLightViewModel(
         // Visible to tests so persistence can be exercised through the same
         // SharedPreferences keys the view model itself reads and writes.
         internal const val KEY_TRIGGER_OFFSET = "beatlight_trigger_offset_ms"
-        internal const val KEY_MANUAL_PROFILE = "beatlight_manual_profile_id"
         internal const val KEY_DECODER = "beatlight_decoder"
         internal const val KEY_OCTAVE_ENABLED = "beatlight_octave_enabled"
         internal const val KEY_OCTAVE_TARGET = "beatlight_octave_target_bpm"

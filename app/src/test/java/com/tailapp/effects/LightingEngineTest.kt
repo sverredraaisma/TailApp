@@ -4,6 +4,9 @@ import com.tailapp.audio.BeatNetFeatureExtractor
 import com.tailapp.audio.FeatureConfig
 import com.tailapp.audio.FeatureExtractor
 import com.tailapp.beat.BeatModelStore
+import com.tailapp.composer.Composition
+import com.tailapp.composer.EffectLayer
+import com.tailapp.model.BlendMode
 import com.tailapp.testutil.PlaybackAudioSource
 import com.tailapp.testutil.RecordingLightingOutput
 import com.tailapp.testutil.SyntheticAudio
@@ -171,17 +174,91 @@ class LightingEngineTest {
     }
 
     @Test
-    fun `a manual profile override reaches the renderer`() = runTest {
+    fun `the active composition drives the rendered pixels`() = runTest {
         val dispatcher = StandardTestDispatcher(testScheduler)
         val scope = CoroutineScope(dispatcher)
         val harness = harness(SyntheticAudio.clickTrack(128f, 5f, featureConfig.sampleRate), scope = scope, dispatcher = dispatcher)
         harness.engine.start()
 
-        harness.engine.manualProfile = EffectProfiles.HARDSTYLE
+        // A flat colour is the one composition whose exact output is knowable
+        // without reimplementing an effect here — so this asserts the wiring
+        // (swap → scene → compositor → output), not the look.
+        harness.engine.composition = Composition(
+            id = "test.solid",
+            name = "Solid",
+            layers = listOf(
+                EffectLayer(
+                    id = "base",
+                    name = "Base",
+                    effectId = "solid",
+                    params = mapOf("color" to 0x204060.toFloat(), "brightness" to 1f),
+                    blendMode = BlendMode.OVERWRITE
+                )
+            )
+        )
 
-        assertEquals(EffectProfiles.HARDSTYLE.id, harness.engine.state.value.profileId)
-        assertTrue(harness.engine.state.value.isProfileOverridden)
-        assertEquals(EffectProfiles.HARDSTYLE.id, harness.output.profiles.last().id)
+        assertEquals("test.solid", harness.engine.state.value.compositionId)
+        assertEquals("Solid", harness.engine.state.value.compositionName)
+
+        harness.output.clear()
+        harness.engine.renderFrame(0L)
+
+        val frame = harness.output.frames.last()
+        assertEquals(48, frame.ledCount)
+        assertEquals(0x20, frame.red(0))
+        assertEquals(0x40, frame.green(0))
+        assertEquals(0x60, frame.blue(0))
+        assertEquals(0x60, frame.blue(frame.ledCount - 1))
+
+        harness.engine.stop()
+        scope.cancel()
+    }
+
+    @Test
+    fun `loudness and spectrum from the analysis reach the effects`() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val scope = CoroutineScope(dispatcher)
+        val harness = harness(
+            SyntheticAudio.clickTrack(128f, 5f, featureConfig.sampleRate),
+            scope = scope,
+            dispatcher = dispatcher
+        )
+        harness.engine.start()
+
+        // `levelBoost = 1` makes brightness *entirely* the normalised loudness,
+        // so a lit pixel here can only have come from audio reaching the context.
+        harness.engine.composition = Composition(
+            id = "test.level",
+            name = "Level",
+            layers = listOf(
+                EffectLayer(
+                    id = "base",
+                    name = "Base",
+                    effectId = "solid",
+                    params = mapOf(
+                        "color" to 0xFFFFFF.toFloat(),
+                        "brightness" to 1f,
+                        "levelBoost" to 1f
+                    ),
+                    blendMode = BlendMode.OVERWRITE
+                )
+            )
+        )
+
+        // Before any audio the level is zero, so the same stack renders black.
+        harness.output.clear()
+        harness.engine.renderFrame(0L)
+        assertEquals(0, harness.output.frames.last().red(0))
+
+        drive(harness)
+
+        harness.output.clear()
+        harness.engine.renderFrame(0L)
+        assertTrue(
+            "loudness never reached the effect",
+            harness.output.frames.last().red(0) > 0
+        )
+
         harness.engine.stop()
         scope.cancel()
     }

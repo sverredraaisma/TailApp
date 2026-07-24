@@ -20,6 +20,9 @@ sealed class NavRoutes(val route: String) {
     data object BeatLight : NavRoutes("device/{address}/beatlight") {
         fun create(address: String) = "device/${URLEncoder.encode(address, "UTF-8")}/beatlight"
     }
+    data object EffectComposer : NavRoutes("device/{address}/composer") {
+        fun create(address: String) = "device/${URLEncoder.encode(address, "UTF-8")}/composer"
+    }
 
     companion object {
         fun decodeAddress(encoded: String?): String? =
