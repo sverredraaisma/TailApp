@@ -133,6 +133,32 @@ resolution with no round trip.
   would shimmer a constellation into mush — as well as making the effect
   impossible to assert on.
 
+## The same analysis can drive the motors
+
+`MotionChoreography` reads the identical `ReactiveContext` and produces four
+half-axis targets, streamed to the device over FF0B. The device has motion
+patterns of its own, but no microphone — it cannot know where the beat is, how
+loud the room is, or that a drop just landed.
+
+It follows the same rules as the effects. Targets are a **pure function of the
+context**: position comes from `barPhase` and `secondsSinceDrop` rather than
+being integrated, so a late frame moves the tail where it should be instead of
+leaving it behind, and the whole thing is testable against a hand-built context.
+
+Two decisions worth knowing:
+
+- **One sweep per bar, not per beat.** At 128 BPM a per-beat wag would be four
+  sweeps a second — the mechanism cannot follow that, and it reads as vibration
+  rather than dance.
+- **Motion is a separate opt-in from lighting**, off by default and persisted
+  separately, and it crosses a separate seam (`DeviceMotionStream`). A stack that
+  only changes colour must never start a worn tail swinging on its own.
+
+Nothing here knows the mechanism's travel or top speed. The device clamps every
+target to its own axis limits and shapes it through the jerk-limited profiles,
+which is what makes it safe to drive a physical mechanism from a phone that is
+not real-time.
+
 ## Parameters
 
 Each effect declares a schema of `EffectParam`s — `Scalar`, `Color`, `Choice`,
@@ -226,6 +252,8 @@ do leaves them with no compositions at all.
 | `composer/CompositionRenderer.kt` | recursive compositor |
 | `composer/CompositionScene.kt` | analysis → context → render → output |
 | `composer/CompositionEdits.kt` | pure tree operations for the editor |
+| `composer/MotionChoreography.kt` | the same context, turned into motor targets |
+| `composer/FirmwareExport.kt` | mapping a stack onto the device's own layers |
 | `composer/CompositionSerializer.kt`, `Json.kt`, `CompositionLibrary.kt` | persistence |
 | `composer/effects/` | the 20 effects |
 | `ui/screen/EffectComposerScreen.kt`, `viewmodel/EffectComposerViewModel.kt` | the editor |
