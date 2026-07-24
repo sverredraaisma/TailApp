@@ -10,11 +10,16 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Science
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -88,6 +93,21 @@ fun ScanScreen(
                     }
                 }
             )
+        },
+        bottomBar = {
+            // Always reachable, whatever the scan/permission state — it needs
+            // neither Bluetooth nor a device. Connects to the in-app simulator so
+            // the previews and the analysis pipeline can be tried on their own.
+            OutlinedButton(
+                onClick = { onDeviceSelected(viewModel.connectVirtual()) },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp)
+            ) {
+                Icon(Icons.Filled.Science, contentDescription = null)
+                Spacer(Modifier.height(0.dp))
+                Text("  Use virtual tail (testing)")
+            }
         }
     ) { padding ->
         if (!permissionsGranted && !isScanning) {

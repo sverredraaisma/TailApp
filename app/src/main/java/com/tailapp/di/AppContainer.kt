@@ -7,6 +7,8 @@ import com.tailapp.audio.FftStreamManager
 import com.tailapp.beat.BeatModelStore
 import com.tailapp.ble.BleConnectionManager
 import com.tailapp.ble.BleScanner
+import com.tailapp.ble.RoutingBleTransport
+import com.tailapp.ble.VirtualTailTransport
 import com.tailapp.effects.BeatLightSession
 import com.tailapp.effects.LightingEngine
 import com.tailapp.genre.GenreClassifier
@@ -31,7 +33,19 @@ class AppContainer(context: Context) {
 
     val bleScanner = BleScanner(context)
     val bleConnectionManager = BleConnectionManager(context)
-    val deviceRepository = DeviceRepository(bleConnectionManager, applicationScope)
+
+    /**
+     * The repository talks to one transport; the router picks the real radio or
+     * the in-app [VirtualTailTransport] per connection, from the address. The
+     * virtual tail is a testing aid — it lets the previews and the whole
+     * analysis pipeline run with no device present.
+     */
+    private val bleTransport = RoutingBleTransport(
+        real = bleConnectionManager,
+        virtual = VirtualTailTransport(),
+        scope = applicationScope
+    )
+    val deviceRepository = DeviceRepository(bleTransport, applicationScope)
     val fftStreamManager = FftStreamManager(context, deviceRepository, applicationScope)
     val audioPrefs: SharedPreferences = context.getSharedPreferences("audio_config", Context.MODE_PRIVATE)
 

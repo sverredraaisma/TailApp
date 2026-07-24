@@ -2,6 +2,7 @@ package com.tailapp.viewmodel
 
 import androidx.lifecycle.ViewModel
 import com.tailapp.ble.BleScanner
+import com.tailapp.ble.VirtualTailTransport
 import com.tailapp.model.BleDevice
 import com.tailapp.repository.DeviceRepository
 import kotlinx.coroutines.flow.StateFlow
@@ -23,5 +24,15 @@ class ScanViewModel(
     fun connect(address: String) {
         bleScanner.stopScan()
         deviceRepository.connect(address)
+    }
+
+    /**
+     * Connects to the in-app virtual tail — no radio, no device. The router
+     * recognises this address and drives [com.tailapp.ble.VirtualTailTransport],
+     * so the previews and the analysis pipeline can be exercised on their own.
+     */
+    fun connectVirtual(): String {
+        connect(VirtualTailTransport.ADDRESS)
+        return VirtualTailTransport.ADDRESS
     }
 }
