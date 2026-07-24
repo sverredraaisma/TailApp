@@ -20,6 +20,21 @@
         android:label="@string/app_name"
         android:supportsRtl="true"
         android:theme="@style/Theme.TailApp">
+        <!--
+            Serves exported effect stacks to the share sheet. Sharing a file URI
+            directly would throw on API 24+, and the stack is too large to pass
+            as an Intent extra.
+        -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
 
         <service
             android:name=".audio.AudioStreamService"

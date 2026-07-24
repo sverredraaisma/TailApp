@@ -48,9 +48,12 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -106,6 +109,25 @@ fun EffectComposerScreen(
     var showRenameDialog by remember { mutableStateOf(false) }
     var showMenu by remember { mutableStateOf(false) }
     var showInstallDialog by remember { mutableStateOf(false) }
+    var importError by remember { mutableStateOf<String?>(null) }
+
+    val context = LocalContext.current
+
+    // Reads whatever the user picked and hands the text to the view model,
+    // which is where the decision to accept or reject it belongs.
+    val importLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        val text = runCatching {
+            context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+        }.getOrNull()
+        importError = if (text == null) {
+            "Could not read that file."
+        } else {
+            viewModel.importJson(text)
+        }
+    }
 
     val ledsPerRing = deviceState.ledState?.ledsPerRing.orEmpty()
 
@@ -144,6 +166,21 @@ fun EffectComposerScreen(
                             DropdownMenuItem(
                                 text = { Text("New stack") },
                                 onClick = { showMenu = false; viewModel.newComposition() }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Share stack…") },
+                                onClick = {
+                                    showMenu = false
+                                    shareComposition(
+                                        context,
+                                        viewModel.exportFileName(),
+                                        viewModel.exportJson()
+                                    )
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Import stack…") },
+                                onClick = { showMenu = false; importLauncher.launch(arrayOf("*/*")) }
                             )
                             DropdownMenuItem(
                                 text = { Text("Install on tail…") },
@@ -260,6 +297,15 @@ fun EffectComposerScreen(
             initial = composition.name,
             onConfirm = { viewModel.setCompositionName(it); showRenameDialog = false },
             onDismiss = { showRenameDialog = false }
+        )
+    }
+
+    importError?.let { message ->
+        AlertDialog(
+            onDismissRequest = { importError = null },
+            title = { Text("Import failed") },
+            text = { Text(message) },
+            confirmButton = { TextButton(onClick = { importError = null }) { Text("OK") } }
         )
     }
 
@@ -867,3 +913,28 @@ private val SWATCHES = listOf(
     0x40FF00, 0x00FFA0, 0x00D0FF, 0x1040FF,
     0x8020FF, 0xFF00C8, 0x808080, 0x000000
 )
+
+/**
+ * Hands the stack to the system share sheet as a JSON document.
+ *
+ * Written to the cache directory and shared by content URI rather than as an
+ * extra string: a stack of any size exceeds what an Intent extra can safely
+ * carry, and a file is what the receiving app almost always wants anyway.
+ */
+private fun shareComposition(context: android.content.Context, fileName: String, json: String) {
+    val dir = java.io.File(context.cacheDir, "shared").apply { mkdirs() }
+    val file = java.io.File(dir, fileName)
+    file.writeText(json)
+
+    val uri = androidx.core.content.FileProvider.getUriForFile(
+        context,
+        "${context.packageName}.fileprovider",
+        file
+    )
+    val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+        type = "application/json"
+        putExtra(android.content.Intent.EXTRA_STREAM, uri)
+        addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    context.startActivity(android.content.Intent.createChooser(intent, "Share effect stack"))
+}

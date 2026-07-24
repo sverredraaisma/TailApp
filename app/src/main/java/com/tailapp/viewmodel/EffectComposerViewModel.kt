@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.tailapp.composer.Composition
 import com.tailapp.composer.CompositionLibrary
+import com.tailapp.composer.CompositionSerializer
 import com.tailapp.composer.FirmwareExport
 import com.tailapp.composer.EffectCategory
 import com.tailapp.composer.EffectLayer
@@ -173,6 +174,61 @@ class EffectComposerViewModel(
     fun setBrightness(brightness: Float) = edit { it.copy(brightness = brightness.coerceIn(0f, 1f)) }
 
     fun setCompositionName(name: String) = edit { it.copy(name = name) }
+
+    /**
+     * The current stack as JSON, for sharing or backing up.
+     *
+     * The same format the library persists, so a document exported here can be
+     * imported anywhere — and a user whose phone dies has something to restore
+     * from, which a SharedPreferences blob alone does not give them.
+     */
+    fun exportJson(): String = CompositionSerializer.toJson(_composition.value)
+
+    /** File name to offer when sharing; derived from the stack's own name. */
+    fun exportFileName(): String {
+        val safe = _composition.value.name
+            .map { if (it.isLetterOrDigit()) it else '_' }
+            .joinToString("")
+            .trim('_')
+            .ifBlank { "composition" }
+        return "$safe.tailstack.json"
+    }
+
+    /**
+     * Adds an imported stack to the library and opens it.
+     *
+     * Imported under a **fresh id**: an import that silently overwrote a stack
+     * the user had built, because both happened to carry the same id, would be
+     * data loss disguised as a feature.
+     *
+     * @return null on success, or a message explaining why the document was
+     *   rejected.
+     */
+    fun importJson(text: String): String? {
+        val parsed = CompositionSerializer.fromJson(text)
+            ?: return "That file is not a saved effect stack."
+        if (parsed.layers.isEmpty()) return "That stack has no layers."
+
+        val imported = parsed.copy(
+            id = newCompositionId(),
+            name = uniqueName(parsed.name)
+        )
+        library.save(imported)
+        library.setActive(imported.id)
+        _composition.value = imported
+        _hasUnsavedChanges.value = false
+        engine.composition = imported
+        return null
+    }
+
+    /** Appends a counter until the name is not already taken. */
+    private fun uniqueName(name: String): String {
+        val taken = library.compositions.value.map { it.name }.toSet()
+        if (name !in taken) return name
+        var n = 2
+        while ("$name ($n)" in taken) n++
+        return "$name ($n)"
+    }
 
     /**
      * What installing the current stack onto the tail would carry over.

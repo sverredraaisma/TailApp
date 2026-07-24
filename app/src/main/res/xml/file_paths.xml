@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Only the one cache subdirectory the share sheet writes into.
+
+    Deliberately narrow: a FileProvider grants read access to whatever it
+    exposes, so exposing the whole cache would hand every share target more than
+    the effect stack it asked for.
+-->
+<paths>
+    <cache-path name="shared" path="shared/" />
+</paths>
