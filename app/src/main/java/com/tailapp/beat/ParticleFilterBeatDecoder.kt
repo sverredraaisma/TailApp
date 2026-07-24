@@ -213,6 +213,9 @@ class ParticleFilterBeatDecoder(
     private val silenceDropFrames = (SILENCE_SECONDS * framesPerSecond).toInt()
     private val warmupFrames = (WARMUP_SECONDS * framesPerSecond).toInt()
 
+    /** Per-frame release of the audio-presence envelope; see [audioLevel]. */
+    private val audioRelease = exp(-1f / (AUDIO_RELEASE_SECONDS * framesPerSecond))
+
     private var random = Random(seed)
 
     // --- stage one: beat particles -------------------------------------------
@@ -280,6 +283,21 @@ class ParticleFilterBeatDecoder(
     private var quietFrames = 0
     private var activeFrames = 0
 
+    /**
+     * A decaying envelope of the audio's own RMS — "is something playing" — as
+     * opposed to "is this frame a beat". They are not the same question, and
+     * conflating them is a bug the [SpectralFluxActivationSource] hid: its
+     * activation is dense (a z-scored broadband flux is above the floor most
+     * frames), so the beat activation *looked* like an audio-presence signal.
+     * A neural activation (BeatNet's CRNN) is not dense — it is near zero between
+     * beats by design — so using it for silence detection made the filter think
+     * ordinary music was mostly silent, starving [activeFrames] and dropping the
+     * lock every couple of seconds. Real audio energy is continuous through a
+     * bar, so keying silence off [FeatureFrame.rms] works for any activation
+     * source; the light release bridges the rms dip between percussive hits.
+     */
+    private var audioLevel = 0f
+
     /** Spare normal deviate from the last Marsaglia polar draw. */
     private var spareGaussian = Float.NaN
 
@@ -310,6 +328,7 @@ class ParticleFilterBeatDecoder(
         frameIndex++
         lastTimestampNanos = frame.timestampNanos
         downbeatHistory[(frameIndex % ACTIVATION_HISTORY).toInt()] = activation.downbeat
+        audioLevel = maxOf(frame.rms, audioLevel * audioRelease)
 
         // Stage two first: a beat whose instant has arrived can finally be scored,
         // and the bar phase it produces is what the next emission will use.
@@ -317,7 +336,9 @@ class ParticleFilterBeatDecoder(
 
         predict()
 
-        trackSilence(activation.beat)
+        // Silence is judged from audio energy, not the beat activation — see
+        // [audioLevel]. The activation still drives the observation model below.
+        trackSilence(audioLevel)
         if (quietFrames <= silenceHoldFrames) {
             correct(activation.beat)
             resampleIfDepleted()
@@ -348,6 +369,7 @@ class ParticleFilterBeatDecoder(
         hasLock = false
         quietFrames = 0
         activeFrames = 0
+        audioLevel = 0f
     }
 
     // --- initialisation ------------------------------------------------------
@@ -646,8 +668,8 @@ class ParticleFilterBeatDecoder(
      * is dropped and the cloud is re-spread, because a gap that long is a new
      * piece of music, not a bar's rest.
      */
-    private fun trackSilence(activationValue: Float) {
-        if (activationValue > SILENCE_ACTIVATION) {
+    private fun trackSilence(level: Float) {
+        if (level > RMS_SILENCE) {
             quietFrames = 0
             activeFrames++
             return
@@ -1043,8 +1065,16 @@ class ParticleFilterBeatDecoder(
         /** Fraction of a period two emitted beats must be apart. */
         const val MIN_BEAT_SPACING = 0.5
 
-        /** Below this activation a frame counts as silent. Matches [BeatTracker]. */
-        const val SILENCE_ACTIVATION = 0.05f
+        /**
+         * Below this audio RMS a frame counts as silent. An absolute floor, well
+         * under any music through a mic and above room tone; erring low is safe,
+         * since a false "active" only ever costs the lock the concentration gate,
+         * never a spurious tempo. Tunable if a very quiet source needs it.
+         */
+        const val RMS_SILENCE = 0.01f
+
+        /** Release time of the audio-presence envelope; bridges between-hit rms dips. */
+        const val AUDIO_RELEASE_SECONDS = 0.5f
 
         /**
          * Quiet this long and the observation update is suspended. Longer than

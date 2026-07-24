@@ -97,6 +97,41 @@ class ParticleFilterBeatDecoderTest {
     // --- silence -------------------------------------------------------------
 
     @Test
+    fun `locks promptly on a peaky activation over continuous audio - the CRNN case`() {
+        // A neural activation (BeatNet's CRNN) sits at zero between beats, where
+        // the spectral flux this filter was first tuned on is dense. Silence must
+        // therefore be judged from audio energy, not the beat activation — with
+        // continuous audio the filter has to lock in a couple of seconds even
+        // though the activation is quiet most of the time. Before that fix this
+        // signal took ~12 s to report any BPM, which read on-device as "no BPM".
+        val fps = config.framesPerSecond
+        val hopNanos = (1e9 / fps).toLong()
+        val period = fps * 60f / 128f
+        val decoder = ParticleFilterBeatDecoder(config)
+
+        var firstBpmSeconds = -1f
+        for (i in 0 until (20f * fps).toInt()) {
+            val nearest = Math.round(i / period)
+            val dist = abs(i - nearest * period)
+            // Continuous energy; activation is exactly zero except at a beat, and
+            // never crosses the old 0.05 activation floor between beats.
+            val frame = FeatureFrame(
+                i.toLong(), (i + 1) * hopNanos, FloatArray(0),
+                flux = 0f, rms = 0.2f, bassEnergy = 0.1f, midEnergy = 0.1f, highEnergy = 0.1f,
+                spectralCentroidHz = 1500f
+            )
+            val beatAct = if (dist < 1f) 1f else 0f
+            val downAct = if (dist < 1f && Math.floorMod(nearest, 4) == 0) 1f else 0f
+            decoder.process(frame, BeatActivation(beatAct, downAct))
+            if (firstBpmSeconds < 0f && decoder.bpm > 0f) firstBpmSeconds = frame.timestampNanos / 1e9f
+        }
+
+        assertTrue("never reported a BPM", firstBpmSeconds >= 0f)
+        assertTrue("first BPM at ${firstBpmSeconds}s — too slow", firstBpmSeconds <= 6f)
+        assertEquals(128f, decoder.bpm, 2f)
+    }
+
+    @Test
     fun `silence produces no beats`() {
         val signals = BeatTestSignals(config)
 
