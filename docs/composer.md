@@ -41,7 +41,7 @@ device connected the context carries `TailTelemetry.AT_REST`, so these effects
 still render in the desk preview instead of special-casing "no tail".
 
 Effects never touch the microphone, the clock or BLE. They read the context and
-write pixels, which is what makes all 20 of them testable with a hand-built
+write pixels, which is what makes all 25 of them testable with a hand-built
 context and no device (`ReactiveEffectsTest` renders every one of them against
 silence, a loud downbeat, and a predicted-but-not-yet-arrived beat).
 
