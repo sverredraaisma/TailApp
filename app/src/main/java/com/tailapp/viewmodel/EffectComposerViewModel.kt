@@ -266,7 +266,8 @@ class EffectComposerViewModel(
             _installResult.value = if (ok) {
                 "Installed to slot $slot.\n\n${FirmwareExport.describe(export)}"
             } else {
-                "Could not install: the stack does not fit the device's layer count."
+                "Could not install: the stack does not fit the device's layer " +
+                    "count, or the device refused one of the writes."
             }
         }
     }

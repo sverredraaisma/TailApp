@@ -3,6 +3,7 @@ package com.tailapp.testutil
 import com.tailapp.ble.BleTransport
 import com.tailapp.ble.CharacteristicUpdate
 import com.tailapp.ble.ConnectionState
+import com.tailapp.ble.protocol.CharacteristicUuids
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -40,6 +41,28 @@ class FakeBleTransport : BleTransport {
 
     var writeResult: Boolean = true
     var discoverServicesResult: Boolean = true
+
+    /**
+     * Whether a write-with-response is answered on FF09, the way the firmware
+     * answers every command that is not a stream. False for a device that says
+     * nothing, which is what an acknowledgement timeout looks like.
+     */
+    var autoAck: Boolean = true
+
+    /** False makes the auto-ACK a 3-byte pre-v5 payload, with no sequence byte. */
+    var ackIncludesSequence: Boolean = true
+
+    /** Result codes for the next writes, consumed in order; empty answers OK. */
+    val ackResults: ArrayDeque<Int> = ArrayDeque()
+
+    /**
+     * How many of the next acknowledgements the device counts but never
+     * delivers — a notify dropped on the air, whose only trace is the gap it
+     * leaves in the sequence numbering.
+     */
+    var acksToDrop: Int = 0
+
+    private var ackSequence = 0
 
     /** Virtual delay applied to each read, for exercising slow-setup behaviour. */
     var readDelayMs: Long = 0
@@ -83,7 +106,24 @@ class FakeBleTransport : BleTransport {
 
     override suspend fun writeCharacteristic(uuid: UUID, data: ByteArray): Boolean {
         writes.add(Write(uuid, data))
+        // A write the stack refused never reaches the device, so it is never
+        // counted and never acknowledged.
+        if (writeResult && autoAck && data.isNotEmpty()) ack(uuid, data[0])
         return writeResult
+    }
+
+    /** Answers one write on FF09, mirroring `app_bridge.cpp::publish_result`. */
+    private fun ack(uuid: UUID, commandId: Byte) {
+        val result = (ackResults.removeFirstOrNull() ?: 0x00).toByte()
+        val sequence = ackSequence
+        ackSequence = (ackSequence + 1) and 0xFF
+        if (acksToDrop > 0) {
+            acksToDrop--
+            return
+        }
+        val payload = byteArrayOf(CharacteristicUuids.shortId(uuid), commandId, result) +
+            if (ackIncludesSequence) byteArrayOf(sequence.toByte()) else ByteArray(0)
+        _characteristicUpdate.tryEmit(CharacteristicUpdate(CharacteristicUuids.CMD_RESULT, payload))
     }
 
     override fun writeWithoutResponse(uuid: UUID, data: ByteArray) {

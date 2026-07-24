@@ -1,4 +1,4 @@
-package com.tailapp.lighting
+﻿package com.tailapp.lighting
 
 import com.tailapp.ble.ConnectionState
 import com.tailapp.ble.protocol.CharacteristicUuids
@@ -9,7 +9,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.TestCoroutineScheduler
 import kotlinx.coroutines.test.TestDispatcher
+import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.After
@@ -39,12 +41,31 @@ class TailDirectLedOutputTest {
         repositoryScope = null
     }
 
-    private fun newRepository(transport: FakeBleTransport): DeviceRepository {
-        dispatcher = StandardTestDispatcher()
+    /**
+     * [scheduler] is the caller's own, so the repository's notification collector
+     * runs on the same clock as the test: `open` waits for the device to accept
+     * direct mode, and an acknowledgement delivered on some other scheduler would
+     * never arrive.
+     */
+    private fun newRepository(
+        transport: FakeBleTransport,
+        scheduler: TestCoroutineScheduler? = null
+    ): DeviceRepository {
+        dispatcher = if (scheduler != null) StandardTestDispatcher(scheduler) else StandardTestDispatcher()
         val scope = CoroutineScope(dispatcher)
         repositoryScope = scope
         transport.setConnectionState(ConnectionState.CONNECTED)
         return DeviceRepository(transport, scope)
+    }
+
+    /**
+     * An output over a repository that has finished connecting, so the FF09
+     * acknowledgement `open` waits for has somewhere to arrive.
+     */
+    private fun TestScope.connectedOutput(transport: FakeBleTransport): TailDirectLedOutput {
+        val repository = newRepository(transport, testScheduler)
+        advanceUntilIdle()
+        return TailDirectLedOutput(repository)
     }
 
     private fun frame(vararg bytes: Byte): PixelBuffer {
@@ -86,7 +107,7 @@ class TailDirectLedOutputTest {
     fun `an unchanged frame is resent before the device would time the stream out`() =
         runTest(StandardTestDispatcher()) {
             val transport = FakeBleTransport()
-            val output = TailDirectLedOutput(newRepository(transport))
+            val output = connectedOutput(transport)
             output.open(ledCount = 1)
             advanceUntilIdle()
 
@@ -111,7 +132,7 @@ class TailDirectLedOutputTest {
     fun `identical consecutive frames are suppressed inside the keepalive window`() =
         runTest(StandardTestDispatcher()) {
             val transport = FakeBleTransport()
-            val output = TailDirectLedOutput(newRepository(transport))
+            val output = connectedOutput(transport)
             output.open(ledCount = 1)
             advanceUntilIdle()
 
@@ -129,7 +150,7 @@ class TailDirectLedOutputTest {
     fun `a changed frame goes out immediately regardless of the keepalive`() =
         runTest(StandardTestDispatcher()) {
             val transport = FakeBleTransport()
-            val output = TailDirectLedOutput(newRepository(transport))
+            val output = connectedOutput(transport)
             output.open(ledCount = 1)
             advanceUntilIdle()
 
@@ -143,7 +164,7 @@ class TailDirectLedOutputTest {
     fun `a frame mutated in place is still detected as a change`() =
         runTest(StandardTestDispatcher()) {
             val transport = FakeBleTransport()
-            val output = TailDirectLedOutput(newRepository(transport))
+            val output = connectedOutput(transport)
             output.open(ledCount = 1)
             advanceUntilIdle()
 

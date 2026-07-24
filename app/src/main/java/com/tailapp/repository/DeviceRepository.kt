@@ -32,6 +32,7 @@ import com.tailapp.model.ProfileSlot
 import com.tailapp.model.ServoConfig
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -41,10 +42,12 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import java.util.UUID
 
 class DeviceRepository(
     private val transport: BleTransport,
-    private val scope: CoroutineScope
+    private val scope: CoroutineScope,
+    private val ackRetryPolicy: AckRetryPolicy = AckRetryPolicy()
 ) : DeviceAudioStream, DeviceMotionStream {
     private val _deviceState = MutableStateFlow(DeviceState())
     val deviceState: StateFlow<DeviceState> = _deviceState.asStateFlow()
@@ -59,10 +62,28 @@ class DeviceRepository(
 
     val negotiatedMtu: StateFlow<Int> get() = transport.negotiatedMtu
 
+    /** Pairs each FF09 result with the write that caused it. */
+    private val ackTracker = CommandAckTracker()
+
+    /**
+     * FF09 results on their way to [ackTracker].
+     *
+     * Correlating takes the tracker's registration lock, which a write in flight
+     * holds, so it cannot happen on the notification collector: a write during an
+     * upload burst would otherwise hold up the 20 Hz FF02 stream the composer
+     * reads. Unbounded and never blocking, with a single consumer, so results
+     * still reach the tracker in arrival order — which is the whole basis of the
+     * correlation.
+     */
+    private val ackInbox = Channel<CommandResult>(Channel.UNLIMITED)
+
     private var notificationJob: Job? = null
     private var setupJob: Job? = null
 
     init {
+        scope.launch {
+            for (result in ackInbox) ackTracker.onResult(result)
+        }
         scope.launch {
             transport.connectionState.collect { state ->
                 _deviceState.update { it.copy(connectionState = state) }
@@ -157,6 +178,7 @@ class DeviceRepository(
                         }
                         _commandResults.tryEmit(result)
                         _deviceState.update { it.copy(lastCommandResult = result) }
+                        ackInbox.trySend(result)
                     }
             }
         }
@@ -235,16 +257,72 @@ class DeviceRepository(
         setupJob = null
         notificationJob?.cancel()
         notificationJob = null
+        // In its own job: abandoning takes the tracker's registration lock, which
+        // a write in flight can hold for as long as the GATT stack takes to give
+        // up on it, and this runs on the connection-state collector.
+        scope.launch { ackTracker.abandonAll() }
         // Rebuilding from a fresh DeviceState() also resets directModeActive to
         // false, matching the firmware auto-reverting direct mode on disconnect
         // (app_bridge.cpp::app_led_render checks connection state every frame).
         _deviceState.value = DeviceState(connectionState = ConnectionState.DISCONNECTED)
     }
 
+    // --- Acknowledged writes ---
+
+    /**
+     * Writes a command and returns as soon as the write is away, without waiting
+     * for the device's verdict. This is what the many deliberately optimistic
+     * call sites use: a slider drag cannot afford a round trip, and a rejection
+     * there self-corrects at the next refresh of the characteristic it touched.
+     *
+     * The acknowledgement is still *registered*. FF09's sequence byte counts
+     * every command the device processed, so a write that skipped registration
+     * would leave a hole in the numbering, and the next command that does wait
+     * would read its own answer as one that had been lost.
+     *
+     * FF05, FF0A and FF0B never come through here — the firmware acknowledges
+     * none of them by design (see [streamDirectFrame]).
+     */
+    private suspend fun sendCommand(uuid: UUID, data: ByteArray): Boolean =
+        register(uuid, data).written
+
+    /**
+     * Writes a command and waits for the device to answer it, retrying a `BUSY`
+     * rejection per [ackRetryPolicy]. For the call sites where the answer changes
+     * what the app does next.
+     */
+    private suspend fun sendCommandAwaitingAck(uuid: UUID, data: ByteArray): AckedWrite {
+        var attempt = 1
+        while (true) {
+            val pending = register(uuid, data)
+            if (!pending.written) return AckedWrite(written = false, result = null)
+
+            val result = pending.await(ackRetryPolicy.timeoutMs)
+            if (result == null || !result.result.isRetryable) {
+                return AckedWrite(written = true, result = result)
+            }
+            if (attempt >= ackRetryPolicy.maxAttempts) {
+                Log.w(
+                    TAG,
+                    "still busy after $attempt attempts: ${result.characteristicName} " +
+                        "cmd=0x%02X".format(result.commandId)
+                )
+                return AckedWrite(written = true, result = result)
+            }
+            attempt++
+            delay(ackRetryPolicy.retryDelayMs)
+        }
+    }
+
+    private suspend fun register(uuid: UUID, data: ByteArray): CommandAckTracker.Pending =
+        ackTracker.send(CharacteristicUuids.shortId(uuid), data.firstOrNull() ?: 0) {
+            transport.writeCharacteristic(uuid, data)
+        }
+
     // --- Motion commands ---
 
     suspend fun selectPattern(patternId: Byte) {
-        transport.writeCharacteristic(CharacteristicUuids.MOTION_CMD, MotionCommands.selectPattern(patternId))
+        sendCommand(CharacteristicUuids.MOTION_CMD, MotionCommands.selectPattern(patternId))
         _deviceState.update { state ->
             val ms = state.motionState ?: return@update state
             // The firmware zeroes the pattern params when the pattern changes.
@@ -253,7 +331,7 @@ class DeviceRepository(
     }
 
     suspend fun setPatternParam(paramId: Byte, value: Float) {
-        transport.writeCharacteristic(CharacteristicUuids.MOTION_CMD, MotionCommands.setPatternParam(paramId, value))
+        sendCommand(CharacteristicUuids.MOTION_CMD, MotionCommands.setPatternParam(paramId, value))
         _deviceState.update { state ->
             val ms = state.motionState ?: return@update state
             val params = ms.params.toMutableList()
@@ -270,7 +348,7 @@ class DeviceRepository(
         invert: Byte,
         muxChannel: Byte? = null
     ) {
-        transport.writeCharacteristic(
+        sendCommand(
             CharacteristicUuids.MOTION_CMD,
             MotionCommands.setServoConfig(servoId, axis, half, invert, muxChannel)
         )
@@ -285,7 +363,7 @@ class DeviceRepository(
     }
 
     suspend fun setPidGains(servoId: Byte, kp: Float, ki: Float, kd: Float) {
-        transport.writeCharacteristic(
+        sendCommand(
             CharacteristicUuids.MOTION_CMD,
             MotionCommands.setPidGains(servoId, kp, ki, kd)
         )
@@ -293,11 +371,11 @@ class DeviceRepository(
     }
 
     suspend fun calibrateZero() {
-        transport.writeCharacteristic(CharacteristicUuids.MOTION_CMD, MotionCommands.calibrateZero())
+        sendCommand(CharacteristicUuids.MOTION_CMD, MotionCommands.calibrateZero())
     }
 
     suspend fun setAxisLimits(axis: Byte, min: Float, max: Float) {
-        transport.writeCharacteristic(CharacteristicUuids.MOTION_CMD, MotionCommands.setAxisLimits(axis, min, max))
+        sendCommand(CharacteristicUuids.MOTION_CMD, MotionCommands.setAxisLimits(axis, min, max))
         _deviceState.update { state ->
             val ms = state.motionState ?: return@update state
             if (axis.toInt() == 0) {
@@ -321,7 +399,7 @@ class DeviceRepository(
         maxJerk: Float,
         stallThreshold: Byte
     ) {
-        transport.writeCharacteristic(
+        sendCommand(
             CharacteristicUuids.MOTION_CMD,
             MotionCommands.setMotionLimits(servoId, maxVelocity, maxAcceleration, maxJerk, stallThreshold)
         )
@@ -345,7 +423,7 @@ class DeviceRepository(
      * a stall the moment the user acts on it.
      */
     suspend fun setMotorsEnabled(enabled: Boolean) {
-        transport.writeCharacteristic(
+        sendCommand(
             CharacteristicUuids.MOTION_CMD,
             MotionCommands.enableMotors(enabled)
         )
@@ -356,7 +434,7 @@ class DeviceRepository(
     }
 
     suspend fun setImuTap(imuId: Byte, enabled: Boolean) {
-        transport.writeCharacteristic(CharacteristicUuids.MOTION_CMD, MotionCommands.setImuTap(imuId, enabled))
+        sendCommand(CharacteristicUuids.MOTION_CMD, MotionCommands.setImuTap(imuId, enabled))
         _deviceState.update { state ->
             val si = state.systemInfo ?: return@update state
             val idx = imuId.toInt()
@@ -380,7 +458,7 @@ class DeviceRepository(
     // --- LED commands ---
 
     suspend fun setLayerEffect(layer: Byte, effectId: Byte, blendMode: Byte) {
-        transport.writeCharacteristic(CharacteristicUuids.LED_CMD, LedCommands.setLayerEffect(layer, effectId, blendMode))
+        sendCommand(CharacteristicUuids.LED_CMD, LedCommands.setLayerEffect(layer, effectId, blendMode))
         _deviceState.update { state ->
             val ls = state.ledState ?: return@update state
             val idx = layer.toInt()
@@ -402,7 +480,7 @@ class DeviceRepository(
     }
 
     suspend fun setEffectParam(layer: Byte, paramId: Byte, value: Float) {
-        transport.writeCharacteristic(CharacteristicUuids.LED_CMD, LedCommands.setEffectParam(layer, paramId, value))
+        sendCommand(CharacteristicUuids.LED_CMD, LedCommands.setEffectParam(layer, paramId, value))
         updateLayer(layer.toInt()) { config ->
             val params = config.params.toMutableList()
             val pIdx = paramId.toInt()
@@ -412,7 +490,7 @@ class DeviceRepository(
     }
 
     suspend fun removeLayer(layer: Byte) {
-        transport.writeCharacteristic(CharacteristicUuids.LED_CMD, LedCommands.removeLayer(layer))
+        sendCommand(CharacteristicUuids.LED_CMD, LedCommands.removeLayer(layer))
         // The firmware clears the slot in place (effect_id = 0xFF) and leaves
         // num_layers alone — removing the entry here instead would shift every
         // higher layer's index and silently retarget subsequent edits.
@@ -420,7 +498,7 @@ class DeviceRepository(
     }
 
     suspend fun setLayerTransform(layer: Byte, flipX: Boolean, flipY: Boolean, mirrorX: Boolean, mirrorY: Boolean) {
-        transport.writeCharacteristic(
+        sendCommand(
             CharacteristicUuids.LED_CMD,
             LedCommands.setLayerTransform(layer, flipX, flipY, mirrorX, mirrorY)
         )
@@ -430,7 +508,7 @@ class DeviceRepository(
     }
 
     suspend fun setLayerEnabled(layer: Byte, enabled: Boolean) {
-        transport.writeCharacteristic(CharacteristicUuids.LED_CMD, LedCommands.setLayerEnabled(layer, enabled))
+        sendCommand(CharacteristicUuids.LED_CMD, LedCommands.setLayerEnabled(layer, enabled))
         updateLayer(layer.toInt()) { it.copy(enabled = enabled) }
     }
 
@@ -444,22 +522,43 @@ class DeviceRepository(
         }
     }
 
-    /** `0x08` BEGIN — clears the staging buffer and arms the length + CRC check. */
+    /**
+     * `0x08` BEGIN — clears the staging buffer and arms the length + CRC check.
+     *
+     * Every step of the upload waits for its acknowledgement. The handshake only
+     * means anything if the answers are read: a rejected BEGIN leaves the staging
+     * buffer unarmed, and pushing three kilobytes of chunks at it afterwards
+     * spends the airtime for a FINALIZE that cannot succeed. A missing answer
+     * counts as failure here for the same reason — the upload is a one-shot the
+     * user can retry, and the log says which step went quiet.
+     *
+     * @return true only if the device acknowledged it.
+     */
     suspend fun beginImage(totalLength: Int, crc32: Int): Boolean =
-        transport.writeCharacteristic(CharacteristicUuids.LED_CMD, LedCommands.beginImage(totalLength, crc32))
+        sendCommandAwaitingAck(
+            CharacteristicUuids.LED_CMD,
+            LedCommands.beginImage(totalLength, crc32)
+        ).accepted
 
     suspend fun uploadImageChunk(offset: Int, data: ByteArray): Boolean =
-        transport.writeCharacteristic(CharacteristicUuids.LED_CMD, LedCommands.uploadImageChunk(offset, data))
+        sendCommandAwaitingAck(
+            CharacteristicUuids.LED_CMD,
+            LedCommands.uploadImageChunk(offset, data)
+        ).accepted
 
     suspend fun finalizeImage(width: Byte, height: Byte, layer: Byte): Boolean =
-        transport.writeCharacteristic(CharacteristicUuids.LED_CMD, LedCommands.finalizeImage(width, height, layer))
+        sendCommandAwaitingAck(
+            CharacteristicUuids.LED_CMD,
+            LedCommands.finalizeImage(width, height, layer)
+        ).accepted
 
     /**
      * Uploads [rgb] using the integrity-checked flow: BEGIN(len, crc32) → chunks → FINALIZE.
-     * The firmware verifies length and CRC-32 at finalize and rejects a corrupt image.
+     * The firmware verifies length and CRC-32 at finalize and rejects a corrupt
+     * image with `BAD_STATE`, which is the answer this waits for.
      *
      * @param onProgress called with 0f..1f after each chunk.
-     * @return false if any write failed to reach the device.
+     * @return false if any step failed to reach the device or was not acknowledged.
      */
     suspend fun uploadImage(
         rgb: ByteArray,
@@ -473,20 +572,22 @@ class DeviceRepository(
         // The firmware rejects a zero-length BEGIN with OUT_OF_RANGE.
         require(rgb.isNotEmpty()) { "image data must not be empty" }
         if (!beginImage(rgb.size, Crc32.compute(rgb))) {
-            Log.w(TAG, "uploadImage: BEGIN write failed")
+            Log.w(TAG, "uploadImage: BEGIN not acknowledged")
             return false
         }
         var offset = 0
         while (offset < rgb.size) {
             val end = minOf(offset + chunkSize, rgb.size)
             if (!uploadImageChunk(offset, rgb.copyOfRange(offset, end))) {
-                Log.w(TAG, "uploadImage: chunk at $offset failed")
+                Log.w(TAG, "uploadImage: chunk at $offset not acknowledged")
                 return false
             }
             offset = end
             onProgress(offset.toFloat() / rgb.size)
         }
-        return finalizeImage(width.toByte(), height.toByte(), layer)
+        val finalized = finalizeImage(width.toByte(), height.toByte(), layer)
+        if (!finalized) Log.w(TAG, "uploadImage: FINALIZE rejected (length or CRC mismatch)")
+        return finalized
     }
 
     // --- System commands ---
@@ -494,7 +595,7 @@ class DeviceRepository(
     suspend fun setLedMatrix(ledsPerRing: List<Byte>) {
         val maxRings = _deviceState.value.capabilities.maxLedRings
         val rings = ledsPerRing.take(maxRings)
-        transport.writeCharacteristic(
+        sendCommand(
             CharacteristicUuids.SYSTEM_CONFIG,
             SystemCommands.setLedMatrix(rings, maxRings)
         )
@@ -547,46 +648,52 @@ class DeviceRepository(
      * composite a look nobody designed. `LCMD_REMOVE_LAYER` stamps a slot empty
      * rather than shifting indices, so clearing is per-slot by definition.
      *
-     * @return true if every write was accepted.
+     * Every write here waits for its acknowledgement, unlike the single-setting
+     * commands. This is the burst the device's eight-deep command queue exists to
+     * absorb, and an unacknowledged burst that overruns it loses layers with
+     * nothing said; waiting is also the back-pressure that stops it overrunning
+     * in the first place. Only an explicit rejection aborts — across ~80 writes a
+     * single lost notification is likelier than a real failure.
+     *
+     * @return true if the stack fits and no write was refused or lost the connection.
      */
     suspend fun installLayerStack(layers: List<LayerConfig>, saveToSlot: Byte? = null): Boolean {
         val maxLayers = _deviceState.value.capabilities.maxLayers
         if (layers.size > maxLayers) return false
 
-        for (slot in 0 until maxLayers) {
-            transport.writeCharacteristic(
-                CharacteristicUuids.LED_CMD,
-                LedCommands.removeLayer(slot.toByte())
-            )
+        suspend fun install(data: ByteArray): Boolean {
+            val outcome = sendCommandAwaitingAck(CharacteristicUuids.LED_CMD, data)
+            if (!outcome.written || outcome.rejected) {
+                Log.w(
+                    TAG,
+                    "installLayerStack: cmd 0x%02X ".format(data[0]) +
+                        (outcome.result?.result?.name ?: "write failed")
+                )
+                return false
+            }
+            return true
         }
 
-        layers.forEachIndexed { index, layer ->
+        for (slot in 0 until maxLayers) {
+            if (!install(LedCommands.removeLayer(slot.toByte()))) return false
+        }
+
+        for ((index, layer) in layers.withIndex()) {
             val i = index.toByte()
-            transport.writeCharacteristic(
-                CharacteristicUuids.LED_CMD,
-                LedCommands.setLayerEffect(i, layer.effectId, layer.blendMode)
-            )
+            if (!install(LedCommands.setLayerEffect(i, layer.effectId, layer.blendMode))) return false
             // Parameters after the effect: the firmware rejects a param write
             // for a slot with no effect, which is the whole point of that check.
-            layer.params.forEachIndexed { paramId, value ->
-                transport.writeCharacteristic(
-                    CharacteristicUuids.LED_CMD,
-                    LedCommands.setEffectParam(i, paramId.toByte(), value)
-                )
+            for ((paramId, value) in layer.params.withIndex()) {
+                if (!install(LedCommands.setEffectParam(i, paramId.toByte(), value))) return false
             }
             if (layer.flipX || layer.flipY || layer.mirrorX || layer.mirrorY) {
-                transport.writeCharacteristic(
-                    CharacteristicUuids.LED_CMD,
-                    LedCommands.setLayerTransform(
-                        i, layer.flipX, layer.flipY, layer.mirrorX, layer.mirrorY
-                    )
+                val transform = LedCommands.setLayerTransform(
+                    i, layer.flipX, layer.flipY, layer.mirrorX, layer.mirrorY
                 )
+                if (!install(transform)) return false
             }
             if (layer.opacity != 255) {
-                transport.writeCharacteristic(
-                    CharacteristicUuids.LED_CMD,
-                    LedCommands.setLayerOpacity(i, layer.opacity)
-                )
+                if (!install(LedCommands.setLayerOpacity(i, layer.opacity))) return false
             }
         }
 
@@ -600,7 +707,7 @@ class DeviceRepository(
 
     /** Sets the device's output stage: master brightness, gamma, current budget. */
     suspend fun setOutputConfig(brightness: Int, gammaEnabled: Boolean, currentLimitMa: Int) {
-        transport.writeCharacteristic(
+        sendCommand(
             CharacteristicUuids.LED_CMD,
             LedCommands.setOutputConfig(brightness, gammaEnabled, currentLimitMa)
         )
@@ -651,13 +758,19 @@ class DeviceRepository(
      * flag if the app is gone, so the tail never gets stuck on a stale frame).
      * [onDisconnected] mirrors that on this side by resetting
      * [DeviceState.directModeActive] to false too.
+     *
+     * @return true when the *device* accepted the change, not merely that the
+     *   write was queued — every frame streamed afterwards is composited away
+     *   unless it did, so "the write went out" was never the useful answer.
      */
     suspend fun setDirectMode(enabled: Boolean): Boolean {
-        val ok = transport.writeCharacteristic(CharacteristicUuids.LED_CMD, LedCommands.setDirectMode(enabled))
-        if (ok) {
+        val outcome = sendCommandAwaitingAck(CharacteristicUuids.LED_CMD, LedCommands.setDirectMode(enabled))
+        if (outcome.accepted) {
             _deviceState.update { it.copy(directModeActive = enabled) }
+        } else {
+            Log.w(TAG, "direct mode $enabled not accepted: ${outcome.result?.result ?: "no answer"}")
         }
-        return ok
+        return outcome.accepted
     }
 
     /**
@@ -699,28 +812,32 @@ class DeviceRepository(
 
     // --- Profile commands ---
 
+    // Profile commands stay optimistic: each one reconciles from the device's own
+    // FF08 list a second later (or, for a load, from a full re-read), so a
+    // rejection corrects itself in the UI without a round trip in the way.
+
     suspend fun saveProfile(slot: Byte) {
-        transport.writeCharacteristic(CharacteristicUuids.PROFILE_MGMT, ProfileCommands.saveProfile(slot))
+        sendCommand(CharacteristicUuids.PROFILE_MGMT, ProfileCommands.saveProfile(slot))
         updateProfile(slot.toInt()) { it.copy(occupied = true) }
         scheduleProfileReconcile()
     }
 
     suspend fun loadProfile(slot: Byte) {
-        transport.writeCharacteristic(CharacteristicUuids.PROFILE_MGMT, ProfileCommands.loadProfile(slot))
+        sendCommand(CharacteristicUuids.PROFILE_MGMT, ProfileCommands.loadProfile(slot))
         // The device also raises SYS_EVENT_CONFIG_CHANGED on success; re-read here
         // too so a load still resyncs if the FF07 subscription didn't take.
         refreshAll()
     }
 
     suspend fun deleteProfile(slot: Byte) {
-        transport.writeCharacteristic(CharacteristicUuids.PROFILE_MGMT, ProfileCommands.deleteProfile(slot))
+        sendCommand(CharacteristicUuids.PROFILE_MGMT, ProfileCommands.deleteProfile(slot))
         updateProfile(slot.toInt()) { it.copy(occupied = false, name = null) }
         scheduleProfileReconcile()
     }
 
     /** `0x05` RENAME — sets the display name stored alongside a profile slot. */
     suspend fun renameProfile(slot: Byte, name: String) {
-        transport.writeCharacteristic(
+        sendCommand(
             CharacteristicUuids.PROFILE_MGMT,
             ProfileCommands.renameProfile(slot, name)
         )
