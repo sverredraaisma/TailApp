@@ -3,6 +3,7 @@ package com.tailapp.led
 import com.tailapp.led.effects.AudioBarRenderer
 import com.tailapp.led.effects.AudioFreqBarsRenderer
 import com.tailapp.led.effects.AudioPowerRenderer
+import com.tailapp.led.effects.BeatPulseRenderer
 import com.tailapp.led.effects.ImageRenderer
 import com.tailapp.led.effects.RainbowRenderer
 import com.tailapp.led.effects.StaticColorRenderer
@@ -29,6 +30,7 @@ object FirmwareEffectFactory {
             LedEffect.AUDIO_POWER -> AudioPowerRenderer(audio)
             LedEffect.AUDIO_BAR -> AudioBarRenderer(audio)
             LedEffect.AUDIO_FREQ_BARS -> AudioFreqBarsRenderer(audio)
+            LedEffect.BEAT_PULSE -> BeatPulseRenderer(audio)
         }
 
         config.params.forEachIndexed { id, value -> renderer.setParam(id, value) }

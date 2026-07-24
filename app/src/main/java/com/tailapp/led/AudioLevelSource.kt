@@ -18,7 +18,12 @@ package com.tailapp.led
  */
 class AudioLevelSource(private val clock: () -> Long = System::nanoTime) {
 
-    private class Snapshot(val loudness: Int, val bins: ByteArray, val timestampNanos: Long)
+    private class Snapshot(
+        val loudness: Int,
+        val bins: ByteArray,
+        val timestampNanos: Long,
+        val beat: BeatInfo? = null
+    )
 
     @Volatile
     private var snapshot = Snapshot(loudness = 0, bins = EMPTY_BINS, timestampNanos = 0L)
@@ -30,7 +35,7 @@ class AudioLevelSource(private val clock: () -> Long = System::nanoTime) {
     private var hasWritten = false
 
     /** Records a new FFT frame. Mirrors `FftBuffer::write`. */
-    fun write(loudness: Int, bins: ByteArray) {
+    fun write(loudness: Int, bins: ByteArray, beat: BeatInfo? = null) {
         val numBins = bins.size.coerceAtMost(MAX_FFT_BINS)
         // uint8_t loudness truncates on assignment in the firmware; masking
         // reproduces that instead of silently accepting an out-of-range value.
@@ -38,8 +43,61 @@ class AudioLevelSource(private val clock: () -> Long = System::nanoTime) {
             loudness = loudness and 0xFF,
             bins = bins.copyOf(numBins),
             timestampNanos = clock(),
+            beat = beat
         )
+        if (beat != null) {
+            // Latched, and taken once: the firmware's motion loop polls at
+            // 100 Hz against a 30 fps stream, so a beat left set would retrigger
+            // on every cycle until the next frame arrived.
+            if (beat.onBeat) beatPending = true
+            if (beat.onDownbeat) downbeatPending = true
+        }
         hasWritten = true
+    }
+
+    /**
+     * Beat information the app streams alongside the spectrum, mirroring
+     * `fft_beat_t`. Null when no trailer was sent — which the effects must read
+     * as "no beat known" rather than "a beat at phase 0".
+     */
+    class BeatInfo(
+        val phase: Float,
+        val bpm: Float,
+        val onBeat: Boolean,
+        val onDownbeat: Boolean,
+        val onDrop: Boolean
+    )
+
+    @Volatile
+    private var beatPending = false
+
+    @Volatile
+    private var downbeatPending = false
+
+    /** Mirrors `FftBuffer::has_beat_info`. */
+    val hasBeatInfo: Boolean
+        get() = isFresh && snapshot.beat != null
+
+    /** Mirrors `FftBuffer::get_beat_phase`. */
+    val beatPhase: Float
+        get() = if (hasBeatInfo) snapshot.beat!!.phase else 0f
+
+    /** Mirrors `FftBuffer::get_bpm`. */
+    val bpm: Float
+        get() = if (hasBeatInfo) snapshot.beat!!.bpm else 0f
+
+    /** Mirrors `FftBuffer::take_beat` — one-shot, cleared on read. */
+    fun takeBeat(): Boolean {
+        val v = beatPending
+        beatPending = false
+        return v
+    }
+
+    /** Mirrors `FftBuffer::take_downbeat`. */
+    fun takeDownbeat(): Boolean {
+        val v = downbeatPending
+        downbeatPending = false
+        return v
     }
 
     /** Mirrors `FftBuffer::is_fresh`: within the 200ms staleness window. */

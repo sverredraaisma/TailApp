@@ -14,6 +14,8 @@ class LayerCompositor {
         val renderer: LedEffectRenderer?,
         val blendMode: BlendMode,
         val enabled: Boolean = true,
+        /** Per-layer mix, 0-255, mirroring the firmware's `Layer::opacity`. */
+        val opacity: Int = 255,
     )
 
     // Reused across frames instead of allocated fresh each render(), mirroring
@@ -45,7 +47,10 @@ class LayerCompositor {
             renderer.render(temp, coords, dt)
 
             for (i in coords.indices) {
-                out.setPacked(i, ColorMath.blend(out.packed(i), temp.packed(i), layer.blendMode))
+                out.setPacked(
+                    i,
+                    ColorMath.blend(out.packed(i), temp.packed(i), layer.blendMode, layer.opacity)
+                )
             }
         }
     }

@@ -28,7 +28,11 @@ class ProtocolEnumTest {
     fun `blend mode ids match the firmware`() {
         assertEquals(0x00.toByte(), BlendMode.MULTIPLY.id)
         assertEquals(0x05.toByte(), BlendMode.OVERWRITE.id)
-        assertEquals(6, BlendMode.entries.size)
+        // Normal was appended rather than inserted: the ids are persisted in
+        // saved device configs, so renumbering would silently repaint every
+        // stored layer with a different blend.
+        assertEquals(0x06.toByte(), BlendMode.NORMAL.id)
+        assertEquals(7, BlendMode.entries.size)
     }
 
     @Test

@@ -48,6 +48,24 @@ enum class LedEffect(val id: Byte, val displayName: String, val params: List<Par
             ParamMetadata(4, "Fade rate", 5.0f, 0f, 10f),
             ParamMetadata(5, "Orientation", 0f, 0f, 1f)
         )
+    ),
+
+    /**
+     * Flashes on beats streamed in the FF05 trailer.
+     *
+     * The device has no microphone and no beat detector, so this is dark unless
+     * an app is streaming audio with beat information — it renders the phone's
+     * beat tracker's output rather than deriving anything itself.
+     */
+    BEAT_PULSE(
+        0x06, "Beat Pulse", listOf(
+            ParamMetadata(0, "Red", 255f, 0f, 255f),
+            ParamMetadata(1, "Green", 255f, 0f, 255f),
+            ParamMetadata(2, "Blue", 255f, 0f, 255f),
+            ParamMetadata(3, "Decay rate", 4.0f, 0.5f, 20f, "/s"),
+            ParamMetadata(4, "Downbeat boost", 1.0f, 1f, 3f),
+            ParamMetadata(5, "Sweep", 0f, 0f, 1f)
+        )
     );
 
     companion object {
@@ -61,7 +79,20 @@ enum class BlendMode(val id: Byte, val displayName: String) {
     SUBTRACT(0x02, "Subtract"),
     MIN(0x03, "Min"),
     MAX(0x04, "Max"),
-    OVERWRITE(0x05, "Overwrite");
+
+    /**
+     * Replaces the pixel below unless the overlay is black, which is treated as
+     * transparent. A quirk rather than a design, but every saved composition
+     * depends on it, so it stays exactly as it is.
+     */
+    OVERWRITE(0x05, "Overwrite"),
+
+    /**
+     * Alpha blend honouring the layer's opacity, treating black as a colour.
+     * The mode to reach for when a layer should *darken* what is under it —
+     * impossible with [OVERWRITE], where black simply disappears.
+     */
+    NORMAL(0x06, "Normal");
 
     companion object {
         fun fromId(id: Byte): BlendMode? = entries.find { it.id == id }

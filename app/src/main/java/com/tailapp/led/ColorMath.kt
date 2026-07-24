@@ -45,13 +45,68 @@ object ColorMath {
     }
 
     /** Dispatches to the blend function named by [mode]. Mirrors `LayerCompositor::blend`. */
-    fun blend(base: Int, overlay: Int, mode: BlendMode): Int = when (mode) {
-        BlendMode.MULTIPLY -> multiply(base, overlay)
-        BlendMode.ADD -> add(base, overlay)
-        BlendMode.SUBTRACT -> subtract(base, overlay)
-        BlendMode.MIN -> min(base, overlay)
-        BlendMode.MAX -> max(base, overlay)
-        BlendMode.OVERWRITE -> overwrite(base, overlay)
+    fun blend(base: Int, overlay: Int, mode: BlendMode): Int = blend(base, overlay, mode, 255)
+
+    /**
+     * Blends with a per-layer opacity, mirroring `LayerCompositor::blend`.
+     *
+     * Opacity mixes the blended *result* back toward the base rather than
+     * scaling the overlay first, so a half-opacity Add is a weaker glow rather
+     * than a different computation — matching the firmware exactly.
+     */
+    fun blend(base: Int, overlay: Int, mode: BlendMode, opacity: Int): Int {
+        if (mode == BlendMode.NORMAL) return normal(base, overlay, opacity)
+
+        val blended = when (mode) {
+            BlendMode.MULTIPLY -> multiply(base, overlay)
+            BlendMode.ADD -> add(base, overlay)
+            BlendMode.SUBTRACT -> subtract(base, overlay)
+            BlendMode.MIN -> min(base, overlay)
+            BlendMode.MAX -> max(base, overlay)
+            BlendMode.OVERWRITE -> overwrite(base, overlay)
+            BlendMode.NORMAL -> overlay // unreachable; handled above
+        }
+        if (opacity >= 255) return blended
+        return normal(base, blended, opacity)
+    }
+
+    /**
+     * Alpha blend, mirroring `rgb_normal`. Unlike [overwrite] this treats black
+     * as a colour, which is what lets a layer darken the stack below it.
+     */
+    fun normal(base: Int, overlay: Int, alpha: Int): Int {
+        if (alpha >= 255) return overlay
+        if (alpha <= 0) return base
+        val inv = 255 - alpha
+        return combine(base, overlay) { b, o -> (o * alpha + b * inv) / 255 }
+    }
+
+    /** `c * factor / 255` per channel. Mirrors `rgb_scale`. */
+    fun scale(colour: Int, factor: Int): Int {
+        if (factor >= 255) return colour
+        return combine(colour, colour) { c, _ -> c * factor / 255 }
+    }
+
+    /**
+     * Perceptual gamma correction, mirroring `rgb_gamma` and the firmware's
+     * `GAMMA8` table.
+     *
+     * The firmware applies this on the way to the strip, so the preview has to
+     * as well — a preview that skips it shows a picture the device will never
+     * display, which is exactly the kind of quiet lie this whole port exists to
+     * prevent.
+     */
+    fun gamma(colour: Int): Int = combine(colour, colour) { c, _ -> GAMMA8[c] }
+
+    /**
+     * `round((i / 255)^2.6 * 255)`, the same table the firmware carries.
+     *
+     * Computed once here rather than transcribed: the closed form is exact and
+     * a 256-entry literal would be 256 chances to typo a value that nothing
+     * would notice until the colours were subtly wrong on hardware.
+     */
+    val GAMMA8: IntArray = IntArray(256) { i ->
+        Math.round(Math.pow(i / 255.0, 2.6) * 255.0).toInt()
     }
 
     /** `base * overlay / 255` per channel. Mirrors `rgb_multiply`. */

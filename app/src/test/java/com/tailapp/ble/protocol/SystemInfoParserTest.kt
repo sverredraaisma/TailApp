@@ -73,11 +73,19 @@ class SystemInfoParserTest {
     }
 
     @Test
-    fun `full default payload is 150 bytes as documented`() {
-        // 97 through the capabilities block, then the protocol-v4 motion block:
-        // 1 motors_enabled byte + 4 motors x 13 bytes.
-        assertEquals(150, FirmwarePayloads.systemInfo().size)
-        assertEquals(97, FirmwarePayloads.systemInfo(motion = null).size)
+    fun `payload size tracks the capability lists it carries`() {
+        // The capability block is variable-length by construction - it lists
+        // whatever ids this firmware supports - so pinning one number would
+        // just have to be re-pinned every time an effect is added. Pin the
+        // arithmetic instead.
+        val caps = Capabilities.DEFAULT
+        val capsBytes = 3 + caps.patternIds.size + caps.effectIds.size +
+            caps.blendModeIds.size + 5
+        val header = 5 + 4 * 16 + 1 + 2 * 2 // proto+fw+servos+imus
+        val motion = 1 + 4 * 13
+
+        assertEquals(header + capsBytes, FirmwarePayloads.systemInfo(motion = null).size)
+        assertEquals(header + capsBytes + motion, FirmwarePayloads.systemInfo().size)
     }
 
     @Test
