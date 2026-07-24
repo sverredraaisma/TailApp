@@ -41,6 +41,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.tailapp.model.MotionLimits
 import com.tailapp.model.MotionPattern
 import com.tailapp.model.ServoConfig
+import com.tailapp.ui.components.TailPositionView
 import com.tailapp.ui.components.DebouncedSlider
 import com.tailapp.ui.components.EffectParameterSlider
 import com.tailapp.viewmodel.MotionConfigViewModel
@@ -125,8 +126,16 @@ fun MotionConfigScreen(
                     Column(modifier = Modifier.padding(16.dp)) {
                         Text("Current Positions", style = MaterialTheme.typography.titleMedium)
                         Spacer(Modifier.height(8.dp))
+                        // Four numbers in degrees are unreadable while the tail
+                        // is moving; the plot makes a wag distinguishable from
+                        // a jitter at a glance.
+                        TailPositionView(
+                            motionState = motionState,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Spacer(Modifier.height(8.dp))
                         motionState.encoderPositions.forEachIndexed { i, pos ->
-                            Text("Encoder $i: ${"%.1f".format(pos)}°")
+                            Text("Motor $i: ${"%.1f".format(pos)}°")
                         }
                         Spacer(Modifier.height(8.dp))
                         Text("Gravity", style = MaterialTheme.typography.bodyMedium)
