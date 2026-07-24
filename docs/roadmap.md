@@ -12,7 +12,7 @@
 > | M2 — A body the effects can feel | **done** |
 > | M3 — One mic, one beat | **done** |
 > | M4 — Looks that survive the phone leaving | **mechanism done**; LED-3 catalogue and LED-4 palettes outstanding |
-> | M5 — Motion that dances | not started |
+> | M5 — Motion that dances | **motion streaming done** (MOT-11 + A4-2); axis mixer, keyframes, behavior engine outstanding |
 > | M6 — A shippable device | not started |
 >
 > The protocol landed as **v5** rather than in two steps: nothing shipped between
@@ -244,7 +244,7 @@ runs before/alongside M2 and must be complete before M4.
 | **M2 — A body the effects can feel** | Tap the tail and the lights ripple; wag it and they glow | A1-1..5 | HARD-9, SYS-7 | **done** (MOT-10 still later) |
 | **M3 — One mic, one beat** | BeatLight and the firmware's own effects run at once, and the device knows the beat | A2-1, A2-2 | LED-8, M2-fix (loudness wiring) | **done** |
 | **M4 — Looks that survive the phone leaving** | A composer look (or its honest approximation) installs to a profile and works standalone | A3-1..3 | HARD-2/3, LED-1, LED-2, LED-7 | **mechanism done**; LED-4 palettes + LED-3 catalogue + A3-2/A3-3 outstanding |
-| **M5 — Motion that dances** | The tail moves to the same analysis as the lights: streamed targets, keyframes, behavior engine | A4-1..4 | MOT-0, MOT-7, MOT-11, MOT-8, MOT-6 | not started |
+| **M5 — Motion that dances** | The tail moves to the same analysis as the lights: streamed targets, keyframes, behavior engine | A4-1..4 | MOT-0, MOT-7, MOT-11, MOT-8, MOT-6 | **MOT-11 + A4-2 done**; rest outstanding |
 | **M6 — A shippable device** | OTA, battery, diagnostics, and one clean protocol break | A5-1..3 | SYS-1, SYS-2, SYS-3, SYS-6, SYS-8, SYS-9 | not started |
 
 ### What M4 delivered, and what it did not
