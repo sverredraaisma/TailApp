@@ -101,6 +101,24 @@ class DirectPixelFrameTest {
     }
 
     @Test
+    fun `build rejects a startIndex that does not fit the u16 wire field`() {
+        // 65536 would wrap to 0 through toShort() and land the pixels on the wrong
+        // LED, silently, since FF0A is unacknowledged. Reject it instead.
+        try {
+            DirectPixelFrame.build(startIndex = 0x10000, rgb = ByteArray(3), offset = 0, ledCount = 1)
+            fail("expected IllegalArgumentException")
+        } catch (e: IllegalArgumentException) {
+            // expected
+        }
+    }
+
+    @Test
+    fun `build accepts the largest startIndex the u16 field can hold`() {
+        val frame = DirectPixelFrame.build(startIndex = 0xFFFF, rgb = ByteArray(3), offset = 0, ledCount = 1)
+        assertEquals(0xFFFF, frame.u16At(0))
+    }
+
+    @Test
     fun `build rejects an rgb range that runs off the end of the array`() {
         try {
             DirectPixelFrame.build(startIndex = 0, rgb = ByteArray(6), offset = 3, ledCount = 2)

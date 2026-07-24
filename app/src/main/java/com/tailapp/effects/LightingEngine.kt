@@ -1,3 +1,5 @@
+@file:OptIn(ExperimentalCoroutinesApi::class)
+
 package com.tailapp.effects
 
 import android.util.Log
@@ -25,7 +27,9 @@ import com.tailapp.lighting.LightingOutput
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -160,9 +164,13 @@ data class BeatLightState(
  * @param beatModelStore where the BeatNet CRNN lives, or null to never run it.
  *   Absent or unloadable is the normal case and costs nothing: the second
  *   extractor is not even constructed.
- * @param workDispatcher where the two loops run. Defaults to [Dispatchers.Default]
- *   because neither loop may ever touch the main thread; tests substitute their
- *   own so the loops cannot race a hand-driven pipeline.
+ * @param workDispatcher where the loops run. Defaults to a **single-threaded**
+ *   view of [Dispatchers.Default] (`limitedParallelism(1)`): neither loop may
+ *   touch the main thread, and — just as importantly — the analysis, render and
+ *   layout loops all mutate the shared renderer/controller, so they must be
+ *   serialized rather than merely off-main. A multi-threaded pool would let them
+ *   run concurrently and corrupt that shared state. Tests substitute their own
+ *   single test dispatcher, which is confined for the same reason.
  * @param audioSourceFactory injection seam for tests.
  * @param clock injection seam for tests.
  */
@@ -173,7 +181,7 @@ class LightingEngine(
     private val featureConfig: FeatureConfig = FeatureConfig(),
     private val genreClassifier: GenreClassifier = NoGenreClassifier,
     beatModelStore: BeatModelStore? = null,
-    private val workDispatcher: CoroutineDispatcher = Dispatchers.Default,
+    private val workDispatcher: CoroutineDispatcher = Dispatchers.Default.limitedParallelism(1),
     private val audioSourceFactory: (Int) -> AudioSource = { rate -> AudioSources.create(rate) },
     private val clock: () -> Long = System::nanoTime
 ) {
@@ -286,6 +294,10 @@ class LightingEngine(
         _state.update {
             it.copy(isRunning = true, error = null, inputLatencyMillis = audio.latencyMillis)
         }
+        // reset() overwrote _state with the DEFAULT profile fields; publish the
+        // controller's real active profile so a manual override set before the
+        // session shows on the monitor immediately, not only at the next trigger.
+        publishProfile()
 
         analysisJob = scope.launch(workDispatcher) {
             while (isActive) {
@@ -301,16 +313,23 @@ class LightingEngine(
                 delay(FRAME_INTERVAL_MILLIS)
             }
         }
-        layoutJob = scope.launch {
+        // On workDispatcher too: setLayout mutates the renderer's arrays, which
+        // the render loop reads. Off the shared single thread it would race them.
+        layoutJob = scope.launch(workDispatcher) {
             ledLayout.collect { controller.setLayout(it) }
         }
     }
 
     /** Stops both loops, closes the microphone and hands the LEDs back to the device. */
     suspend fun stop() {
-        analysisJob?.cancel()
-        renderJob?.cancel()
-        layoutJob?.cancel()
+        // Join, not just cancel: an in-flight iteration keeps running on the work
+        // thread until it reaches a suspension point, so closing the source or the
+        // output first would tear resources out from under a live pump/render —
+        // e.g. `audio.read()` on a stopped source, or the native capture handle
+        // freed mid-read. Joining guarantees no loop is running before teardown.
+        analysisJob?.cancelAndJoin()
+        renderJob?.cancelAndJoin()
+        layoutJob?.cancelAndJoin()
         analysisJob = null
         renderJob = null
         layoutJob = null

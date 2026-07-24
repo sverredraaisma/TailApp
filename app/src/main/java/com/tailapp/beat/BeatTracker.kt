@@ -238,11 +238,16 @@ class BeatTracker(
         while (frameIndex + lookaheadFrames >= nextBeatFrame && emitted < MAX_BEATS_PER_FRAME) {
             val downbeatPosition = downbeatPosition()
             val isDownbeat = beatInBar == downbeatPosition
+            // Re-base to the bar so the event honours BeatEvent's contract
+            // (beatInBar 0 is the downbeat) and matches ParticleFilterBeatDecoder.
+            // `beatInBar` itself stays the raw phase cycle: barScores and
+            // downbeatPosition() are both indexed in that un-rebased space.
+            val barPosition = (beatInBar - downbeatPosition + BEATS_PER_BAR) % BEATS_PER_BAR
             val event = BeatEvent(
                 type = if (isDownbeat) BeatType.DOWNBEAT else BeatType.BEAT,
                 timestampNanos = frameToNanos(nextBeatFrame),
                 bpm = tempo.bpm,
-                beatInBar = beatInBar,
+                beatInBar = barPosition,
                 confidence = confidence
             )
             (events ?: mutableListOf<BeatEvent>().also { events = it }).add(event)

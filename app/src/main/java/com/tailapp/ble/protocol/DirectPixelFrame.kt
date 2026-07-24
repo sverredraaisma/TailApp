@@ -29,12 +29,13 @@ object DirectPixelFrame {
     /**
      * Builds one FF0A packet: `[start_index u16 LE][rgb bytes]`.
      *
-     * @param startIndex index of the first LED this packet writes. Must be `>= 0`.
+     * @param startIndex index of the first LED this packet writes. Must be in
+     *   `0..65535` — the wire field is `u16 LE`.
      * @param rgb the source pixel buffer, `r,g,b` per LED — e.g.
      *   [com.tailapp.led.PixelBuffer.bytes], which is already in this exact layout.
      * @param offset byte offset into [rgb] to start copying from.
      * @param ledCount number of LEDs (not bytes) to copy from [rgb] starting at [offset].
-     * @throws IllegalArgumentException if [startIndex] is negative, if
+     * @throws IllegalArgumentException if [startIndex] is outside `0..65535`, if
      *   `[offset, offset + ledCount * 3)` runs off the end of [rgb], or if
      *   [ledCount] exceeds what a single packet could ever carry — even at the
      *   largest MTU this app will ever negotiate (see [maxLedsPerPacket]).
@@ -43,7 +44,10 @@ object DirectPixelFrame {
      *   `DeviceRepository.streamDirectFrame`).
      */
     fun build(startIndex: Int, rgb: ByteArray, offset: Int, ledCount: Int): ByteArray {
-        require(startIndex >= 0) { "startIndex must not be negative: $startIndex" }
+        // The wire field is u16 LE; an out-of-range startIndex would silently
+        // wrap through toShort() and land the pixels on the wrong LED. FF0A is
+        // unacknowledged, so that failure is invisible — reject it here instead.
+        require(startIndex in 0..0xFFFF) { "startIndex must be in 0..65535: $startIndex" }
         require(offset >= 0) { "offset must not be negative: $offset" }
         require(ledCount >= 0) { "ledCount must not be negative: $ledCount" }
 

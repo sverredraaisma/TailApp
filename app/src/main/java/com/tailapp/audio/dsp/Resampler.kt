@@ -90,6 +90,14 @@ class Resampler(
         // Rebase into the next call's virtual index space: this chunk's
         // `count` samples are about to become "the past" (index < 0) for it.
         position -= count
+        // If the loop stopped because `out` filled before the input was
+        // consumed, `position` now sits below -1, pointing into input this call
+        // is dropping. Left there, the next call's `input[idx + 1]` (with
+        // idx = floor(position) <= -2) would index below zero and throw.
+        // Callers size `out` to hold every output, so this is a guard on the
+        // documented out-full termination rather than a normal path: clamp back
+        // to the -1 neighbour, keeping the sub-sample phase.
+        if (position < -1.0) position = -1.0 + (position - floor(position))
         return written
     }
 }

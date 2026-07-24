@@ -157,6 +157,16 @@ private fun DrawScope.drawLedStrip(
         val coord = coords[i]
         val center = Offset(insetX + coord.x * drawWidth, insetY + coord.y * drawHeight)
 
+        // The coordinate map (from the device's ledsPerRing) and the frame (sized
+        // by the engine's own layout StateFlow) update independently, so a matrix
+        // that just grew can leave coords longer than the frame. frame.red/green/
+        // blue are unchecked, so read only where a pixel exists and show the rest
+        // as unlit rather than indexing past the buffer.
+        if (i >= frame.ledCount) {
+            drawCircle(color = unlitColor, radius = radius, center = center)
+            continue
+        }
+
         val r = frame.red(i)
         val g = frame.green(i)
         val b = frame.blue(i)

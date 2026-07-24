@@ -279,14 +279,20 @@ private fun BeatPulse(lastBeat: BeatEvent?, modifier: Modifier = Modifier) {
             return@LaunchedEffect
         }
         while (true) {
-            withFrameNanos { nowNanos ->
+            // withFrameNanos returns its lambda's value; stop once the pulse has
+            // fully decayed so the frame clock can idle between beats instead of
+            // spinning forever. The next beat re-arms this effect via lastBeat.
+            val decayed = withFrameNanos { nowNanos ->
                 val sinceMillis = (nowNanos - beat.timestampNanos) / 1_000_000f
                 pulse = when {
                     sinceMillis < 0f -> 0f
                     sinceMillis > PULSE_DURATION_MILLIS -> 0f
                     else -> 1f - (sinceMillis / PULSE_DURATION_MILLIS)
                 }
+                // A beat still in the future has not started; keep waiting for it.
+                sinceMillis > PULSE_DURATION_MILLIS
             }
+            if (decayed) break
         }
     }
 

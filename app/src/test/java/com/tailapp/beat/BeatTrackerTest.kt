@@ -153,6 +153,25 @@ class BeatTrackerTest {
     }
 
     @Test
+    fun `a downbeat is bar position zero`() {
+        // BeatEvent's contract: beatInBar 0 is the downbeat. The tracker's raw
+        // phase counter starts on an arbitrary onset, so the emitted position has
+        // to be re-based to the detected downbeat — position 0 must line up with
+        // type DOWNBEAT, matching ParticleFilterBeatDecoder.
+        val signals = BeatTestSignals(config)
+        val signal = signals.grid(128f, 40f, accentEvery = 4)
+
+        val beats = steadyState(run(signal.frames).beats, afterSeconds = 20f)
+        val downbeats = beats.filter { it.isDownbeat }
+
+        assertTrue("no downbeats emitted", downbeats.isNotEmpty())
+        downbeats.forEach { assertEquals("a downbeat must be bar position 0", 0, it.beatInBar) }
+        beats.filter { !it.isDownbeat }.forEach {
+            assertTrue("a non-downbeat must not be bar position 0", it.beatInBar != 0)
+        }
+    }
+
+    @Test
     fun `follows a tempo change`() {
         val signals = BeatTestSignals(config)
         val tracker = BeatTracker(config)

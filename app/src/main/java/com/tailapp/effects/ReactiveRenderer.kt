@@ -47,6 +47,9 @@ class ReactiveRenderer(private val sparkleSeed: Int = 0x7A11) {
 
     private var lastDrop: DropEvent? = null
 
+    /** The clock reading of the first frame, so absolute-time animations stay relative. */
+    private var originNanos: Long = Long.MIN_VALUE
+
     private var section: SectionStateUpdate =
         SectionStateUpdate(SectionState.UNKNOWN, 0f, 0L, 0f)
 
@@ -93,6 +96,7 @@ class ReactiveRenderer(private val sparkleSeed: Int = 0x7A11) {
         lastDrop = null
         beatCounter = 0
         section = SectionStateUpdate(SectionState.UNKNOWN, 0f, 0L, 0f)
+        originNanos = Long.MIN_VALUE
     }
 
     /**
@@ -103,10 +107,17 @@ class ReactiveRenderer(private val sparkleSeed: Int = 0x7A11) {
      */
     fun render(nowNanos: Long): PixelBuffer {
         if (coords.isEmpty()) return buffer
+        if (originNanos == Long.MIN_VALUE) originNanos = nowNanos
 
         val beatLevel = beatEnvelope(nowNanos)
         val dropLevel = dropEnvelope(nowNanos)
-        val timeSeconds = nowNanos / NANOS_PER_SECOND
+        // Relative to the first frame, not absolute nanoTime. System.nanoTime
+        // counts from boot; after a few hours its magnitude overruns a Float's
+        // ~24-bit mantissa, and timeSeconds — which drives the idle and strobe
+        // phases — quantizes into multi-millisecond steps that stutter or freeze
+        // the animation. The session-relative delta stays small enough that a
+        // Float holds it to sub-microsecond precision for any real session.
+        val timeSeconds = (nowNanos - originNanos) / NANOS_PER_SECOND
 
         // Slow modulation applies to the whole frame: a build-up strobes it, a
         // breakdown dims it. Both are section-driven, so they ramp rather than

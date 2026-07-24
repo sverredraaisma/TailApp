@@ -58,13 +58,26 @@ class BeatModelStore(val directory: File) {
 
         val target = File(directory, name)
         val partial = File(directory, "$name.part")
+        val backup = File(directory, "$name.bak")
         try {
             partial.outputStream().use { source.copyTo(it) }
             if (partial.length() == 0L) throw IOException("$name arrived empty")
-            if (target.exists() && !target.delete()) throw IOException("could not replace $target")
-            if (!partial.renameTo(target)) throw IOException("could not move $partial into place")
+
+            backup.delete() // clear any leftover from a prior aborted install
+            // Move the current model aside rather than deleting it up front, so a
+            // rename that then fails cannot leave the store with neither the old
+            // model nor the new one — a failed *replace* must keep what worked.
+            val hadTarget = target.exists()
+            if (hadTarget && !target.renameTo(backup)) {
+                throw IOException("could not set aside the existing $target")
+            }
+            if (!partial.renameTo(target)) {
+                if (hadTarget) backup.renameTo(target) // put the working model back
+                throw IOException("could not move $partial into place")
+            }
         } finally {
             partial.delete()
+            backup.delete()
         }
     }
 

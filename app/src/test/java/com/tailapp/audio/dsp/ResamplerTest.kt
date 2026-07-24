@@ -106,4 +106,27 @@ class ResamplerTest {
         val written = resampler.resample(FloatArray(0), 0, out)
         assertEquals(0, written)
     }
+
+    @Test
+    fun `an out buffer that fills before the input is consumed does not corrupt the next call`() {
+        // The method's contract allows `out` to fill before the input runs out.
+        // When it does, the carried read position must not be left pointing into
+        // dropped input, or the *next* call indexes below zero and crashes.
+        val resampler = Resampler(44100, 22050) // step 2.0
+        val input = SyntheticAudio.sine(440f, 0.05f, 44100)
+
+        // Undersized output: the loop exits full with input still unconsumed.
+        val tiny = FloatArray(2)
+        val firstWritten = resampler.resample(input, 10, tiny)
+        assertEquals("a 2-slot buffer takes exactly 2 samples", 2, firstWritten)
+
+        // The next call must not throw (it did: input[idx + 1] with idx <= -2).
+        val roomy = FloatArray(input.size)
+        val secondWritten = resampler.resample(input, input.size, roomy)
+
+        assertTrue("the resampler should keep producing output", secondWritten > 0)
+        for (i in 0 until secondWritten) {
+            assertTrue("sample $i is finite", roomy[i].isFinite())
+        }
+    }
 }
