@@ -1,5 +1,24 @@
 # TailApp ⇄ TailFirmware — feature report & aligned roadmaps
 
+> ## Delivery status
+>
+> Milestones **M1–M3 are complete on both sides**, and **M4 is complete except
+> for the optional effect catalogue**. Everything below is the plan as written;
+> the [milestone table](#5-joint-milestones) carries the live status.
+>
+> | Milestone | State |
+> |---|---|
+> | M1 — Honest tethered control | **done** |
+> | M2 — A body the effects can feel | **done** |
+> | M3 — One mic, one beat | **done** |
+> | M4 — Looks that survive the phone leaving | **mechanism done**; LED-3 catalogue and LED-4 palettes outstanding |
+> | M5 — Motion that dances | not started |
+> | M6 — A shippable device | not started |
+>
+> The protocol landed as **v5** rather than in two steps: nothing shipped between
+> the v4 catch-up and the additive v5 changes, so they were bundled into one
+> announced version on both sides rather than inventing an intermediate release.
+>
 > **Date:** 2026-07-24 · **Scope:** the app's implemented feature surface (this repo),
 > the firmware's implemented surface and its 2026-07-24 design review
 > (`TailFirmware/docs/design-review-and-roadmap.md`), and the alignment between the two.
@@ -219,14 +238,27 @@ make A3-1's "install on tail" produce a stack that still works after a power cyc
 Each milestone is shippable and demonstrable on its own. Firmware Phase 0 hardening
 runs before/alongside M2 and must be complete before M4.
 
-| Milestone | Meaning | App items | Firmware items |
-|---|---|---|---|
-| **M1 — Honest tethered control** | The app tells the truth about a v4 device: stalls visible and recoverable, motion limits editable, no false banner | A0-1..4 | — (shipped; HARD-13 doc refresh helps) |
-| **M2 — A body the effects can feel** | Tap the tail and the lights ripple; wag it and they glow | A1-1..5 | HARD-9, SYS-7 (MOT-10 later) |
-| **M3 — One mic, one beat** | BeatLight and the firmware's own effects run at once, and the device knows the beat | A2-1, A2-2 | LED-8, M2-fix (loudness wiring) |
-| **M4 — Looks that survive the phone leaving** | A composer look (or its honest approximation) installs to a profile and works standalone | A3-1..3 | HARD-2/3, LED-1, LED-2, LED-4, LED-3 (re-scoped), LED-7 |
-| **M5 — Motion that dances** | The tail moves to the same analysis as the lights: streamed targets, keyframes, behavior engine | A4-1..4 | MOT-0, MOT-7, MOT-11, MOT-8, MOT-6 |
-| **M6 — A shippable device** | OTA, battery, diagnostics, and one clean protocol break | A5-1..3 | SYS-1, SYS-2, SYS-3, SYS-6, SYS-8, SYS-9 |
+| Milestone | Meaning | App items | Firmware items | State |
+|---|---|---|---|---|
+| **M1 — Honest tethered control** | The app tells the truth about the device: stalls visible and recoverable, motion limits editable, no false banner | A0-1..4 | — (shipped) | **done** |
+| **M2 — A body the effects can feel** | Tap the tail and the lights ripple; wag it and they glow | A1-1..5 | HARD-9, SYS-7 | **done** (MOT-10 still later) |
+| **M3 — One mic, one beat** | BeatLight and the firmware's own effects run at once, and the device knows the beat | A2-1, A2-2 | LED-8, M2-fix (loudness wiring) | **done** |
+| **M4 — Looks that survive the phone leaving** | A composer look (or its honest approximation) installs to a profile and works standalone | A3-1..3 | HARD-2/3, LED-1, LED-2, LED-7 | **mechanism done**; LED-4 palettes + LED-3 catalogue + A3-2/A3-3 outstanding |
+| **M5 — Motion that dances** | The tail moves to the same analysis as the lights: streamed targets, keyframes, behavior engine | A4-1..4 | MOT-0, MOT-7, MOT-11, MOT-8, MOT-6 | not started |
+| **M6 — A shippable device** | OTA, battery, diagnostics, and one clean protocol break | A5-1..3 | SYS-1, SYS-2, SYS-3, SYS-6, SYS-8, SYS-9 | not started |
+
+### What M4 delivered, and what it did not
+
+The *mechanism* is complete: `FirmwareExport` maps a composition onto the
+device's own layer stack and saves it to a profile, reporting by name every
+layer that could not come along. The firmware gained per-layer opacity, a Normal
+blend mode, master brightness, gamma and a power limiter, and FF04 now notifies
+on change.
+
+What is outstanding is **catalogue**, not capability: the palette table (LED-4)
+and the ambient/tail-reactive firmware effects (LED-3) would make an installed
+look worth more, but nothing about the install path depends on them. A3-2 (the
+standing parity tax) and A3-3 (JSON export/import) are likewise additive.
 
 The order is deliberate: M1 is a day of catch-up; M2–M3 are almost entirely app-side
 and make the *current* hardware feel alive; M4 needs the firmware's hardening phase

@@ -15,6 +15,15 @@ object CharacteristicUuids {
     val CMD_RESULT: UUID      = UUID.fromString("0000FF09-0000-1000-8000-00805F9B34FB")
     val LED_DIRECT: UUID      = UUID.fromString("0000FF0A-0000-1000-8000-00805F9B34FB")
 
+    /**
+     * Live motion targets, write-without-response (protocol v5).
+     *
+     * Its own characteristic rather than an FF01 command for the same reason
+     * [LED_DIRECT] has one: at 20-50 Hz it would otherwise fill the device's
+     * command queue and produce an acknowledgement per frame nobody reads.
+     */
+    val MOTION_TARGET: UUID   = UUID.fromString("0000FF0B-0000-1000-8000-00805F9B34FB")
+
     val CCCD: UUID = UUID.fromString("00002902-0000-1000-8000-00805F9B34FB")
 
     /** Low byte of a characteristic UUID — how FF09 identifies the written characteristic. */

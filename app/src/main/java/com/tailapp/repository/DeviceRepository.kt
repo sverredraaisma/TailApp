@@ -12,6 +12,7 @@ import com.tailapp.ble.protocol.FftFrameBuilder
 import com.tailapp.ble.protocol.LedCommands
 import com.tailapp.ble.protocol.LedStateParser
 import com.tailapp.ble.protocol.MotionCommands
+import com.tailapp.ble.protocol.MotionTargetFrame
 import com.tailapp.ble.protocol.MotionStateParser
 import com.tailapp.ble.protocol.ProfileCommands
 import com.tailapp.ble.protocol.ProfileListParser
@@ -22,6 +23,7 @@ import com.tailapp.ble.protocol.SystemEventParser
 import com.tailapp.ble.protocol.SystemInfoParser
 import com.tailapp.led.PixelBuffer
 import com.tailapp.effects.DeviceAudioStream
+import com.tailapp.effects.DeviceMotionStream
 import com.tailapp.model.DeviceState
 import com.tailapp.model.LayerConfig
 import com.tailapp.model.LedState
@@ -43,7 +45,7 @@ import kotlinx.coroutines.launch
 class DeviceRepository(
     private val transport: BleTransport,
     private val scope: CoroutineScope
-) : DeviceAudioStream {
+) : DeviceAudioStream, DeviceMotionStream {
     private val _deviceState = MutableStateFlow(DeviceState())
     val deviceState: StateFlow<DeviceState> = _deviceState.asStateFlow()
 
@@ -615,6 +617,21 @@ class DeviceRepository(
                 )
             )
         }
+    }
+
+    /**
+     * Streams live motion targets to the device (FF0B).
+     *
+     * Fire-and-forget like the pixel and audio streams: no acknowledgement, and
+     * the device ages the targets out after half a second, so a dropped frame
+     * costs nothing and a stopped stream hands the tail back to its own pattern
+     * rather than leaving it holding a pose.
+     */
+    override fun streamMotionTargets(targets: FloatArray) {
+        transport.writeWithoutResponse(
+            CharacteristicUuids.MOTION_TARGET,
+            MotionTargetFrame.build(targets)
+        )
     }
 
     fun setFftStreamActive(active: Boolean) {

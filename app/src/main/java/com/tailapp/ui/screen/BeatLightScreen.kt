@@ -60,6 +60,7 @@ import com.tailapp.composer.Composition
 import com.tailapp.composer.EffectLayer
 import com.tailapp.composer.GroupLayer
 import com.tailapp.composer.LayerNode
+import com.tailapp.composer.MotionChoreography
 import com.tailapp.composer.TailTelemetry
 import com.tailapp.genre.GenreState
 import com.tailapp.led.PixelBuffer
@@ -92,6 +93,7 @@ fun BeatLightScreen(
     val compositions by viewModel.compositions.collectAsStateWithLifecycle()
     val activeCompositionId by viewModel.activeCompositionId.collectAsStateWithLifecycle()
     val decoderKind by viewModel.decoderKind.collectAsStateWithLifecycle()
+    val motionMode by viewModel.motionMode.collectAsStateWithLifecycle()
     val octaveBiasEnabled by viewModel.octaveBiasEnabled.collectAsStateWithLifecycle()
     val octaveTargetBpm by viewModel.octaveTargetBpm.collectAsStateWithLifecycle()
     val octaveStrength by viewModel.octaveStrength.collectAsStateWithLifecycle()
@@ -191,6 +193,13 @@ fun BeatLightScreen(
                 onOctaveEnabledChange = viewModel::setOctaveBiasEnabled,
                 onOctaveTargetChange = viewModel::setOctaveTargetBpm,
                 onOctaveStrengthChange = viewModel::setOctaveStrength
+            )
+
+            Spacer(Modifier.height(16.dp))
+            MotionSection(
+                mode = motionMode,
+                onModeChange = viewModel::setMotionMode,
+                connected = deviceState.connectionState == ConnectionState.CONNECTED
             )
 
             Spacer(Modifier.height(16.dp))
@@ -540,3 +549,67 @@ private fun Composition.summary(): String {
 }
 
 private const val PULSE_DURATION_MILLIS = 250f
+
+/**
+ * Whether the tail's motors dance to the music, and to what.
+ *
+ * Off by default and its own control rather than part of the stack: lighting and
+ * motion are separate features, and a look that only changes colour should never
+ * start a worn tail swinging on its own.
+ */
+@Composable
+private fun MotionSection(
+    mode: MotionChoreography.Mode?,
+    onModeChange: (MotionChoreography.Mode?) -> Unit,
+    connected: Boolean
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text("Motion", style = MaterialTheme.typography.titleMedium)
+            Text(
+                if (connected) {
+                    "Drives the tail's motors from the same analysis that drives the lights. " +
+                        "The tail shapes every target through its own speed and travel limits."
+                } else {
+                    "Needs a connected tail."
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.height(8.dp))
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                RadioButton(
+                    selected = mode == null,
+                    onClick = { onModeChange(null) },
+                    enabled = connected
+                )
+                Column {
+                    Text("Still")
+                    Text(
+                        "The tail keeps whatever pattern it is running",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+            for (option in MotionChoreography.Mode.entries) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    RadioButton(
+                        selected = mode == option,
+                        onClick = { onModeChange(option) },
+                        enabled = connected
+                    )
+                    Column {
+                        Text(option.displayName)
+                        Text(
+                            option.description,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+        }
+    }
+}

@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModel
 import com.tailapp.beat.OctaveBias
 import com.tailapp.composer.Composition
 import com.tailapp.composer.CompositionLibrary
+import com.tailapp.composer.MotionChoreography
 import com.tailapp.effects.BeatDecoderKind
 import com.tailapp.effects.BeatLightSession
 import com.tailapp.effects.BeatLightState
@@ -105,6 +106,20 @@ class BeatLightViewModel(
     val octaveTargetBpm: StateFlow<Float> = _octaveTargetBpm.asStateFlow()
     val octaveStrength: StateFlow<Float> = _octaveStrength.asStateFlow()
 
+    private val _motionMode = MutableStateFlow(
+        prefs?.getString(KEY_MOTION_MODE, null)
+            ?.let { name -> MotionChoreography.Mode.entries.find { it.name == name } }
+    )
+
+    /**
+     * Which choreography drives the tail's motors, or null for "do not move it".
+     *
+     * Off by default and remembered separately from the lighting: a stack that
+     * only changes colour should never start the tail swinging on its own, and
+     * a user who turned motion off does not want it back on the next launch.
+     */
+    val motionMode: StateFlow<MotionChoreography.Mode?> = _motionMode.asStateFlow()
+
     init {
         // Apply the restored calibration to the engine immediately - a fresh
         // LightingEngine starts at triggerOffsetMillis = 0, so without this the
@@ -117,6 +132,10 @@ class BeatLightViewModel(
         engine.composition = library.active()
 
         engine.decoderKind = _decoderKind.value
+        // Same reason as the trigger offset: a fresh engine drives no motion, so
+        // without this the UI would show a mode the pipeline was ignoring.
+        engine.motionChoreography =
+            _motionMode.value?.let { MotionChoreography.Config(mode = it) }
         applyOctaveBias()
     }
 
@@ -138,6 +157,16 @@ class BeatLightViewModel(
 
     fun clearError() {
         session?.clearError()
+    }
+
+    /**
+     * Chooses what drives the tail's motors, or null to leave them alone.
+     * Applied live and persisted.
+     */
+    fun setMotionMode(mode: MotionChoreography.Mode?) {
+        _motionMode.value = mode
+        engine.motionChoreography = mode?.let { MotionChoreography.Config(mode = it) }
+        prefs?.edit()?.putString(KEY_MOTION_MODE, mode?.name)?.apply()
     }
 
     /** Applies and persists a new trigger offset, clamped to the calibration range. */
@@ -214,6 +243,7 @@ class BeatLightViewModel(
         // Visible to tests so persistence can be exercised through the same
         // SharedPreferences keys the view model itself reads and writes.
         internal const val KEY_TRIGGER_OFFSET = "beatlight_trigger_offset_ms"
+        const val KEY_MOTION_MODE = "motion_mode"
         internal const val KEY_DECODER = "beatlight_decoder"
         internal const val KEY_OCTAVE_ENABLED = "beatlight_octave_enabled"
         internal const val KEY_OCTAVE_TARGET = "beatlight_octave_target_bpm"

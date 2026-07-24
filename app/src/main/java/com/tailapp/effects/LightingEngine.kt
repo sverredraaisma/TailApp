@@ -24,6 +24,7 @@ import com.tailapp.beat.OctaveBias
 import com.tailapp.beat.ParticleFilterBeatDecoder
 import com.tailapp.composer.Composition
 import com.tailapp.composer.CompositionScene
+import com.tailapp.composer.MotionChoreography
 import com.tailapp.composer.TailEnd
 import com.tailapp.composer.TailTelemetry
 import com.tailapp.composer.TailTelemetryTracker
@@ -103,6 +104,17 @@ interface DeviceAudioStream {
         bpm: Float,
         flags: Int
     )
+}
+
+/**
+ * The seam through which a session drives the tail's motors.
+ *
+ * Separate from [DeviceAudioStream] because they are genuinely different
+ * features: a user may want the lights to react without the tail moving, and
+ * the motion stream is the one that can physically hurt if it misbehaves.
+ */
+interface DeviceMotionStream {
+    fun streamMotionTargets(targets: FloatArray)
 }
 
 data class BeatLightState(
@@ -225,7 +237,13 @@ class LightingEngine(
      * its tests stay independent of BLE; without it the session simply does not
      * feed the device's built-in effects.
      */
-    private val deviceStream: DeviceAudioStream? = null
+    private val deviceStream: DeviceAudioStream? = null,
+    /**
+     * Where live motion targets go. Optional and **off by default**: moving the
+     * motors is opt-in, because a stack that only changes colour should never
+     * start the tail swinging on its own.
+     */
+    private val motionStream: DeviceMotionStream? = null
 ) {
     private val extractor = FeatureExtractor(featureConfig)
 
@@ -290,6 +308,21 @@ class LightingEngine(
      * live instead of being starved of the microphone by it.
      */
     private val fftEncoder = FeatureFrameFftEncoder(featureConfig)
+
+    /**
+     * Turns the analysis into tail movement. Null config means "do not move the
+     * tail", which is the default: lighting and motion are separate features,
+     * and one should not silently imply the other.
+     */
+    private val choreography = MotionChoreography()
+
+    /** Set to start driving the motors from the analysis; null stops it. */
+    @Volatile
+    var motionChoreography: MotionChoreography.Config? = null
+
+    // Motion targets stream at the render rate; the device ages them out after
+    // 500 ms, so this has to stay comfortably faster than that.
+    private var motionFrameCounter = 0
 
     /** How the FF05 frame is built; mirrors the Audio Config screen. */
     var fftSettings: FftSettings
@@ -517,7 +550,32 @@ class LightingEngine(
     /** Renders and dispatches one frame. */
     internal fun renderFrame(nowNanos: Long) {
         scene.render(nowNanos)
+        streamMotion(nowNanos)
     }
+
+    /**
+     * Drives the tail's motors from the same analysis that just drew the frame.
+     *
+     * Only while [motionChoreography] is set: lighting and motion are separate
+     * features, and a stack that only changes colour must never start the tail
+     * swinging on its own.
+     *
+     * Streamed at the full render rate rather than decimated — the device ages
+     * targets out after 500 ms, and unlike the pixel stream this is small
+     * (16 bytes) and a live control surface, so latency matters more than the
+     * radio time saved.
+     */
+    private fun streamMotion(nowNanos: Long) {
+        val sink = motionStream ?: return
+        val config = motionChoreography ?: return
+
+        choreography.config = config
+        sink.streamMotionTargets(choreography.targetsFor(scene.buildContext(nowNanos, 0f)))
+        motionFrameCounter++
+    }
+
+    /** Frames of motion streamed this session; surfaced for diagnostics. */
+    val motionFramesStreamed: Int get() = motionFrameCounter
 
     /**
      * Sends the device its own FF05 audio frame, derived from this analysis
@@ -696,6 +754,7 @@ class LightingEngine(
         telemetryTracker.reset()
         fftEncoder.reset()
         streamFrameCounter = 0
+        motionFrameCounter = 0
         pendingStreamBeat = false
         pendingStreamDrop = false
         genreWindowFill = 0
