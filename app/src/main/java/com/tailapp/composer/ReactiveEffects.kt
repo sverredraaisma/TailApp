@@ -10,6 +10,8 @@ import com.tailapp.composer.effects.DropFlashEffect
 import com.tailapp.composer.effects.EnergyScrollEffect
 import com.tailapp.composer.effects.FireEffect
 import com.tailapp.composer.effects.GradientEffect
+import com.tailapp.composer.effects.GravityLevelEffect
+import com.tailapp.composer.effects.MotionGlowEffect
 import com.tailapp.composer.effects.PlasmaEffect
 import com.tailapp.composer.effects.RainbowEffect
 import com.tailapp.composer.effects.RingChaseEffect
@@ -18,8 +20,11 @@ import com.tailapp.composer.effects.SolidColorEffect
 import com.tailapp.composer.effects.SparkleEffect
 import com.tailapp.composer.effects.SpectrumBarsEffect
 import com.tailapp.composer.effects.StrobeEffect
+import com.tailapp.composer.effects.TapGateEffect
+import com.tailapp.composer.effects.TapRippleEffect
 import com.tailapp.composer.effects.VolumeDimmerEffect
 import com.tailapp.composer.effects.VuMeterEffect
+import com.tailapp.composer.effects.WagTrailEffect
 
 /**
  * Every effect the composer can place in a layer.
@@ -60,10 +65,18 @@ object ReactiveEffects {
         BassPulseEffect.SPEC,
         EnergyScrollEffect.SPEC,
 
+        // Tail — the device's own body: taps, orientation, how hard it is
+        // wagging. Nothing here needs a microphone.
+        TapRippleEffect.SPEC,
+        MotionGlowEffect.SPEC,
+        WagTrailEffect.SPEC,
+        GravityLevelEffect.SPEC,
+
         // Modulator — greyscale, meant to multiply over a folder.
         BeatMaskEffect.SPEC,
         VolumeDimmerEffect.SPEC,
-        SectionDimmerEffect.SPEC
+        SectionDimmerEffect.SPEC,
+        TapGateEffect.SPEC
     )
 
     private val byId: Map<String, EffectSpec> = ALL.associateBy { it.id }

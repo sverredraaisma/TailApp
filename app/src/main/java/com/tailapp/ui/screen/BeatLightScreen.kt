@@ -60,6 +60,7 @@ import com.tailapp.composer.Composition
 import com.tailapp.composer.EffectLayer
 import com.tailapp.composer.GroupLayer
 import com.tailapp.composer.LayerNode
+import com.tailapp.composer.TailTelemetry
 import com.tailapp.genre.GenreState
 import com.tailapp.led.PixelBuffer
 import com.tailapp.ui.components.LedPreviewPlaceholder
@@ -256,6 +257,24 @@ private fun MonitorSection(
                 "Genre: ${state.genre.label} (${"%.0f".format(state.genre.confidence * 100)}%)"
             }
             Text(genreLabel, style = MaterialTheme.typography.bodyMedium)
+
+            // The tail's own state, so a look that reacts to the body can be
+            // debugged the same way a beat-reactive one can. Only shown once
+            // something has actually arrived: with no tail connected these
+            // would be a row of confident-looking zeros.
+            if (state.tapCount > 0 || state.tail != TailTelemetry.AT_REST) {
+                Spacer(Modifier.height(8.dp))
+                val tapLabel = state.lastTapEnd?.let { end ->
+                    "Taps ${state.tapCount} (last: ${end.name.lowercase()})"
+                } ?: "Taps ${state.tapCount}"
+                Text(
+                    "$tapLabel · Deflection " +
+                        "${"%+.2f".format(state.tail.deflectionX)}, " +
+                        "${"%+.2f".format(state.tail.deflectionY)} · " +
+                        "Wag ${"%.0f".format(state.tail.wagSpeed * 100)}%",
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
 
             Spacer(Modifier.height(16.dp))
             if (ledsPerRing.isNotEmpty()) {

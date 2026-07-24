@@ -71,6 +71,23 @@ class CompositionScene(
     private var section = SectionStateUpdate(SectionState.UNKNOWN, 0f, 0L, 0f)
     private var genre = GenreState.unknown()
 
+    /**
+     * Tail state arrives from the BLE collector on a different thread than the
+     * render loop, so it crosses the same way a composition does: published into
+     * an atomic and claimed on the render thread.
+     *
+     * A tap is a one-shot, so it queues (and coalesces to the most recent — at
+     * ~20 taps a second nobody can distinguish two of them anyway, and a queue
+     * that grows while the renderer is paused would replay a burst on resume).
+     * Telemetry is level state, so the newest simply wins.
+     */
+    private val pendingTap = AtomicReference<TapEvent?>(null)
+    private val pendingTelemetry = AtomicReference<TailTelemetry?>(null)
+
+    private var lastTap: TapEvent? = null
+    private var tapCount = 0
+    private var tail = TailTelemetry.AT_REST
+
     private var originNanos = Long.MIN_VALUE
     private var lastFrameNanos = Long.MIN_VALUE
 
@@ -134,6 +151,23 @@ class CompositionScene(
     }
 
     /**
+     * Records a tap from one of the tail's IMUs. Safe to call from any thread.
+     *
+     * Deliberately *not* shifted by [triggerOffsetMillis]: that calibration
+     * exists to make a predicted beat land on the ear despite the BLE round
+     * trip, whereas a tap is already a past event by the time it reaches us.
+     * Delaying it further would only make the tail feel unresponsive.
+     */
+    fun onTap(end: TailEnd, timestampNanos: Long) {
+        pendingTap.set(TapEvent(end, timestampNanos))
+    }
+
+    /** Publishes the latest physical tail state. Safe to call from any thread. */
+    fun onTailTelemetry(telemetry: TailTelemetry) {
+        pendingTelemetry.set(telemetry)
+    }
+
+    /**
      * Folds one analysis frame into the smoothed, normalised audio the context
      * exposes.
      *
@@ -187,6 +221,11 @@ class CompositionScene(
      */
     fun render(nowNanos: Long): PixelBuffer {
         pending.getAndSet(null)?.let(renderer::setComposition)
+        pendingTap.getAndSet(null)?.let { tap ->
+            lastTap = tap
+            tapCount++
+        }
+        pendingTelemetry.getAndSet(null)?.let { tail = it }
 
         if (originNanos == Long.MIN_VALUE) originNanos = nowNanos
         val dtSeconds =
@@ -229,6 +268,11 @@ class CompositionScene(
             if (drop == null) ReactiveContext.NO_EVENT_SECONDS
             else (nowNanos - drop.timestampNanos) / NANOS_PER_SECOND
 
+        val tap = lastTap
+        val secondsSinceTap =
+            if (tap == null) ReactiveContext.NO_EVENT_SECONDS
+            else (nowNanos - tap.timestampNanos) / NANOS_PER_SECOND
+
         return ReactiveContext(
             nowNanos = nowNanos,
             timeSeconds = (nowNanos - originNanos) / NANOS_PER_SECOND,
@@ -250,7 +294,11 @@ class CompositionScene(
             secondsSinceDrop = secondsSinceDrop,
             section = section.state,
             sectionRamp = section.ramp,
-            genre = genre
+            genre = genre,
+            lastTap = tap,
+            secondsSinceTap = secondsSinceTap,
+            tapCount = tapCount,
+            tail = tail
         )
     }
 
@@ -258,6 +306,11 @@ class CompositionScene(
         lastBeat = null
         beatCount = 0
         lastDrop = null
+        lastTap = null
+        tapCount = 0
+        tail = TailTelemetry.AT_REST
+        pendingTap.set(null)
+        pendingTelemetry.set(null)
         section = SectionStateUpdate(SectionState.UNKNOWN, 0f, 0L, 0f)
         genre = GenreState.unknown()
         originNanos = Long.MIN_VALUE

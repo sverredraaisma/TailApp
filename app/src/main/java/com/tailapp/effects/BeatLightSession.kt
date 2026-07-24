@@ -4,11 +4,17 @@ import android.content.Context
 import android.content.Intent
 import android.util.Log
 import com.tailapp.audio.FftStreamManager
+import com.tailapp.ble.protocol.SystemEvent
+import com.tailapp.composer.TailEnd
+import com.tailapp.repository.DeviceRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
 /**
@@ -24,9 +30,25 @@ class BeatLightSession(
     private val context: Context,
     val engine: LightingEngine,
     private val scope: CoroutineScope,
-    private val fftStreamManager: FftStreamManager? = null
+    private val fftStreamManager: FftStreamManager? = null,
+    /**
+     * Source of the tail's own telemetry. Optional so the engine and its tests
+     * stay independent of BLE; without it, effects that read the body simply
+     * see a tail at rest.
+     */
+    private val deviceRepository: DeviceRepository? = null
 ) {
     val state: StateFlow<BeatLightState> get() = engine.state
+
+    /**
+     * Forwards the tail's taps and motion into the render pipeline for as long
+     * as a session is running.
+     *
+     * Only while running: these feed a `ReactiveContext` that nothing is
+     * building otherwise, and collecting FF02 at ~20 Hz to throw it away would
+     * be pure battery cost.
+     */
+    private var telemetryJob: Job? = null
 
     private val _error = MutableStateFlow<String?>(null)
 
@@ -76,6 +98,7 @@ class BeatLightSession(
                 }
                 // Started only after the engine holds the microphone.
                 context.startForegroundService(Intent(context, BeatLightService::class.java))
+                startTelemetryForwarding()
             } catch (e: SecurityException) {
                 fail("Microphone permission is required", fftWasStreaming, e)
             } catch (e: Exception) {
@@ -88,6 +111,8 @@ class BeatLightSession(
         if (!_isActive.value) return
         _isActive.value = false
 
+        telemetryJob?.cancel()
+        telemetryJob = null
         transitionJob?.cancel()
         transitionJob = scope.launch {
             // Stopping the engine hands the LEDs back to the device's own effect
@@ -104,6 +129,38 @@ class BeatLightSession(
 
     fun clearError() {
         _error.value = null
+    }
+
+    /**
+     * Subscribes the tail's own state into the effect pipeline: FF07 taps
+     * become tap events, and the FF02 motion state becomes deflection and wag
+     * speed. This is what lets an effect react to the device's body rather than
+     * only to the microphone.
+     */
+    private fun startTelemetryForwarding() {
+        val repository = deviceRepository ?: return
+        telemetryJob?.cancel()
+        telemetryJob = scope.launch {
+            launch {
+                repository.systemEvents.collect { event ->
+                    when (event) {
+                        SystemEvent.TAP_BASE -> engine.onTailTap(TailEnd.BASE)
+                        SystemEvent.TAP_TIP -> engine.onTailTap(TailEnd.TIP)
+                        // Config reloads and stalls say nothing about where the
+                        // tail is; they are the overview screen's business.
+                        else -> Unit
+                    }
+                }
+            }
+            launch {
+                repository.deviceState
+                    .map { it.motionState }
+                    .filterNotNull()
+                    // FF02 notifies at ~20 Hz whether or not anything moved.
+                    .distinctUntilChanged()
+                    .collect { engine.onTailMotion(it) }
+            }
+        }
     }
 
     private suspend fun fail(message: String, restoreFftStream: Boolean, cause: Exception? = null) {

@@ -15,6 +15,14 @@ enum class EffectCategory(val displayName: String) {
     AUDIO("Audio"),
 
     /**
+     * Driven by the tail itself rather than by sound — IMU taps, orientation and
+     * how fast it is wagging. These are the only effects that cannot be
+     * reproduced on any other lighting hardware, because their input is the
+     * device's own body.
+     */
+    TAIL("Tail"),
+
+    /**
      * Emit greyscale/masks rather than a look, meant to modulate a folder below
      * them (typically with [com.tailapp.model.BlendMode.MULTIPLY]).
      */

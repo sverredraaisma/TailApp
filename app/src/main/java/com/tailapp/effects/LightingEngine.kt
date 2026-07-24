@@ -20,6 +20,10 @@ import com.tailapp.beat.OctaveBias
 import com.tailapp.beat.ParticleFilterBeatDecoder
 import com.tailapp.composer.Composition
 import com.tailapp.composer.CompositionScene
+import com.tailapp.composer.TailEnd
+import com.tailapp.composer.TailTelemetry
+import com.tailapp.composer.TailTelemetryTracker
+import com.tailapp.model.MotionState
 import com.tailapp.drop.DropEvent
 import com.tailapp.drop.SectionState
 import com.tailapp.drop.TransientAnalyzer
@@ -95,6 +99,15 @@ data class BeatLightState(
     val droppedSamples: Long = 0L,
     val decoder: BeatDecoderKind = BeatDecoderKind.PHASE_LOCKED,
     val activationSource: BeatActivationKind = BeatActivationKind.SPECTRAL_FLUX,
+    /**
+     * The tail's own state, as the effects see it. Surfaced on the monitor so a
+     * look that reacts to the body can be debugged the same way a beat-reactive
+     * one can — otherwise "nothing happens when I tap it" has no visible cause
+     * between the IMU and the pixels.
+     */
+    val tapCount: Int = 0,
+    val lastTapEnd: TailEnd? = null,
+    val tail: TailTelemetry = TailTelemetry.AT_REST,
     val error: String? = null
 )
 
@@ -237,8 +250,34 @@ class LightingEngine(
      */
     private val scene = CompositionScene(output, featureConfig)
 
+    /**
+     * Derives normalised deflection and wag speed from the FF02 motion state.
+     * Lives here rather than in the repository because it needs the render
+     * clock: wag speed is a derivative, and the notify interval jitters.
+     */
+    private val telemetryTracker = TailTelemetryTracker()
+
     private val _state = MutableStateFlow(BeatLightState(activationSource = activationKind()))
     val state: StateFlow<BeatLightState> = _state.asStateFlow()
+
+    /**
+     * Feeds a tap from the tail's IMU into the render pipeline.
+     *
+     * This is the seam that makes the device's own body an effect input: a tap
+     * on the tail can now spawn a ripple, exactly as a beat does. Safe to call
+     * from any thread — [CompositionScene] does the hand-off.
+     */
+    fun onTailTap(end: TailEnd) {
+        scene.onTap(end, clock())
+        _state.update { it.copy(tapCount = it.tapCount + 1, lastTapEnd = end) }
+    }
+
+    /** Feeds the latest FF02 motion state in. Safe to call from any thread. */
+    fun onTailMotion(state: MotionState) {
+        val telemetry = telemetryTracker.update(state, clock())
+        scene.onTailTelemetry(telemetry)
+        _state.update { it.copy(tail = telemetry) }
+    }
 
     private var source: AudioSource? = null
     private var resampler: Resampler? = null
@@ -555,6 +594,7 @@ class LightingEngine(
         transients.reset()
         resampler?.reset()
         scene.reset()
+        telemetryTracker.reset()
         genreWindowFill = 0
         latestBeat = null
         latestDrop = null

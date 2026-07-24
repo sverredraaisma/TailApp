@@ -16,16 +16,29 @@ Every effect reads the same [`ReactiveContext`](../app/src/main/java/com/tailapp
 one snapshot of the analysis, rebuilt each rendered frame.
 
 ```
- beat tier ──► beats, BPM, beat phase, bar phase, downbeats
- transient ──► drops, section, build-up ramp        ├──► ReactiveContext ──► every layer
- audio     ──► loudness, bass/mid/high, FFT spectrum│
- context   ──► genre                                ┘
+ beat tier ──► beats, BPM, beat phase, bar phase, downbeats ┐
+ transient ──► drops, section, build-up ramp                │
+ audio     ──► loudness, bass/mid/high, FFT spectrum        ├──► ReactiveContext ──► every layer
+ context   ──► genre                                        │
+ the tail  ──► taps, gravity, deflection, wag speed         ┘
 ```
 
 That is the whole point of the design: there is no such thing as an effect that
 *cannot* react. A rainbow can step its hue on the beat, a plasma can dim with the
 volume, a solid colour can breathe with loudness — because all of them get the
 same data, and none of them has to know where it came from.
+
+**The tail is one of those inputs.** Taps from the IMUs (FF07) and the live
+motion state (FF02, ~20 Hz) go into the same context as the audio, so an effect
+can react to the device's own body: tap it and a ripple starts from the end you
+touched, swing it and it glows, tilt the wearer and the downhill side lights up.
+Raw degrees are normalised into `-1..1` of the *configured* travel by
+`TailTelemetryTracker`, so a look behaves the same on a tail limited to ±30° as
+on one with ±90°; wag speed is a derivative it computes from the real notify
+interval, because FF02's nominal 20 Hz jitters with BLE scheduling and dividing
+by an assumed period would turn connection hiccups into phantom wags. With no
+device connected the context carries `TailTelemetry.AT_REST`, so these effects
+still render in the desk preview instead of special-casing "no tail".
 
 Effects never touch the microphone, the clock or BLE. They read the context and
 write pixels, which is what makes all 20 of them testable with a hand-built
@@ -72,6 +85,7 @@ it at once:
 | `beat_mask` | pulses the whole group on every beat |
 | `volume_dimmer` | makes the group breathe with loudness (or ducks it, inverted) |
 | `section_dimmer` | strobes the group through a build-up, dims it through a breakdown |
+| `tap_gate` | opens the whole group on a tap and closes it again as it decays |
 
 `section_dimmer` is the old `ReactiveRenderer.sectionGain` recovered as a
 composable layer. In the profile system that behaviour was welded into the one
@@ -84,7 +98,7 @@ would recolour whatever it modulates rather than dimming it.
 
 ## The effect library
 
-20 effects, in four categories. Adding one is **one class with a `SPEC` and one
+25 effects, in five categories. Adding one is **one class with a `SPEC` and one
 line in `ReactiveEffects.ALL`**; the compositor, the editor, persistence and the
 registry-wide tests all work off `EffectSpec` and need no change.
 
@@ -93,7 +107,13 @@ registry-wide tests all work off `EffectSpec` and need no change.
 | **Base** | `solid`, `gradient`, `rainbow`, `plasma`, `fire`, `breathe` |
 | **Beat** | `beat_flash`, `beat_ripple`, `ring_chase`, `strobe`, `sparkle`, `bar_sweep`, `drop_flash` |
 | **Audio** | `vu_meter`, `spectrum_bars`, `bass_pulse`, `energy_scroll` |
-| **Modulator** | `beat_mask`, `volume_dimmer`, `section_dimmer` |
+| **Tail** | `tap_ripple`, `motion_glow`, `wag_trail`, `gravity_level` |
+| **Modulator** | `beat_mask`, `volume_dimmer`, `section_dimmer`, `tap_gate` |
+
+The **Tail** category is the one that cannot be reproduced on any other lighting
+hardware, because its input is the device's own body rather than sound. Those
+four are also the only effects that do something in silence, which is what the
+`Alive` built-in stack is for.
 
 `spectrum_bars` is the app-side counterpart to the firmware's `audio_freq_bars`,
 and a strictly better one: the firmware reads a 128-bin buffer shipped to it over
@@ -198,6 +218,7 @@ do leaves them with no compositions at all.
 | File | Contents |
 |---|---|
 | `composer/ReactiveContext.kt` | the per-frame analysis snapshot + its envelopes |
+| `composer/TailState.kt`, `TailTelemetryTracker.kt` | the tail's own body as an input: taps, gravity, deflection, wag speed |
 | `composer/ReactiveEffect.kt` | effect base class, flip/mirror transform |
 | `composer/EffectParam.kt` | parameter schema + `ParamBag` storage |
 | `composer/EffectSpec.kt`, `ReactiveEffects.kt` | registry |

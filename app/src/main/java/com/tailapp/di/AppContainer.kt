@@ -116,10 +116,16 @@ class AppContainer(context: Context) {
     /**
      * The FFT stream is handed in so a starting session can stop it: both want
      * the microphone, and a second capture generally gets silence rather than an
-     * error.
+     * error. The repository comes in so the tail's own taps and motion reach the
+     * effect pipeline — without it, effects can only react to the microphone.
      */
-    val beatLightSession =
-        BeatLightSession(context, lightingEngine, applicationScope, fftStreamManager)
+    val beatLightSession = BeatLightSession(
+        context = context,
+        engine = lightingEngine,
+        scope = applicationScope,
+        fftStreamManager = fftStreamManager,
+        deviceRepository = deviceRepository
+    )
 
     val beatLightPrefs: SharedPreferences =
         context.getSharedPreferences("beatlight_config", Context.MODE_PRIVATE)

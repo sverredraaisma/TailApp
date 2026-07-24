@@ -35,7 +35,13 @@ internal fun testContext(
     secondsSinceDrop: Float = ReactiveContext.NO_EVENT_SECONDS,
     section: SectionState = SectionState.UNKNOWN,
     sectionRamp: Float = 0f,
-    genre: GenreState = GenreState.unknown()
+    genre: GenreState = GenreState.unknown(),
+    // "Nobody has touched it and it is hanging still" — the tail equivalent of
+    // silence, so an effect test states only the body state it cares about.
+    lastTap: TapEvent? = null,
+    secondsSinceTap: Float = ReactiveContext.NO_EVENT_SECONDS,
+    tapCount: Int = 0,
+    tail: TailTelemetry = TailTelemetry.AT_REST
 ): ReactiveContext = ReactiveContext(
     nowNanos = nowNanos,
     timeSeconds = timeSeconds,
@@ -57,7 +63,25 @@ internal fun testContext(
     secondsSinceDrop = secondsSinceDrop,
     section = section,
     sectionRamp = sectionRamp,
-    genre = genre
+    genre = genre,
+    lastTap = lastTap,
+    secondsSinceTap = secondsSinceTap,
+    tapCount = tapCount,
+    tail = tail
+)
+
+/** A tap that landed [secondsAgo] on [end], with the matching elapsed time. */
+internal fun tappedContext(
+    end: TailEnd = TailEnd.BASE,
+    secondsAgo: Float = 0f,
+    tail: TailTelemetry = TailTelemetry.AT_REST,
+    nowNanos: Long = 0L
+): ReactiveContext = testContext(
+    nowNanos = nowNanos,
+    lastTap = TapEvent(end, nowNanos - (secondsAgo * 1_000_000_000f).toLong()),
+    secondsSinceTap = secondsAgo,
+    tapCount = 1,
+    tail = tail
 )
 
 /** A solid-colour layer — the one effect whose output is exactly predictable. */

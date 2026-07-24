@@ -365,6 +365,53 @@ class CompositionLibrary(private val prefs: SharedPreferences? = null) {
                         )
                     )
                 )
+            ),
+
+            // The tail reacting to itself rather than to sound: it glows as it
+            // swings, shows which way is down, and ripples where you touch it.
+            // Works in silence, which none of the others do.
+            Composition(
+                id = "builtin.alive",
+                name = "Alive",
+                layers = listOf(
+                    effect(
+                        "alive.glow", "motion_glow", BlendMode.OVERWRITE,
+                        params = mapOf(
+                            "baseHue" to 200f,
+                            "hueSpread" to 70f,
+                            "gain" to 2f,
+                            "floor" to 0.1f,
+                            "tipBias" to 0.5f
+                        )
+                    ),
+                    effect(
+                        "alive.level", "gravity_level", BlendMode.ADD, opacity = 0.35f,
+                        params = mapOf(
+                            "color" to rgb(0x2040A0),
+                            "contrast" to 0.9f,
+                            "floor" to 0f
+                        )
+                    ),
+                    effect(
+                        "alive.trail", "wag_trail", BlendMode.ADD, opacity = 0.7f,
+                        params = mapOf(
+                            "color" to rgb(0x1030C0),
+                            "headColor" to rgb(0xC0E0FF),
+                            "width" to 0.2f,
+                            "persistence" to 0.5f
+                        )
+                    ),
+                    effect(
+                        "alive.tap", "tap_ripple", BlendMode.ADD,
+                        params = mapOf(
+                            "color" to rgb(0xFFFFFF),
+                            "respondsTo" to 0f,
+                            "speed" to 2.2f,
+                            "width" to 0.15f,
+                            "decay" to 0.8f
+                        )
+                    )
+                )
             )
         )
     }
