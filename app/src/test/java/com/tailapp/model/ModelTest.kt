@@ -40,6 +40,57 @@ class ProtocolEnumTest {
         assertEquals(0x00.toByte(), MotionPattern.STATIC.id)
         assertEquals(0x01.toByte(), MotionPattern.WAGGING.id)
         assertEquals(0x02.toByte(), MotionPattern.LOOSE.id)
+        // The MOT-5 catalogue, appended rather than inserted: ids are persisted
+        // in device profiles, so renumbering would silently change what a saved
+        // profile does.
+        assertEquals(0x03.toByte(), MotionPattern.IDLE_SWAY.id)
+        assertEquals(0x04.toByte(), MotionPattern.EXCITED_WAG.id)
+        assertEquals(0x05.toByte(), MotionPattern.CIRCLE.id)
+        assertEquals(0x06.toByte(), MotionPattern.FIGURE_EIGHT.id)
+        assertEquals(0x07.toByte(), MotionPattern.SHIVER.id)
+        assertEquals(0x08.toByte(), MotionPattern.AUDIO_WAG.id)
+        assertEquals(0x09.toByte(), MotionPattern.HEARTBEAT.id)
+    }
+
+    @Test
+    fun `every pattern parameter default sits inside its own range`() {
+        // A default outside its range shows the user a slider pinned to an end
+        // while the device runs on something else entirely.
+        for (pattern in MotionPattern.entries) {
+            for (param in pattern.params) {
+                assertTrue(
+                    "${pattern.name}.${param.name} default ${param.default} " +
+                        "outside ${param.min}..${param.max}",
+                    param.default in param.min..param.max
+                )
+            }
+        }
+    }
+
+    @Test
+    fun `parameter ids within a pattern are consecutive from zero`() {
+        // The wire format addresses parameters by slot index, so a gap would
+        // send a value to the wrong slot.
+        for (pattern in MotionPattern.entries) {
+            assertEquals(
+                "${pattern.name} parameter ids",
+                pattern.params.indices.toList(),
+                pattern.params.map { it.id }
+            )
+        }
+    }
+
+    @Test
+    fun `every effect parameter default sits inside its own range`() {
+        for (effect in LedEffect.entries) {
+            for (param in effect.params) {
+                assertTrue(
+                    "${effect.name}.${param.name} default ${param.default} " +
+                        "outside ${param.min}..${param.max}",
+                    param.default in param.min..param.max
+                )
+            }
+        }
     }
 
     @Test
