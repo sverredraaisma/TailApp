@@ -2,18 +2,25 @@
 
 > ## Delivery status
 >
-> Milestones **M1–M3 are complete on both sides**, and **M4 is complete except
-> for the optional effect catalogue**. Everything below is the plan as written;
-> the [milestone table](#5-joint-milestones) carries the live status.
+> Milestones **M1–M3 are complete on both sides**. M4 is complete on the device
+> and awaiting the app-side effect mirror; M5 and M6 are under way. Everything
+> below is the plan as written; the
+> [milestone table](#5-joint-milestones) carries the live status.
 >
 > | Milestone | State |
 > |---|---|
 > | M1 — Honest tethered control | **done** |
 > | M2 — A body the effects can feel | **done** |
 > | M3 — One mic, one beat | **done** |
-> | M4 — Looks that survive the phone leaving | **mechanism done**; LED-3 catalogue and LED-4 palettes outstanding |
-> | M5 — Motion that dances | **motion streaming done** (MOT-11 + A4-2); axis mixer, keyframes, behavior engine outstanding |
-> | M6 — A shippable device | not started |
+> | M4 — Looks that survive the phone leaving | **device side done** — LED-1/2/4/7 plus LED-3's ten effects; the app's parity mirror (A3-2) is the remainder |
+> | M5 — Motion that dances | **streaming (MOT-11 + A4-2), the pattern catalogue (MOT-5), crossfade (MOT-7) and gravity fusion (MOT-9) done**; axis mixer, keyframes, behavior engine in progress |
+> | M6 — A shippable device | in progress — battery, diagnostics, device info, OTA and parameter descriptors under way |
+>
+> The device is no longer dependent on a paired phone for anything beyond a
+> rainbow: it has seventeen LED effects and ten motion patterns of its own, and
+> the three tail-reactive effects light it from its own movement. What the phone
+> still uniquely provides is the microphone — hence the FF05 beat trailer, which
+> is what lets the device's own audio wag lock to a beat it cannot hear.
 >
 > The protocol landed as **v5** rather than in two steps: nothing shipped between
 > the v4 catch-up and the additive v5 changes, so they were bundled into one
@@ -257,9 +264,9 @@ runs before/alongside M2 and must be complete before M4.
 | **M1 — Honest tethered control** | The app tells the truth about the device: stalls visible and recoverable, motion limits editable, no false banner | A0-1..4 | — (shipped) | **done** |
 | **M2 — A body the effects can feel** | Tap the tail and the lights ripple; wag it and they glow | A1-1..5 | HARD-9, SYS-7 | **done** (MOT-10 still later) |
 | **M3 — One mic, one beat** | BeatLight and the firmware's own effects run at once, and the device knows the beat | A2-1, A2-2 | LED-8, M2-fix (loudness wiring) | **done** |
-| **M4 — Looks that survive the phone leaving** | A composer look (or its honest approximation) installs to a profile and works standalone | A3-1..3 | HARD-2/3, LED-1, LED-2, LED-7 | **mechanism done**; LED-4 palettes + LED-3 catalogue + A3-2/A3-3 outstanding |
-| **M5 — Motion that dances** | The tail moves to the same analysis as the lights: streamed targets, keyframes, behavior engine | A4-1..4 | MOT-0, MOT-7, MOT-11, MOT-8, MOT-6 | **MOT-11 + A4-2 done**; rest outstanding |
-| **M6 — A shippable device** | OTA, battery, diagnostics, and one clean protocol break | A5-1..3 | SYS-1, SYS-2, SYS-3, SYS-6, SYS-8, SYS-9 | not started |
+| **M4 — Looks that survive the phone leaving** | A composer look (or its honest approximation) installs to a profile and works standalone | A3-1..3 | HARD-2/3, LED-1, LED-2, LED-3, LED-4, LED-7 | **device side done** — the ten-effect catalogue and the palettes landed; A3-2's parity mirror is the remainder |
+| **M5 — Motion that dances** | The tail moves to the same analysis as the lights: streamed targets, keyframes, behavior engine | A4-1..4 | MOT-0, MOT-7, MOT-11, MOT-8, MOT-6 | **MOT-11, A4-1, A4-2, MOT-5, MOT-7, MOT-9 done**; MOT-0/6/8 and A4-3/A4-4 in progress |
+| **M6 — A shippable device** | OTA, battery, diagnostics, and one clean protocol break | A5-1..3 | SYS-1, SYS-2, SYS-3, SYS-6, SYS-8, SYS-9 | in progress; A6-3's liveness pairing landed early because it was a correctness gap, not a feature |
 
 ### What M4 delivered, and what it did not
 
