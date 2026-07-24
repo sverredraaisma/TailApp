@@ -96,6 +96,38 @@ class AckAndEventTest {
     }
 
     @Test
+    fun `each battery policy event maps to its own code`() {
+        // The three crossings, at the codes ble_protocol.h assigns them. They are
+        // sent once, on the crossing, so an app that mapped two of them together
+        // would silently stop distinguishing "dimmed" from "parked".
+        assertEquals(SystemEvent.BATTERY_LOW, SystemEventParser.parse(byteArrayOf(0x0D)))
+        assertEquals(SystemEvent.BATTERY_CRITICAL, SystemEventParser.parse(byteArrayOf(0x0E)))
+        assertEquals(SystemEvent.BATTERY_NORMAL, SystemEventParser.parse(byteArrayOf(0x0F)))
+
+        assertEquals(0x0D.toByte(), SystemEvent.BATTERY_LOW.code)
+        assertEquals(0x0E.toByte(), SystemEvent.BATTERY_CRITICAL.code)
+        assertEquals(0x0F.toByte(), SystemEvent.BATTERY_NORMAL.code)
+
+        assertTrue(SystemEvent.BATTERY_CRITICAL.isBatteryPolicy)
+        assertFalse(SystemEvent.STALL.isBatteryPolicy)
+    }
+
+    @Test
+    fun `the event ring carries the battery crossings too`() {
+        // Which is how an app that connects afterwards learns the pack went flat
+        // — nothing repeats the event while the level sits where it is.
+        val log = SystemEventParser.parseLog(FirmwarePayloads.eventLog(listOf(0x0D, 0x0E, 0x0F)))
+        assertEquals(
+            listOf(
+                SystemEvent.BATTERY_LOW,
+                SystemEvent.BATTERY_CRITICAL,
+                SystemEvent.BATTERY_NORMAL
+            ),
+            log
+        )
+    }
+
+    @Test
     fun `an unparseable event ring yields nothing rather than guessing`() {
         assertEquals(emptyList<SystemEvent>(), SystemEventParser.parseLog(ByteArray(0)))
         assertEquals(emptyList<SystemEvent>(), SystemEventParser.parseLog(byteArrayOf(0x04)))

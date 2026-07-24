@@ -1,9 +1,12 @@
 package com.tailapp.ble.protocol
 
+import com.tailapp.model.BondedPeer
 import com.tailapp.model.Capabilities
+import com.tailapp.model.FirmwareVersion
 import com.tailapp.model.ImuConfig
 import com.tailapp.model.MotionLimits
 import com.tailapp.model.MotionSystemState
+import com.tailapp.model.OtaInfo
 import com.tailapp.model.PidGains
 import com.tailapp.model.ServoConfig
 import com.tailapp.model.SystemInfo
@@ -29,12 +32,19 @@ import java.nio.ByteOrder
  * -- motion (protocol v4) --
  * [motors_enabled u8]
  * per motor (13 B): [max_vel f32][max_accel f32][max_jerk f32][stall_thresh u8]
+ * -- motion tuning: walked past, not modelled --
+ * -- OTA version/rollback (SYS-2) --
+ * [running 3 x u8][pending_verify u8][other_valid u8][other 3 x u8]
+ * -- per-IMU tap config and axis mix: walked past, not modelled --
+ * -- identity (SYS-6) --
+ * [name_len u8][name UTF-8 name_len B]
+ * [num_bonds u8] per bond (7 B): [addr_type u8][addr 6 B]
  * ```
  *
- * Both trailing blocks are optional: firmware that predates either still yields
- * a valid [SystemInfo], with that block null. Absence has to stay
- * distinguishable from "motors are off" — a null motion block must not be
- * reported to the user as a stall.
+ * Every trailing block is optional: firmware that predates one still yields a
+ * valid [SystemInfo], with that block null. Absence has to stay distinguishable
+ * from a value — a null motion block must not be reported to the user as a
+ * stall, and a null bond list is not "no bonds".
  */
 object SystemInfoParser {
 
@@ -42,6 +52,22 @@ object SystemInfoParser {
     private const val IMU_ENTRY_SIZE = 2
     private const val MOTION_ENTRY_SIZE = 13
     private const val HEADER_SIZE = 5
+
+    // Blocks the device emits that nothing here reads. They are skipped by their
+    // exact lengths purely so the blocks *after* them are findable at all: the
+    // FF06 payload is not framed or length-prefixed, so a block's position is as
+    // much a part of the contract as its contents, and every one of these
+    // lengths mirrors `app_bridge.cpp::app_update_ble_state`.
+
+    /** Per motor: `units_per_deg_per_sec f32`, then gentle scale, keyframe slot, occupancy. */
+    private const val TUNING_ENTRY_SIZE = 4
+    private const val TUNING_TRAILER_SIZE = 6
+
+    /** Per IMU: `[engine][threshold][sensitivity][quiet_time_ms u16]`. */
+    private const val TAP_ENTRY_SIZE = 5
+
+    /** `[rotation_deg f32][gain_x f32][gain_y f32][invert_x u8][invert_y u8]`. */
+    private const val AXIS_MIX_BLOCK_SIZE = 14
 
     fun parse(data: ByteArray): SystemInfo? {
         if (data.size < HEADER_SIZE) return null
@@ -82,8 +108,88 @@ object SystemInfoParser {
 
         val capabilities = parseCapabilities(buf)
         val motion = if (capabilities != null) parseMotion(buf, numServos) else null
-        return SystemInfo(protocolVersion, major, minor, patch, servos, imus, capabilities, motion)
+        val ota = if (motion != null) parseOta(buf, numServos) else null
+        val identity = if (ota != null) parseIdentity(buf, numImus) else null
+        return SystemInfo(
+            protocolVersion, major, minor, patch, servos, imus, capabilities, motion,
+            deviceName = identity?.name,
+            bonds = identity?.bonds,
+            ota = ota
+        )
     }
+
+    /**
+     * Reads the OTA version/rollback block (SYS-2), which sits one block past the
+     * motion block with the motion-tuning block in between.
+     *
+     * Walked forward from the front rather than counted back from the end of the
+     * payload. Counting back is correct exactly until the device appends
+     * something — and then it silently reports the tap block's bytes as a
+     * firmware version, with no length or tag anywhere in FF06 to catch it.
+     * Returns null on firmware that predates the block, which is not the same as
+     * a device running 0.0.0.
+     */
+    private fun parseOta(buf: ByteBuffer, numServos: Int): OtaInfo? {
+        val tuningBlock = numServos * TUNING_ENTRY_SIZE + TUNING_TRAILER_SIZE
+        if (buf.remaining() < tuningBlock + Protocol.OTA_INFO_BLOCK_SIZE) return null
+        buf.position(buf.position() + tuningBlock)
+
+        val runningMajor = buf.u8()
+        val runningMinor = buf.u8()
+        val runningPatch = buf.u8()
+        val pendingVerify = buf.u8() != 0
+        val otherValid = buf.u8() != 0
+        val otherMajor = buf.u8()
+        val otherMinor = buf.u8()
+        val otherPatch = buf.u8()
+
+        return OtaInfo(
+            running = FirmwareVersion(runningMajor, runningMinor, runningPatch),
+            pendingVerify = pendingVerify,
+            other = if (otherValid) FirmwareVersion(otherMajor, otherMinor, otherPatch) else null
+        )
+    }
+
+    private class Identity(val name: String, val bonds: List<BondedPeer>)
+
+    /**
+     * Reads the device name and bond list from the end of the payload (SYS-6).
+     *
+     * They sit behind the tap and axis-mix blocks, which this app has no model
+     * for, so getting there means skipping those by their exact lengths — a
+     * positional assumption, and a wrong one would invent bonded peers out of
+     * somebody else's floats. The whole block is therefore required to *fit
+     * exactly*: a plausible name length, at most [Protocol.MAX_BOND_SLOTS]
+     * bonds, and not one byte left over. Anything else is read as "this firmware
+     * does not publish an identity block" rather than guessed at.
+     */
+    private fun parseIdentity(buf: ByteBuffer, numImus: Int): Identity? {
+        val preceding = numImus * TAP_ENTRY_SIZE + AXIS_MIX_BLOCK_SIZE
+        if (buf.remaining() <= preceding) return null
+        buf.position(buf.position() + preceding)
+
+        val nameLength = buf.u8()
+        if (nameLength > Protocol.MAX_DEVICE_NAME_LEN || buf.remaining() < nameLength + 1) return null
+        val name = ByteArray(nameLength).also { buf.get(it) }.toString(Charsets.UTF_8)
+
+        val bondCount = buf.u8()
+        if (bondCount > Protocol.MAX_BOND_SLOTS) return null
+        if (buf.remaining() != bondCount * Protocol.BOND_ADDR_RECORD_SIZE) return null
+
+        val bonds = List(bondCount) { index ->
+            val addressType = buf.u8()
+            val raw = ByteArray(6).also { buf.get(it) }
+            BondedPeer(index, addressType, formatAddress(raw))
+        }
+        return Identity(name, bonds)
+    }
+
+    /**
+     * NimBLE hands out `ble_addr_t.val` least-significant byte first, so the
+     * display order is the reverse of the wire order.
+     */
+    private fun formatAddress(raw: ByteArray): String =
+        raw.reversed().joinToString(":") { "%02X".format(it.toInt() and 0xFF) }
 
     /**
      * Returns null when the motion block is absent (pre-v4 firmware) or

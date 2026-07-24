@@ -3,6 +3,7 @@ package com.tailapp.repository
 import android.util.Log
 import com.tailapp.ble.BleTransport
 import com.tailapp.ble.ConnectionState
+import com.tailapp.ble.protocol.BatteryLevelParser
 import com.tailapp.ble.protocol.CharacteristicUuids
 import com.tailapp.ble.protocol.CommandResult
 import com.tailapp.ble.protocol.CommandResultParser
@@ -14,6 +15,9 @@ import com.tailapp.ble.protocol.LedStateParser
 import com.tailapp.ble.protocol.MotionCommands
 import com.tailapp.ble.protocol.MotionTargetFrame
 import com.tailapp.ble.protocol.MotionStateParser
+import com.tailapp.ble.protocol.OtaCommands
+import com.tailapp.ble.protocol.OtaDataFrame
+import com.tailapp.ble.protocol.OtaStatusParser
 import com.tailapp.ble.protocol.ProfileCommands
 import com.tailapp.ble.protocol.ProfileListParser
 import com.tailapp.ble.protocol.Protocol
@@ -24,14 +28,23 @@ import com.tailapp.ble.protocol.SystemInfoParser
 import com.tailapp.led.PixelBuffer
 import com.tailapp.effects.DeviceAudioStream
 import com.tailapp.effects.DeviceMotionStream
+import com.tailapp.model.BatteryPolicy
+import com.tailapp.model.BehaviorStateConfig
+import com.tailapp.model.BehaviorTriggerConfig
+import com.tailapp.model.DeviceInformation
 import com.tailapp.model.DeviceState
+import com.tailapp.model.FirmwareVersion
 import com.tailapp.model.LayerConfig
 import com.tailapp.model.LedState
 import com.tailapp.model.MotionLimits
+import com.tailapp.model.OtaStatus
+import com.tailapp.model.OtaTransferState
 import com.tailapp.model.ProfileSlot
 import com.tailapp.model.ServoConfig
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -42,12 +55,15 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.UUID
 
 class DeviceRepository(
     private val transport: BleTransport,
     private val scope: CoroutineScope,
-    private val ackRetryPolicy: AckRetryPolicy = AckRetryPolicy()
+    private val ackRetryPolicy: AckRetryPolicy = AckRetryPolicy(),
+    private val otaPolicy: OtaTransferPolicy = OtaTransferPolicy()
 ) : DeviceAudioStream, DeviceMotionStream {
     private val _deviceState = MutableStateFlow(DeviceState())
     val deviceState: StateFlow<DeviceState> = _deviceState.asStateFlow()
@@ -76,6 +92,23 @@ class DeviceRepository(
      * correlation.
      */
     private val ackInbox = Channel<CommandResult>(Channel.UNLIMITED)
+
+    /**
+     * Last FF0E status echo. Session state rather than part of [DeviceState]:
+     * it describes a transfer this app is running, not a fact about the device's
+     * configuration, and it changes hundreds of times during one.
+     */
+    private val _otaStatus = MutableStateFlow<OtaStatus?>(null)
+    val otaStatus: StateFlow<OtaStatus?> = _otaStatus.asStateFlow()
+
+    /**
+     * FF0E echoes on their way to the transfer loop.
+     *
+     * Unbounded and never dropping, because the *absence* of movement between
+     * two consecutive echoes is the signal that chunks are being discarded —
+     * conflating them would hide exactly the case the echo exists to report.
+     */
+    private val otaEchoes = Channel<OtaStatus>(Channel.UNLIMITED)
 
     private var notificationJob: Job? = null
     private var setupJob: Job? = null
@@ -126,9 +159,19 @@ class DeviceRepository(
         transport.enableNotifications(CharacteristicUuids.SYSTEM_EVENTS)
         // FF09 carries the accept/reject result for every command we send.
         transport.enableNotifications(CharacteristicUuids.CMD_RESULT)
+        // 0x2A19 notifies on a change of percentage, not on a timer.
+        transport.enableNotifications(CharacteristicUuids.BATTERY_LEVEL)
+        // FF0E's offset echo is the only flow control a firmware transfer has.
+        // Subscribed on connect rather than when an update starts, because an
+        // interrupted transfer stays armed on the device across the reconnect
+        // that follows it.
+        transport.enableNotifications(CharacteristicUuids.OTA_DATA)
 
         Log.d(TAG, "onConnected: reading initial state")
         refreshAll()
+        refreshBatteryLevel()
+        refreshDeviceInformation()
+        seedBatteryPolicyFromEventLog()
         Log.d(TAG, "onConnected: setup complete")
     }
 
@@ -163,8 +206,23 @@ class DeviceRepository(
                                     )
                                 )
                             }
+                            // The policy fires on a crossing only, so this is the
+                            // one chance to learn it — nothing repeats it while
+                            // the pack sits at a level.
+                            SystemEvent.BATTERY_LOW -> setBatteryPolicy(BatteryPolicy.LOW)
+                            SystemEvent.BATTERY_CRITICAL -> setBatteryPolicy(BatteryPolicy.CRITICAL)
+                            SystemEvent.BATTERY_NORMAL -> setBatteryPolicy(BatteryPolicy.NORMAL)
                             else -> Unit
                         }
+                    }
+
+                CharacteristicUuids.BATTERY_LEVEL ->
+                    setBatteryPercent(BatteryLevelParser.parse(update.value))
+
+                CharacteristicUuids.OTA_DATA ->
+                    OtaStatusParser.parse(update.value)?.let { status ->
+                        _otaStatus.value = status
+                        otaEchoes.trySend(status)
                     }
 
                 CharacteristicUuids.CMD_RESULT ->
@@ -241,6 +299,80 @@ class DeviceRepository(
         _deviceState.update { it.copy(systemInfo = parsed) }
     }
 
+    /**
+     * Reads the standard Battery Level characteristic (0x2A19).
+     *
+     * A byte outside 0-100 is the device's unknown sentinel and lands as a null
+     * percentage — which must stay distinguishable from 0 %, because a board with
+     * no sense divider knows nothing about the pack and is not flat.
+     */
+    private suspend fun refreshBatteryLevel() {
+        val data = transport.readCharacteristic(CharacteristicUuids.BATTERY_LEVEL)
+        if (data == null) {
+            Log.w(TAG, "0x2A19 read returned null")
+            return
+        }
+        setBatteryPercent(BatteryLevelParser.parse(data))
+    }
+
+    /**
+     * Recovers the current low-power policy from the FF07 event ring.
+     *
+     * The policy events fire on a threshold crossing only, so a tail that went
+     * critical before this connection existed would otherwise look healthy while
+     * it sat parked and dimmed. The ring's newest battery event is the answer.
+     *
+     * Deliberately *not* re-emitted on [systemEvents]: the ring also holds taps
+     * and stalls from before the app arrived, and replaying those would fire
+     * effects and banners for things that already happened.
+     */
+    private suspend fun seedBatteryPolicyFromEventLog() {
+        val data = transport.readCharacteristic(CharacteristicUuids.SYSTEM_EVENTS) ?: return
+        val policy = SystemEventParser.parseLog(data).mapNotNull(::batteryPolicyOf).lastOrNull()
+        if (policy != null) setBatteryPolicy(policy)
+    }
+
+    /**
+     * Reads the 0x180A Device Information strings. Every field is optional.
+     *
+     * Each is trimmed at the control-character boundary: they carry no length of
+     * their own, so a device that NUL-pads its buffer would otherwise show the
+     * padding as part of its model number.
+     */
+    private suspend fun refreshDeviceInformation() {
+        suspend fun read(uuid: UUID): String? {
+            val raw = transport.readCharacteristic(uuid) ?: return null
+            return raw.toString(Charsets.UTF_8).trim { it <= ' ' }.takeIf { it.isNotEmpty() }
+        }
+
+        val info = DeviceInformation(
+            manufacturer = read(CharacteristicUuids.DIS_MANUFACTURER),
+            modelNumber = read(CharacteristicUuids.DIS_MODEL_NUMBER),
+            firmwareRevision = read(CharacteristicUuids.DIS_FIRMWARE_REV),
+            hardwareRevision = read(CharacteristicUuids.DIS_HARDWARE_REV)
+        )
+        if (info.isEmpty) {
+            Log.w(TAG, "0x180A published nothing readable")
+            return
+        }
+        _deviceState.update { it.copy(deviceInformation = info) }
+    }
+
+    private fun setBatteryPercent(percent: Int?) {
+        _deviceState.update { it.copy(battery = it.battery.copy(percent = percent)) }
+    }
+
+    private fun setBatteryPolicy(policy: BatteryPolicy) {
+        _deviceState.update { it.copy(battery = it.battery.copy(policy = policy)) }
+    }
+
+    private fun batteryPolicyOf(event: SystemEvent): BatteryPolicy? = when (event) {
+        SystemEvent.BATTERY_LOW -> BatteryPolicy.LOW
+        SystemEvent.BATTERY_CRITICAL -> BatteryPolicy.CRITICAL
+        SystemEvent.BATTERY_NORMAL -> BatteryPolicy.NORMAL
+        else -> null
+    }
+
     /** Reads the FF08 profile list (occupancy + names). */
     suspend fun refreshProfiles() {
         val data = transport.readCharacteristic(CharacteristicUuids.PROFILE_MGMT)
@@ -261,6 +393,12 @@ class DeviceRepository(
         // a write in flight can hold for as long as the GATT stack takes to give
         // up on it, and this runs on the connection-state collector.
         scope.launch { ackTracker.abandonAll() }
+        // An echo from the connection that just ended says nothing about the
+        // next one, and a transfer resumed after a reconnect has to establish
+        // where the device is from a fresh echo — not from one that arrived
+        // before it went away.
+        _otaStatus.value = null
+        drainOtaEchoes()
         // Rebuilding from a fresh DeviceState() also resets directModeActive to
         // false, matching the firmware auto-reverting direct mode on disconnect
         // (app_bridge.cpp::app_led_render checks connection state every frame).
@@ -455,6 +593,120 @@ class DeviceRepository(
         }
     }
 
+    // --- Behavior engine (MOT-6) ---
+
+    // Every one of these waits for its answer, and none of them updates the
+    // cached state optimistically. There is nothing to guess: the device has no
+    // read for its behavior table, and everything the app could observe about
+    // the engine — active state, why it changed, whether it is being outranked —
+    // comes back in the FF02 behavior block within a notify period anyway.
+
+    /**
+     * Arms or disarms the engine. Enabling enters the table's idle state, so the
+     * tail lands somewhere known rather than resuming a mood from before.
+     */
+    suspend fun setBehaviorEnabled(enabled: Boolean): AckedWrite =
+        sendCommandAwaitingAck(
+            CharacteristicUuids.MOTION_CMD,
+            MotionCommands.setBehaviorEnabled(enabled)
+        )
+
+    /**
+     * Forces a state for previewing it, ignoring the current state's minimum
+     * dwell. The machine keeps running from there — this is not a hold.
+     */
+    suspend fun forceBehaviorState(stateIndex: Int): AckedWrite =
+        sendCommandAwaitingAck(
+            CharacteristicUuids.MOTION_CMD,
+            MotionCommands.setBehaviorState(stateIndex.toByte())
+        )
+
+    /** Writes one 40-byte state record into the device's table. */
+    suspend fun setBehaviorStateConfig(stateIndex: Int, state: BehaviorStateConfig): AckedWrite =
+        sendCommandAwaitingAck(
+            CharacteristicUuids.MOTION_CMD,
+            MotionCommands.setBehaviorConfig(stateIndex.toByte(), state)
+        )
+
+    /** Writes one 16-byte trigger row into the device's table. */
+    suspend fun setBehaviorTrigger(index: Int, trigger: BehaviorTriggerConfig): AckedWrite =
+        sendCommandAwaitingAck(
+            CharacteristicUuids.MOTION_CMD,
+            MotionCommands.setBehaviorTrigger(index.toByte(), trigger)
+        )
+
+    // --- Keyframe sequences (MOT-8) ---
+
+    /**
+     * Uploads an encoded keyframe sequence to [slot] with the integrity-checked
+     * flow BEGIN(slot, len, crc32) → chunks → FINALIZE(slot), the same shape
+     * [uploadImage] uses on FF03.
+     *
+     * Every step waits for its acknowledgement, and the verdict is carried back
+     * rather than reduced to a boolean: the device checks length, CRC-32 *and*
+     * that the blob parses before it commits, and reports all three as
+     * `BAD_STATE` at FINALIZE. That answer is the reason the handshake exists —
+     * a caller that discarded it would leave the user with a slot that silently
+     * did not change.
+     *
+     * @param onProgress called with 0f..1f after each chunk.
+     */
+    suspend fun uploadSequence(
+        blob: ByteArray,
+        slot: Byte,
+        chunkSize: Int,
+        onProgress: (Float) -> Unit = {}
+    ): SequenceUploadResult {
+        require(chunkSize > 0) { "chunkSize must be positive" }
+        require(blob.isNotEmpty()) { "sequence blob must not be empty" }
+
+        suspend fun step(step: SequenceUploadStep, data: ByteArray): SequenceUploadResult {
+            val outcome = sendCommandAwaitingAck(CharacteristicUuids.MOTION_CMD, data)
+            val result = when {
+                !outcome.written -> SequenceUploadResult.NotWritten(step)
+                outcome.result == null -> SequenceUploadResult.Unanswered(step)
+                !outcome.result.isSuccess ->
+                    SequenceUploadResult.Rejected(step, outcome.result.result)
+                else -> SequenceUploadResult.Success
+            }
+            if (!result.succeeded) Log.w(TAG, "uploadSequence: ${result.message}")
+            return result
+        }
+
+        val begin = step(
+            SequenceUploadStep.BEGIN,
+            MotionCommands.beginSequence(slot, blob.size, Crc32.compute(blob))
+        )
+        if (!begin.succeeded) return begin
+
+        var offset = 0
+        while (offset < blob.size) {
+            val end = minOf(offset + chunkSize, blob.size)
+            val chunk = step(
+                SequenceUploadStep.CHUNK,
+                MotionCommands.uploadSequenceChunk(offset, blob.copyOfRange(offset, end))
+            )
+            if (!chunk.succeeded) return chunk
+            offset = end
+            onProgress(offset.toFloat() / blob.size)
+        }
+
+        return step(SequenceUploadStep.FINALIZE, MotionCommands.finalizeSequence(slot))
+    }
+
+    /**
+     * Points `PATTERN_KEYFRAME` at a stored sequence slot.
+     *
+     * Waits for the answer because an empty slot is refused with `BAD_STATE`,
+     * and the alternative to hearing that is a tail that holds neutral while the
+     * UI claims a sequence is playing.
+     */
+    suspend fun selectSequence(slot: Byte): AckedWrite =
+        sendCommandAwaitingAck(
+            CharacteristicUuids.MOTION_CMD,
+            MotionCommands.selectSequence(slot)
+        )
+
     // --- LED commands ---
 
     suspend fun setLayerEffect(layer: Byte, effectId: Byte, blendMode: Byte) {
@@ -608,6 +860,281 @@ class DeviceRepository(
                 )
             )
         }
+    }
+
+    /**
+     * `0x04` Set the advertised device name (SYS-6).
+     *
+     * Waits for the verdict rather than updating optimistically: the device
+     * refuses an empty or over-long name instead of repairing it, and a name the
+     * tail is not actually advertising is worse than no change at all. The
+     * caller is expected to have checked the length with
+     * [SystemCommands.deviceNameError] first, so a rejection here is news.
+     */
+    suspend fun setDeviceName(name: String): AckedWrite {
+        val outcome = sendCommandAwaitingAck(
+            CharacteristicUuids.SYSTEM_CONFIG,
+            SystemCommands.setDeviceName(name)
+        )
+        if (outcome.accepted) scheduleSystemInfoReconcile()
+        return outcome
+    }
+
+    /**
+     * `0x05` Forget one bonded peer by its index in the FF06 bond list, or every
+     * bond at [Protocol.BOND_INDEX_ALL].
+     *
+     * The answer is the point. This app's copy of the list is up to a second old,
+     * so an index the device no longer has comes back `OUT_OF_RANGE` — and a
+     * caller that assumed success would tell the user they unpaired a phone that
+     * is still bonded and can still drive the tail.
+     */
+    suspend fun forgetBond(index: Byte): AckedWrite {
+        val outcome = sendCommandAwaitingAck(
+            CharacteristicUuids.SYSTEM_CONFIG,
+            SystemCommands.forgetBond(index)
+        )
+        if (outcome.accepted) scheduleSystemInfoReconcile()
+        return outcome
+    }
+
+    /** [forgetBond] with [Protocol.BOND_INDEX_ALL] — drops every bond at once. */
+    suspend fun forgetAllBonds(): AckedWrite = forgetBond(Protocol.BOND_INDEX_ALL)
+
+    /**
+     * The device rebuilds its FF06 read buffer once per second, so an immediate
+     * re-read still returns the pre-command name and bond list.
+     */
+    private fun scheduleSystemInfoReconcile() {
+        scope.launch {
+            delay(PROFILE_RECONCILE_DELAY_MS)
+            refreshSystemInfo()
+        }
+    }
+
+    // --- Firmware update (SYS-2: FF06 control + FF0E data) ---
+
+    /**
+     * Reads the FF0E status echo.
+     *
+     * The echo is readable as well as notified, for the same reason FF09 is: a
+     * notify is best-effort and dropped silently when the device runs out of
+     * mbufs, and losing one here would strand a firmware update rather than cost
+     * a packet. This is also how the app finds a transfer left armed by a
+     * previous session — nothing on either side ages one out.
+     */
+    suspend fun readOtaStatus(): OtaStatus? {
+        val data = transport.readCharacteristic(CharacteristicUuids.OTA_DATA)
+        if (data == null) {
+            Log.w(TAG, "FF0E read returned null")
+            return null
+        }
+        val parsed = OtaStatusParser.parse(data)
+        if (parsed == null) {
+            Log.w(TAG, "FF0E parse failed (${data.size} bytes)")
+            return null
+        }
+        _otaStatus.value = parsed
+        return parsed
+    }
+
+    /** `0x08` BEGIN — arms the transfer. Nothing is erased until the header arrives. */
+    suspend fun beginFirmwareUpdate(
+        totalLength: Int,
+        crc32: Int,
+        version: FirmwareVersion
+    ): AckedWrite = sendCommandAwaitingAck(
+        CharacteristicUuids.SYSTEM_CONFIG,
+        OtaCommands.beginUpdate(totalLength, crc32, version)
+    )
+
+    /** `0x09` FINALIZE — verify, validate and point the bootloader at the new slot. */
+    suspend fun finalizeFirmwareUpdate(): AckedWrite = sendCommandAwaitingAck(
+        CharacteristicUuids.SYSTEM_CONFIG,
+        OtaCommands.finalizeUpdate()
+    )
+
+    /**
+     * `0x0A` ABORT — discards an armed transfer, and after a finalize points the
+     * bootloader back at the running image.
+     *
+     * Always answered `OK`, including when nothing is armed, so this is safe to
+     * send on any give-up path — and it is the only thing that un-arms a device
+     * whose transfer was interrupted.
+     */
+    suspend fun abortFirmwareUpdate(): AckedWrite = sendCommandAwaitingAck(
+        CharacteristicUuids.SYSTEM_CONFIG,
+        OtaCommands.abortUpdate()
+    )
+
+    /**
+     * Installs [image] on the tail: BEGIN, stream on FF0E, FINALIZE.
+     *
+     * [version] is the app's claim about what it is sending, checked by the
+     * device before the slot is erased so that reinstalling the running build
+     * costs one packet. Pass the version read out of the image's own descriptor
+     * ([com.tailapp.ble.protocol.FirmwareImage]); the device checks that
+     * descriptor itself once the header lands, so a wrong claim buys 288 bytes
+     * and not an install.
+     *
+     * @param onProgress called with `(accepted, total)` on every echo that moves
+     *   — the *device's* figure, never the app's write cursor, which runs ahead
+     *   of what is actually in flash.
+     */
+    suspend fun uploadFirmware(
+        image: ByteArray,
+        version: FirmwareVersion,
+        onProgress: (Int, Int) -> Unit = { _, _ -> }
+    ): FirmwareUpdateResult {
+        require(image.isNotEmpty()) { "firmware image must not be empty" }
+
+        // Anything left from a previous transfer would be read as this one's
+        // first echo, and its `accepted` would be a resume point into the wrong
+        // image.
+        drainOtaEchoes()
+
+        val begin = beginFirmwareUpdate(image.size, Crc32.compute(image), version)
+        when {
+            !begin.written -> return FirmwareUpdateResult.NotWritten(OtaStep.BEGIN)
+            begin.result == null -> return FirmwareUpdateResult.Unanswered(OtaStep.BEGIN)
+            !begin.result.isSuccess ->
+                return FirmwareUpdateResult.Rejected(OtaStep.BEGIN, begin.result.result)
+        }
+
+        return streamFirmware(image, startAt = 0, onProgress = onProgress)
+    }
+
+    /**
+     * Carries on a transfer the device is still holding, from the offset it
+     * echoes rather than from wherever this app thought it had got to.
+     *
+     * That distinction is the entire point of the echo. `accepted` is the number
+     * of bytes safely in flash *and* the only offset the device will take next,
+     * so a resume that trusted the app's own cursor would send bytes into a gap
+     * and have every one of them discarded.
+     *
+     * @return null when there is nothing to resume — no armed transfer, or one
+     *   whose declared length does not match [image].
+     */
+    suspend fun resumeFirmwareUpdate(
+        image: ByteArray,
+        onProgress: (Int, Int) -> Unit = { _, _ -> }
+    ): FirmwareUpdateResult? {
+        drainOtaEchoes()
+        val status = readOtaStatus() ?: return null
+        if (status.state != OtaTransferState.RECEIVING) return null
+        if (status.accepted < 0 || status.accepted > image.size) return null
+        onProgress(status.accepted, image.size)
+        return streamFirmware(image, startAt = status.accepted, onProgress = onProgress)
+    }
+
+    /**
+     * Streams FF0E chunks and finalizes, running at most
+     * [OtaTransferPolicy.windowBytes] ahead of the last echoed offset.
+     *
+     * There is no per-chunk acknowledgement to lose and no `BUSY` to hear — FF0E
+     * is write-without-response — so the offset echo is the whole recovery
+     * mechanism: a chunk at any offset other than `accepted` is discarded and
+     * answered with a resume point. Two things follow, and both are load-bearing
+     * below. An echo whose `accepted` is unchanged since the previous one means
+     * everything sent since was thrown away, so the write cursor rewinds to it;
+     * and an echo whose `accepted` has run *past* the cursor means those bytes
+     * are already burned into flash, so the cursor jumps forward rather than
+     * resending them into a rejection.
+     */
+    private suspend fun streamFirmware(
+        image: ByteArray,
+        startAt: Int,
+        onProgress: (Int, Int) -> Unit
+    ): FirmwareUpdateResult {
+        val total = image.size
+        val maxPayload = OtaDataFrame.maxPayload(negotiatedMtu.value)
+
+        var accepted = startAt
+        var cursor = startAt
+        var noProgressEchoes = 0
+
+        // Applies one echo. Returns a result to stop on, or null to carry on.
+        fun applyEcho(echo: OtaStatus): FirmwareUpdateResult? {
+            if (echo.state == OtaTransferState.ERROR) {
+                val rejected =
+                    FirmwareUpdateResult.Rejected(OtaStep.TRANSFER, echo.result, echo.state)
+                Log.w(TAG, "uploadFirmware: ${rejected.message}")
+                return rejected
+            }
+            val previous = accepted
+            accepted = echo.accepted
+            if (accepted > cursor || accepted < previous) cursor = accepted
+            if (accepted != previous) onProgress(accepted, total)
+            return null
+        }
+
+        try {
+            while (accepted < total) {
+                if (_deviceState.value.connectionState != ConnectionState.CONNECTED) {
+                    return FirmwareUpdateResult.NotWritten(OtaStep.TRANSFER)
+                }
+
+                val pending = otaEchoes.tryReceive().getOrNull()
+                if (pending != null) {
+                    applyEcho(pending)?.let { return it }
+                    continue
+                }
+
+                if (cursor < total && cursor - accepted < otaPolicy.windowBytes) {
+                    val length = minOf(maxPayload, total - cursor)
+                    transport.writeWithoutResponse(
+                        CharacteristicUuids.OTA_DATA,
+                        OtaDataFrame.build(cursor, image, cursor, length)
+                    )
+                    cursor += length
+                    continue
+                }
+
+                // Nothing may be sent until the device speaks: either the window
+                // is full or every byte is already on the air.
+                val before = accepted
+                val echo = withTimeoutOrNull(otaPolicy.echoTimeoutMs) { otaEchoes.receive() }
+                    ?: readOtaStatus()
+                    ?: return FirmwareUpdateResult.Unanswered(OtaStep.TRANSFER)
+                applyEcho(echo)?.let { return it }
+
+                if (accepted == before) {
+                    // The device did not move, so everything sent past `accepted`
+                    // was discarded. Resume from what it echoed.
+                    cursor = accepted
+                    if (++noProgressEchoes >= otaPolicy.stallAttempts) {
+                        return FirmwareUpdateResult.Stalled(accepted, total)
+                    }
+                } else {
+                    noProgressEchoes = 0
+                }
+            }
+
+            val finalize = finalizeFirmwareUpdate()
+            return when {
+                !finalize.written -> FirmwareUpdateResult.NotWritten(OtaStep.FINALIZE)
+                finalize.result == null -> FirmwareUpdateResult.Unanswered(OtaStep.FINALIZE)
+                finalize.result.isSuccess -> FirmwareUpdateResult.Installed
+                // BAD_STATE is two different failures — short, which stays armed
+                // and resumable, and a checksum mismatch, which does not. Only
+                // the FF0E state tells them apart.
+                else -> FirmwareUpdateResult.Rejected(
+                    OtaStep.FINALIZE,
+                    finalize.result.result,
+                    readOtaStatus()?.state
+                ).also { Log.w(TAG, "uploadFirmware: ${it.message}") }
+            }
+        } catch (cancellation: CancellationException) {
+            // A cancelled transfer that said nothing would leave the tail armed
+            // with a partial image for the rest of its uptime.
+            withContext(NonCancellable) { abortFirmwareUpdate() }
+            throw cancellation
+        }
+    }
+
+    private fun drainOtaEchoes() {
+        while (otaEchoes.tryReceive().isSuccess) { /* discard */ }
     }
 
     // --- FFT stream ---

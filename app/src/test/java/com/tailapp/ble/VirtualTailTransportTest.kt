@@ -1,11 +1,15 @@
 package com.tailapp.ble
 
+import com.tailapp.ble.protocol.BatteryLevelParser
 import com.tailapp.ble.protocol.CharacteristicUuids
 import com.tailapp.ble.protocol.LedCommands
 import com.tailapp.ble.protocol.LedStateParser
 import com.tailapp.ble.protocol.MotionStateParser
 import com.tailapp.ble.protocol.ProfileListParser
+import com.tailapp.ble.protocol.Protocol
 import com.tailapp.ble.protocol.SystemCommands
+import com.tailapp.ble.protocol.SystemEvent
+import com.tailapp.ble.protocol.SystemEventParser
 import com.tailapp.ble.protocol.SystemInfoParser
 import com.tailapp.model.Capabilities
 import kotlinx.coroutines.CoroutineScope
@@ -131,6 +135,108 @@ class VirtualTailTransportTest {
 
         val profiles = ProfileListParser.parse(tail.readCharacteristic(CharacteristicUuids.PROFILE_MGMT)!!)
         assertTrue("slot 0 should be occupied", profiles[0].occupied)
+        job.cancel()
+    }
+
+    @Test
+    fun `the identity block round-trips through the FF06 read`() = runTest {
+        val tail = connected()
+
+        val before = SystemInfoParser.parse(tail.readCharacteristic(CharacteristicUuids.SYSTEM_CONFIG)!!)!!
+        assertEquals("unnamed until told otherwise", "", before.deviceName)
+        assertEquals(2, before.bonds!!.size)
+
+        tail.writeCharacteristic(CharacteristicUuids.SYSTEM_CONFIG, SystemCommands.setDeviceName("Foxtail"))
+
+        val after = SystemInfoParser.parse(tail.readCharacteristic(CharacteristicUuids.SYSTEM_CONFIG)!!)!!
+        assertEquals("Foxtail", after.deviceName)
+    }
+
+    @Test
+    fun `an over-long name is refused rather than truncated`() = runTest {
+        val tail = connected()
+        var lastAck: ByteArray? = null
+        val job = CoroutineScope(Dispatchers.Unconfined).launch {
+            tail.characteristicUpdate.collect {
+                if (it.uuid == CharacteristicUuids.CMD_RESULT) lastAck = it.value
+            }
+        }
+
+        // Built by hand: SystemCommands.setDeviceName refuses to build this at
+        // all, which is the app-side half of the same rule.
+        val tooLong = byteArrayOf(0x04) + "a".repeat(Protocol.MAX_DEVICE_NAME_LEN + 1).toByteArray()
+        tail.writeCharacteristic(CharacteristicUuids.SYSTEM_CONFIG, tooLong)
+
+        assertEquals("OUT_OF_RANGE", 0x04.toByte(), lastAck!![2])
+        val info = SystemInfoParser.parse(tail.readCharacteristic(CharacteristicUuids.SYSTEM_CONFIG)!!)!!
+        assertEquals("the name must not have changed", "", info.deviceName)
+        job.cancel()
+    }
+
+    @Test
+    fun `forgetting a bond past the end is rejected, not a no-op`() = runTest {
+        val tail = connected()
+        var lastAck: ByteArray? = null
+        val job = CoroutineScope(Dispatchers.Unconfined).launch {
+            tail.characteristicUpdate.collect {
+                if (it.uuid == CharacteristicUuids.CMD_RESULT) lastAck = it.value
+            }
+        }
+
+        tail.writeCharacteristic(CharacteristicUuids.SYSTEM_CONFIG, SystemCommands.forgetBond(0))
+        assertEquals("OK", 0x00.toByte(), lastAck!![2])
+        assertEquals(
+            1,
+            SystemInfoParser.parse(tail.readCharacteristic(CharacteristicUuids.SYSTEM_CONFIG)!!)!!.bonds!!.size
+        )
+
+        // The app's copy of the list can be stale, so an index the device no
+        // longer has must come back as a refusal.
+        tail.writeCharacteristic(CharacteristicUuids.SYSTEM_CONFIG, SystemCommands.forgetBond(4))
+        assertEquals("OUT_OF_RANGE", 0x04.toByte(), lastAck!![2])
+
+        tail.writeCharacteristic(CharacteristicUuids.SYSTEM_CONFIG, SystemCommands.forgetAllBonds())
+        assertTrue(
+            SystemInfoParser.parse(tail.readCharacteristic(CharacteristicUuids.SYSTEM_CONFIG)!!)!!
+                .bonds!!.isEmpty()
+        )
+        job.cancel()
+    }
+
+    @Test
+    fun `the battery level is fixed rather than draining`() = runTest {
+        val tail = connected()
+
+        val first = tail.readCharacteristic(CharacteristicUuids.BATTERY_LEVEL)!!
+        repeat(5) { tail.readCharacteristic(CharacteristicUuids.BATTERY_LEVEL) }
+        val later = tail.readCharacteristic(CharacteristicUuids.BATTERY_LEVEL)!!
+
+        // A simulator that discharged would engage the low-battery policy in the
+        // middle of tests that have nothing to do with the battery.
+        assertEquals(first[0], later[0])
+        assertEquals(78, BatteryLevelParser.parse(first))
+    }
+
+    @Test
+    fun `a simulated battery crossing notifies and lands in the readable ring`() = runTest {
+        val tail = connected()
+        val events = mutableListOf<Byte>()
+        val job = CoroutineScope(Dispatchers.Unconfined).launch {
+            tail.characteristicUpdate.collect {
+                if (it.uuid == CharacteristicUuids.SYSTEM_EVENTS) events.add(it.value[0])
+            }
+        }
+
+        tail.simulateBatteryPolicy(SystemEvent.BATTERY_CRITICAL)
+
+        assertEquals(listOf(SystemEvent.BATTERY_CRITICAL.code), events)
+        assertEquals(
+            listOf(SystemEvent.BATTERY_CRITICAL),
+            SystemEventParser.parseLog(tail.readCharacteristic(CharacteristicUuids.SYSTEM_EVENTS)!!)
+        )
+        // The percentage is unchanged: the event is a policy crossing, not a
+        // reading.
+        assertEquals(78, BatteryLevelParser.parse(tail.readCharacteristic(CharacteristicUuids.BATTERY_LEVEL)!!))
         job.cancel()
     }
 

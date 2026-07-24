@@ -12,15 +12,21 @@ import androidx.navigation.navArgument
 import com.tailapp.di.AppContainer
 import com.tailapp.ui.screen.AudioConfigScreen
 import com.tailapp.ui.screen.BeatLightScreen
+import com.tailapp.ui.screen.BehaviorConfigScreen
 import com.tailapp.ui.screen.DeviceOverviewScreen
 import com.tailapp.ui.screen.EffectComposerScreen
+import com.tailapp.ui.screen.FirmwareUpdateScreen
+import com.tailapp.ui.screen.KeyframeEditorScreen
 import com.tailapp.ui.screen.LedConfigScreen
 import com.tailapp.ui.screen.MotionConfigScreen
 import com.tailapp.ui.screen.ScanScreen
 import com.tailapp.viewmodel.AudioConfigViewModel
 import com.tailapp.viewmodel.BeatLightViewModel
+import com.tailapp.viewmodel.BehaviorConfigViewModel
 import com.tailapp.viewmodel.DeviceOverviewViewModel
 import com.tailapp.viewmodel.EffectComposerViewModel
+import com.tailapp.viewmodel.FirmwareUpdateViewModel
+import com.tailapp.viewmodel.KeyframeEditorViewModel
 import com.tailapp.viewmodel.LedConfigViewModel
 import com.tailapp.viewmodel.MotionConfigViewModel
 import com.tailapp.viewmodel.ScanViewModel
@@ -60,6 +66,7 @@ fun TailAppNavHost(
                 onNavigateToMotion = { navController.navigate(NavRoutes.MotionConfig.create(address)) },
                 onNavigateToAudio = { navController.navigate(NavRoutes.AudioConfig.create(address)) },
                 onNavigateToBeatLight = { navController.navigate(NavRoutes.BeatLight.create(address)) },
+                onNavigateToFirmware = { navController.navigate(NavRoutes.FirmwareUpdate.create(address)) },
                 onDisconnected = {
                     navController.popBackStack(NavRoutes.Scan.route, inclusive = false)
                 }
@@ -69,11 +76,43 @@ fun TailAppNavHost(
         composable(
             route = NavRoutes.MotionConfig.route,
             arguments = listOf(navArgument("address") { type = NavType.StringType })
-        ) {
+        ) { backStackEntry ->
+            val address = NavRoutes.decodeAddress(
+                backStackEntry.arguments?.getString("address")
+            ) ?: return@composable
             val vm: MotionConfigViewModel = viewModel(factory = factory {
                 MotionConfigViewModel(container.deviceRepository)
             })
-            MotionConfigScreen(viewModel = vm, onBack = { navController.popBackStack() })
+            MotionConfigScreen(
+                viewModel = vm,
+                onEditKeyframes = {
+                    navController.navigate(NavRoutes.KeyframeEditor.create(address))
+                },
+                onEditBehavior = {
+                    navController.navigate(NavRoutes.BehaviorConfig.create(address))
+                },
+                onBack = { navController.popBackStack() }
+            )
+        }
+
+        composable(
+            route = NavRoutes.BehaviorConfig.route,
+            arguments = listOf(navArgument("address") { type = NavType.StringType })
+        ) {
+            val vm: BehaviorConfigViewModel = viewModel(factory = factory {
+                BehaviorConfigViewModel(container.deviceRepository, container.behaviorTableStore)
+            })
+            BehaviorConfigScreen(viewModel = vm, onBack = { navController.popBackStack() })
+        }
+
+        composable(
+            route = NavRoutes.KeyframeEditor.route,
+            arguments = listOf(navArgument("address") { type = NavType.StringType })
+        ) {
+            val vm: KeyframeEditorViewModel = viewModel(factory = factory {
+                KeyframeEditorViewModel(container.deviceRepository)
+            })
+            KeyframeEditorScreen(viewModel = vm, onBack = { navController.popBackStack() })
         }
 
         composable(
@@ -138,6 +177,16 @@ fun TailAppNavHost(
                 )
             })
             EffectComposerScreen(viewModel = vm, onBack = { navController.popBackStack() })
+        }
+
+        composable(
+            route = NavRoutes.FirmwareUpdate.route,
+            arguments = listOf(navArgument("address") { type = NavType.StringType })
+        ) {
+            val vm: FirmwareUpdateViewModel = viewModel(factory = factory {
+                FirmwareUpdateViewModel(container.deviceRepository)
+            })
+            FirmwareUpdateScreen(viewModel = vm, onBack = { navController.popBackStack() })
         }
     }
 }

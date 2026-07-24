@@ -19,6 +19,7 @@ import com.tailapp.genre.OnnxGenreClassifier
 import com.tailapp.lighting.CompositeLightingOutput
 import com.tailapp.lighting.PreviewLightingOutput
 import com.tailapp.lighting.TailDirectLedOutput
+import com.tailapp.repository.BehaviorTableStore
 import com.tailapp.repository.DeviceRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -49,6 +50,15 @@ class AppContainer(context: Context) {
     val deviceRepository = DeviceRepository(bleTransport, applicationScope)
     val fftStreamManager = FftStreamManager(context, deviceRepository, applicationScope)
     val audioPrefs: SharedPreferences = context.getSharedPreferences("audio_config", Context.MODE_PRIVATE)
+
+    /**
+     * The behavior table the app last wrote to a tail. Its own preferences file
+     * because it is device configuration rather than app calibration — and it
+     * has to be kept at all only because the firmware publishes no read for it.
+     */
+    val behaviorTableStore = BehaviorTableStore(
+        context.getSharedPreferences("behavior_config", Context.MODE_PRIVATE)
+    )
 
     // --- BeatLight: beat/drop-reactive lighting ---
 

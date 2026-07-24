@@ -238,4 +238,129 @@ class SystemInfoParserTest {
         assertNull(info.motion)
         assertFalse(info.motorsStalled)
     }
+
+    // ── identity block: device name + bonds (SYS-6) ─────────────────
+
+    @Test
+    fun `parses the device name and bond list from the end of the payload`() {
+        val payload = FirmwarePayloads.systemInfo(
+            deviceName = "Foxtail",
+            bonds = listOf(
+                FirmwarePayloads.BondRecord(
+                    addressType = 1,
+                    address = listOf(0x11, 0x22, 0x33, 0x44, 0x55, 0x66)
+                ),
+                FirmwarePayloads.BondRecord(
+                    addressType = 0,
+                    address = listOf(0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F)
+                )
+            )
+        )
+        val info = requireNotNull(SystemInfoParser.parse(payload))
+
+        assertEquals("Foxtail", info.deviceName)
+        val bonds = requireNotNull(info.bonds)
+        assertEquals(2, bonds.size)
+
+        // NimBLE hands out ble_addr_t.val least-significant byte first, so the
+        // displayed address is the reverse of the wire order.
+        assertEquals(0, bonds[0].index)
+        assertEquals(1, bonds[0].addressType)
+        assertEquals("random", bonds[0].addressTypeName)
+        assertEquals("66:55:44:33:22:11", bonds[0].address)
+
+        assertEquals(1, bonds[1].index)
+        assertEquals(0, bonds[1].addressType)
+        assertEquals("public", bonds[1].addressTypeName)
+        assertEquals("0F:0E:0D:0C:0B:0A", bonds[1].address)
+    }
+
+    @Test
+    fun `the identity block sits exactly where the device puts it`() {
+        // Pin the arithmetic rather than a magic size: the block is only findable
+        // by walking the four blocks the app does not model, so a wrong length
+        // for any of them would move the bond list without anything noticing.
+        val caps = Capabilities.DEFAULT
+        val upToMotion = 5 + 4 * 16 + 1 + 2 * 2 +
+            (3 + caps.patternIds.size + caps.effectIds.size + caps.blendModeIds.size + 5) +
+            (1 + 4 * 13)
+        val unmodelled = (4 * 4 + 6) + 8 + (2 * 5) + 14
+        val identity = 1 + "Foxtail".toByteArray(Charsets.UTF_8).size + 1 + 2 * 7
+
+        assertEquals(
+            upToMotion + unmodelled + identity,
+            FirmwarePayloads.systemInfo(
+                deviceName = "Foxtail",
+                bonds = List(2) { FirmwarePayloads.BondRecord() }
+            ).size
+        )
+    }
+
+    @Test
+    fun `an empty name means the firmware default, not an absent block`() {
+        // The device stores a zero-length name to mean "advertise the built-in
+        // name". That is a real answer and must not read as "not reported".
+        val info = requireNotNull(
+            SystemInfoParser.parse(FirmwarePayloads.systemInfo(deviceName = ""))
+        )
+        assertEquals("", info.deviceName)
+        assertEquals(emptyList<Any>(), info.bonds)
+    }
+
+    @Test
+    fun `no bonds and no bond block are different answers`() {
+        val none = requireNotNull(
+            SystemInfoParser.parse(FirmwarePayloads.systemInfo(deviceName = "Tail"))
+        )
+        assertEquals(emptyList<Any>(), none.bonds)
+
+        // Firmware that predates SYS-6 publishes nothing here. Reporting that as
+        // "no phone is paired" would be a claim the device never made.
+        val absent = requireNotNull(SystemInfoParser.parse(FirmwarePayloads.systemInfo()))
+        assertNull(absent.bonds)
+        assertNull(absent.deviceName)
+    }
+
+    @Test
+    fun `an identity block that does not fit exactly is dropped, not guessed`() {
+        // Getting to the block means skipping four blocks by their exact lengths,
+        // so a misalignment would otherwise invent bonded peers out of somebody
+        // else's floats. Requiring an exact fit is what makes that impossible.
+        val full = FirmwarePayloads.systemInfo(
+            deviceName = "Foxtail",
+            bonds = List(2) { FirmwarePayloads.BondRecord() }
+        )
+
+        val short = requireNotNull(SystemInfoParser.parse(full.copyOf(full.size - 1)))
+        assertNull(short.bonds)
+        assertNull(short.deviceName)
+
+        val long = requireNotNull(SystemInfoParser.parse(full + byteArrayOf(0x00)))
+        assertNull(long.bonds)
+        assertNull(long.deviceName)
+
+        // Everything before it still parsed; only the block that did not add up
+        // was discarded.
+        assertNotNull(short.capabilities)
+        assertNotNull(short.motion)
+    }
+
+    @Test
+    fun `a bond count past the device's slot limit is rejected`() {
+        val payload = FirmwarePayloads.systemInfo(
+            deviceName = "Tail",
+            bonds = List(Protocol.MAX_BOND_SLOTS + 1) { FirmwarePayloads.BondRecord() }
+        )
+        val info = requireNotNull(SystemInfoParser.parse(payload))
+        assertNull(info.bonds)
+    }
+
+    @Test
+    fun `the longest name the device accepts still parses`() {
+        val name = "a".repeat(Protocol.MAX_DEVICE_NAME_LEN)
+        val info = requireNotNull(
+            SystemInfoParser.parse(FirmwarePayloads.systemInfo(deviceName = name))
+        )
+        assertEquals(name, info.deviceName)
+    }
 }

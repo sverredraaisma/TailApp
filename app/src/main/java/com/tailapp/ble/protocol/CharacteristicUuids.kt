@@ -24,6 +24,16 @@ object CharacteristicUuids {
      */
     val MOTION_TARGET: UUID   = UUID.fromString("0000FF0B-0000-1000-8000-00805F9B34FB")
 
+    /**
+     * OTA firmware image in, offset echo out (SYS-2).
+     *
+     * Both directions on one characteristic: write-without-response for the
+     * image bytes, read + notify for the `accepted` echo that is the transfer's
+     * only flow control. Control — begin, finalize, abort — is on
+     * [SYSTEM_CONFIG]; FF0E carries nothing but bytes and offsets.
+     */
+    val OTA_DATA: UUID        = UUID.fromString("0000FF0E-0000-1000-8000-00805F9B34FB")
+
     val CCCD: UUID = UUID.fromString("00002902-0000-1000-8000-00805F9B34FB")
 
     /**

@@ -97,6 +97,18 @@ enum class MotionPattern(val id: Byte, val displayName: String, val params: List
             ParamMetadata(1, "Thump amplitude", 20f, 0f, 60f, "°"),
             ParamMetadata(2, "Sharpness", 6f, 1f, 20f)
         )
+    ),
+
+    /**
+     * Replays the uploaded sequence in the slot `MCMD_SELECT_SEQUENCE` chose
+     * (MOT-8). Playback rate is its only parameter: the poses and whether the
+     * sequence loops come from the blob, and a slider that could contradict the
+     * authored animation would be a second source of truth for it.
+     */
+    KEYFRAME(
+        0x0A, "Keyframe", listOf(
+            ParamMetadata(0, "Speed", 1f, 0.05f, 8f, "x")
+        )
     );
 
     companion object {
@@ -114,7 +126,17 @@ data class MotionState(
     val xAxisMin: Float,
     val xAxisMax: Float,
     val yAxisMin: Float,
-    val yAxisMax: Float
+    val yAxisMax: Float,
+    /**
+     * The behavior engine's live state (MOT-6). Null on firmware that does not
+     * append the block — which must not read as "the engine is off", since the
+     * block says that with its own sentinel.
+     *
+     * [activePatternId] stays the *selected* pattern even while the engine is
+     * driving; what is actually on the motors is
+     * [BehaviorRuntime.drivingPatternId].
+     */
+    val behavior: BehaviorRuntime? = null
 ) {
     val activePattern: MotionPattern? get() = MotionPattern.fromId(activePatternId)
 }

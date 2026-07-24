@@ -6,6 +6,7 @@ import com.tailapp.ble.protocol.CommandResultCode
 import com.tailapp.ble.protocol.Crc32
 import com.tailapp.ble.protocol.Protocol
 import com.tailapp.ble.protocol.SystemEvent
+import com.tailapp.model.BatteryPolicy
 import com.tailapp.model.Capabilities
 import com.tailapp.model.LedEffect
 import com.tailapp.testutil.FakeBleTransport
@@ -93,7 +94,12 @@ class DeviceRepositoryTest {
                 CharacteristicUuids.MOTION_STATE,
                 CharacteristicUuids.LED_STATE,
                 CharacteristicUuids.SYSTEM_EVENTS,
-                CharacteristicUuids.CMD_RESULT
+                CharacteristicUuids.CMD_RESULT,
+                CharacteristicUuids.BATTERY_LEVEL,
+                // FF0E notifies the OTA offset echo, the transfer's only flow
+                // control, so the subscription is live for the whole session
+                // rather than opened per update.
+                CharacteristicUuids.OTA_DATA
             ),
             transport.enabledNotifications
         )
@@ -823,5 +829,208 @@ class DeviceRepositoryTest {
         // Nothing to update, and inventing a motion block would claim limits the
         // device never reported.
         assertNull(repository.deviceState.value.systemInfo?.motion)
+    }
+
+    // ── Battery, identity and bonds (A5-2) ─────────────────────────
+
+    @Test
+    fun `connect reads the battery level and the device information strings`() = runTest {
+        val transport = FakeBleTransport()
+        val repository = connected(transport) {
+            seedDefaultReads()
+            readResponses[CharacteristicUuids.BATTERY_LEVEL] = FirmwarePayloads.batteryLevel(78)
+            readResponses[CharacteristicUuids.DIS_MANUFACTURER] = "TailWorks".toByteArray()
+            readResponses[CharacteristicUuids.DIS_MODEL_NUMBER] = "TC-1".toByteArray()
+            readResponses[CharacteristicUuids.DIS_FIRMWARE_REV] = "1.0.0".toByteArray()
+            readResponses[CharacteristicUuids.DIS_HARDWARE_REV] = "revB".toByteArray()
+        }
+
+        val state = repository.deviceState.value
+        assertEquals(78, state.battery.percent)
+        assertTrue(state.battery.isKnown)
+        val info = requireNotNull(state.deviceInformation)
+        assertEquals("TailWorks", info.manufacturer)
+        assertEquals("TC-1", info.modelNumber)
+        assertEquals("1.0.0", info.firmwareRevision)
+        assertEquals("revB", info.hardwareRevision)
+    }
+
+    @Test
+    fun `an unknown battery level stays distinguishable from a flat pack`() = runTest {
+        val transport = FakeBleTransport()
+        val unknown = connected(transport) {
+            seedDefaultReads()
+            readResponses[CharacteristicUuids.BATTERY_LEVEL] = FirmwarePayloads.batteryLevel(null)
+        }
+        assertNull(unknown.deviceState.value.battery.percent)
+        assertFalse(unknown.deviceState.value.battery.isKnown)
+        cancelRepositoryScope()
+
+        val flatTransport = FakeBleTransport()
+        val flat = connected(flatTransport) {
+            seedDefaultReads()
+            readResponses[CharacteristicUuids.BATTERY_LEVEL] = FirmwarePayloads.batteryLevel(0)
+        }
+        // A board with no sense divider and a pack about to die must never render
+        // the same way, which is the whole reason 0xFF exists.
+        assertEquals(0, flat.deviceState.value.battery.percent)
+        assertTrue(flat.deviceState.value.battery.isKnown)
+    }
+
+    @Test
+    fun `battery level notifications update the cached percentage`() = runTest {
+        val transport = FakeBleTransport()
+        val repository = connected(transport) {
+            seedDefaultReads()
+            readResponses[CharacteristicUuids.BATTERY_LEVEL] = FirmwarePayloads.batteryLevel(78)
+        }
+
+        transport.notify(CharacteristicUuids.BATTERY_LEVEL, FirmwarePayloads.batteryLevel(41))
+        advanceUntilIdle()
+        assertEquals(41, repository.deviceState.value.battery.percent)
+
+        transport.notify(CharacteristicUuids.BATTERY_LEVEL, FirmwarePayloads.batteryLevel(null))
+        advanceUntilIdle()
+        assertNull(repository.deviceState.value.battery.percent)
+    }
+
+    @Test
+    fun `the battery policy events drive the policy state`() = runTest {
+        val transport = FakeBleTransport()
+        val repository = connected(transport)
+        assertNull(repository.deviceState.value.battery.policy)
+
+        transport.notify(
+            CharacteristicUuids.SYSTEM_EVENTS,
+            byteArrayOf(SystemEvent.BATTERY_LOW.code)
+        )
+        advanceUntilIdle()
+        assertEquals(BatteryPolicy.LOW, repository.deviceState.value.battery.policy)
+
+        transport.notify(
+            CharacteristicUuids.SYSTEM_EVENTS,
+            byteArrayOf(SystemEvent.BATTERY_CRITICAL.code)
+        )
+        advanceUntilIdle()
+        assertEquals(BatteryPolicy.CRITICAL, repository.deviceState.value.battery.policy)
+        assertTrue(repository.deviceState.value.battery.isDerated)
+
+        transport.notify(
+            CharacteristicUuids.SYSTEM_EVENTS,
+            byteArrayOf(SystemEvent.BATTERY_NORMAL.code)
+        )
+        advanceUntilIdle()
+        assertEquals(BatteryPolicy.NORMAL, repository.deviceState.value.battery.policy)
+        assertFalse(repository.deviceState.value.battery.isDerated)
+    }
+
+    @Test
+    fun `the policy is recovered from the event ring on connect`() = runTest {
+        val transport = FakeBleTransport()
+        val repository = connected(transport) {
+            seedDefaultReads()
+            // The crossing happened before this connection existed. Nothing
+            // repeats it, so the ring is the only way to find out.
+            readResponses[CharacteristicUuids.SYSTEM_EVENTS] =
+                FirmwarePayloads.eventLog(listOf(0x01, 0x0D, 0x04, 0x0E))
+        }
+
+        assertEquals(BatteryPolicy.CRITICAL, repository.deviceState.value.battery.policy)
+    }
+
+    @Test
+    fun `the event ring is not replayed as live events`() = runTest {
+        val transport = FakeBleTransport()
+        val events = mutableListOf<SystemEvent>()
+        val repository = connected(transport) {
+            seedDefaultReads()
+            readResponses[CharacteristicUuids.SYSTEM_EVENTS] =
+                FirmwarePayloads.eventLog(listOf(0x01, 0x02, 0x0D))
+        }
+        val collector = repositoryScope!!.launch { repository.systemEvents.collect(events::add) }
+        advanceUntilIdle()
+
+        // Taps and stalls in the ring already happened. Re-emitting them would
+        // fire ripples and banners for history.
+        assertTrue(events.isEmpty())
+        assertEquals(BatteryPolicy.LOW, repository.deviceState.value.battery.policy)
+        collector.cancel()
+    }
+
+    @Test
+    fun `the bond list and device name arrive with the FF06 read`() = runTest {
+        val transport = FakeBleTransport()
+        val repository = connected(transport) {
+            seedDefaultReads(
+                systemInfo = FirmwarePayloads.systemInfo(
+                    deviceName = "Foxtail",
+                    bonds = listOf(FirmwarePayloads.BondRecord())
+                )
+            )
+        }
+
+        val info = requireNotNull(repository.deviceState.value.systemInfo)
+        assertEquals("Foxtail", info.deviceName)
+        assertEquals(1, requireNotNull(info.bonds).size)
+    }
+
+    @Test
+    fun `renaming the device writes the command and reports acceptance`() = runTest {
+        val transport = FakeBleTransport()
+        val repository = connected(transport)
+
+        val outcome = repository.setDeviceName("Foxtail")
+        advanceUntilIdle()
+
+        val write = transport.writes.last { it.uuid == CharacteristicUuids.SYSTEM_CONFIG }
+        assertArrayEquals(byteArrayOf(0x04) + "Foxtail".toByteArray(Charsets.UTF_8), write.data)
+        assertTrue(outcome.accepted)
+    }
+
+    @Test
+    fun `a forget-bond rejection is reported instead of assumed successful`() = runTest {
+        val transport = FakeBleTransport().apply { ackResults.addLast(0x04) } // OUT_OF_RANGE
+        val repository = connected(transport)
+
+        val outcome = repository.forgetBond(3)
+        advanceUntilIdle()
+
+        val write = transport.writes.last { it.uuid == CharacteristicUuids.SYSTEM_CONFIG }
+        assertArrayEquals(byteArrayOf(0x05, 0x03), write.data)
+        // The app's copy of the bond list can be a second old, so an index the
+        // device no longer has is refused — and reporting success would tell the
+        // user they unpaired a phone that can still drive the tail.
+        assertTrue(outcome.rejected)
+        assertFalse(outcome.accepted)
+        assertEquals(CommandResultCode.OUT_OF_RANGE, outcome.result?.result)
+    }
+
+    @Test
+    fun `forgetting all bonds uses the device's own all-bonds index`() = runTest {
+        val transport = FakeBleTransport()
+        val repository = connected(transport)
+
+        repository.forgetAllBonds()
+        advanceUntilIdle()
+
+        val write = transport.writes.last { it.uuid == CharacteristicUuids.SYSTEM_CONFIG }
+        assertArrayEquals(byteArrayOf(0x05, Protocol.BOND_INDEX_ALL), write.data)
+    }
+
+    @Test
+    fun `an accepted bond change re-reads FF06 after the device rebuilds it`() = runTest {
+        val transport = FakeBleTransport()
+        val repository = connected(transport)
+        transport.clearTraffic()
+
+        assertTrue(repository.forgetBond(0).accepted)
+
+        // The device rebuilds its read buffers once a second; an immediate
+        // re-read would return the bond list exactly as it was.
+        assertEquals(0, transport.readCountFor(CharacteristicUuids.SYSTEM_CONFIG))
+
+        advanceTimeBy(DeviceRepository.PROFILE_RECONCILE_DELAY_MS + 1)
+        advanceUntilIdle()
+        assertEquals(1, transport.readCountFor(CharacteristicUuids.SYSTEM_CONFIG))
     }
 }

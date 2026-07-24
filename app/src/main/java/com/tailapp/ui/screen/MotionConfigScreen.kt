@@ -55,6 +55,8 @@ import com.tailapp.viewmodel.MotionConfigViewModel
 @Composable
 fun MotionConfigScreen(
     viewModel: MotionConfigViewModel,
+    onEditKeyframes: () -> Unit,
+    onEditBehavior: () -> Unit,
     onBack: () -> Unit
 ) {
     val state by viewModel.deviceState.collectAsStateWithLifecycle()
@@ -160,8 +162,9 @@ fun MotionConfigScreen(
                     Column(modifier = Modifier.padding(16.dp)) {
                         Text("Manual drive", style = MaterialTheme.typography.titleMedium)
                         Text(
-                            "Drag to steer the tail. It suspends the active pattern while " +
-                                "you hold, and hands back when you let go.",
+                            "Drag to steer the tail. It suspends the active pattern — and " +
+                                "the behavior engine with it — while you hold, and hands " +
+                                "back when you let go.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -280,6 +283,63 @@ fun MotionConfigScreen(
                             }
                         }
                     }
+                }
+            }
+
+            Spacer(Modifier.height(16.dp))
+
+            // Keyframe sequences (MOT-8). Its own screen rather than a card
+            // here: a sequence is authored over minutes, and the four sliders
+            // above are what you reach for while it is playing.
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text("Keyframe sequences", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "Author a timed list of poses and store it on the tail, " +
+                            "for the Keyframe pattern to replay on its own.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedButton(
+                        onClick = onEditKeyframes,
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("Edit sequences") }
+                }
+            }
+
+            Spacer(Modifier.height(16.dp))
+
+            // Behavior engine (MOT-6). It picks the pattern itself, so it
+            // outranks everything on this screen except streamed targets — say
+            // so here, where the pattern chips are, rather than only over there.
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text("Behavior engine", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "Moods the tail chooses between on its own. While it is on it " +
+                            "owns pattern selection: the choice above is stored, and runs " +
+                            "the moment the engine is switched off.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    val behavior = motionState?.behavior
+                    if (behavior != null) {
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            if (behavior.engineEnabled) {
+                                "On · state ${behavior.stateIndex ?: "—"}"
+                            } else {
+                                "Off"
+                            },
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedButton(
+                        onClick = onEditBehavior,
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("Edit behavior") }
                 }
             }
 

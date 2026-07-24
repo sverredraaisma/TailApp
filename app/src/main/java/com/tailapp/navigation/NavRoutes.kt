@@ -23,6 +23,15 @@ sealed class NavRoutes(val route: String) {
     data object EffectComposer : NavRoutes("device/{address}/composer") {
         fun create(address: String) = "device/${URLEncoder.encode(address, "UTF-8")}/composer"
     }
+    data object KeyframeEditor : NavRoutes("device/{address}/keyframes") {
+        fun create(address: String) = "device/${URLEncoder.encode(address, "UTF-8")}/keyframes"
+    }
+    data object BehaviorConfig : NavRoutes("device/{address}/behavior") {
+        fun create(address: String) = "device/${URLEncoder.encode(address, "UTF-8")}/behavior"
+    }
+    data object FirmwareUpdate : NavRoutes("device/{address}/firmware") {
+        fun create(address: String) = "device/${URLEncoder.encode(address, "UTF-8")}/firmware"
+    }
 
     companion object {
         fun decodeAddress(encoded: String?): String? =

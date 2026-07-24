@@ -90,6 +90,111 @@ data class MotionSystemState(
     val limits: List<MotionLimits>
 )
 
+/**
+ * One peer the device has bonded with, from the FF06 bond block (SYS-6).
+ *
+ * [index] is the position in the device's own list and is what
+ * `SCMD_FORGET_BOND` takes — it is not stable across a forget, so it is only
+ * meaningful against the list it came from.
+ */
+data class BondedPeer(
+    val index: Int,
+    /** NimBLE `ble_addr_t.type`: 0 public, 1 random, 2/3 resolvable. */
+    val addressType: Int,
+    /** Colon-separated, most significant byte first — how a phone shows it. */
+    val address: String
+) {
+    val addressTypeName: String
+        get() = when (addressType) {
+            0 -> "public"
+            1 -> "random"
+            2, 3 -> "resolvable"
+            else -> "type $addressType"
+        }
+}
+
+/**
+ * The standard Device Information Service (0x180A) strings.
+ *
+ * The adopted service rather than fields on FF06, so a phone's own Bluetooth
+ * settings and any generic BLE tool render the same identity this screen does.
+ * Every field is individually optional: a device may publish some and not others.
+ */
+data class DeviceInformation(
+    val manufacturer: String? = null,
+    val modelNumber: String? = null,
+    val firmwareRevision: String? = null,
+    val hardwareRevision: String? = null
+) {
+    val isEmpty: Boolean
+        get() = manufacturer == null && modelNumber == null &&
+            firmwareRevision == null && hardwareRevision == null
+}
+
+/**
+ * The low-battery policy the device says it is running (SYS-1).
+ *
+ * There is deliberately no `UNKNOWN` member: the device never reports one. A
+ * board that cannot measure its pack is folded to Normal by the policy — it must
+ * not behave as though it were empty — so "the device did not say" is the null
+ * [BatteryStatus.policy], not a state of its own.
+ */
+enum class BatteryPolicy {
+    NORMAL,
+    LOW,
+    CRITICAL;
+
+    /**
+     * What the firmware actually does at this level, from
+     * `TailFirmware/main/config/config_manager.cpp::apply_battery_policy` and
+     * its shipped defaults. Both derates are runtime overrides: the user's
+     * configured brightness, limits and pattern are untouched and come back on
+     * recovery.
+     */
+    val consequence: String?
+        get() = when (this) {
+            NORMAL -> null
+            LOW ->
+                "Master brightness is capped at 96 of 255 and every motor's velocity and " +
+                    "acceleration limit is halved. Your saved settings are untouched and " +
+                    "come back when the pack recovers."
+            CRITICAL ->
+                "Master brightness is capped at 32 of 255, the tail has been parked at " +
+                    "neutral and the motors released to freewheel. Your saved settings are " +
+                    "untouched; charging restores the pattern and re-energizes the motors."
+        }
+}
+
+/**
+ * Pack state, from the standard Battery Level characteristic (0x2A19) plus the
+ * FF07 policy events.
+ *
+ * The two halves arrive separately on purpose. The percentage is a level; the
+ * policy is what the device *did* about it, and only the device knows its own
+ * thresholds — they are configuration, not constants — so the app never infers
+ * one from the other.
+ */
+data class BatteryStatus(
+    /**
+     * 0-100, or null when the device reports `BATTERY_PERCENT_UNKNOWN`. Unknown
+     * is a real state: a board whose divider is not populated knows nothing about
+     * the pack, and rendering that as 0 % would tell the user their tail is flat.
+     */
+    val percent: Int? = null,
+
+    /**
+     * Null until the device says. The events fire on a threshold crossing only,
+     * so a pack that has sat at Normal since boot has never announced anything —
+     * which is not the same as the policy being off.
+     */
+    val policy: BatteryPolicy? = null
+) {
+    val isKnown: Boolean get() = percent != null
+
+    /** True while the device is derating itself and the user deserves to know why. */
+    val isDerated: Boolean get() = policy == BatteryPolicy.LOW || policy == BatteryPolicy.CRITICAL
+}
+
 data class SystemInfo(
     val protocolVersion: Int,
     val firmwareMajor: Int,
@@ -99,9 +204,33 @@ data class SystemInfo(
     val imus: List<ImuConfig>,
     val capabilities: Capabilities?,
     /** Null on firmware older than protocol v4, which does not publish it. */
-    val motion: MotionSystemState? = null
+    val motion: MotionSystemState? = null,
+    /**
+     * The advertised name (SYS-6). Null when the device published no identity
+     * block at all; empty when it published one and the device is advertising the
+     * firmware's built-in default rather than a chosen name.
+     */
+    val deviceName: String? = null,
+    /** Null when the device published no bond block — not the same as no bonds. */
+    val bonds: List<BondedPeer>? = null,
+
+    /**
+     * The OTA version/rollback block (SYS-2). Null on firmware that cannot be
+     * updated over the air at all, which is why the update screen offers nothing
+     * rather than assuming a running version of 0.0.0.
+     */
+    val ota: OtaInfo? = null
 ) {
     val firmwareVersion: String get() = "$firmwareMajor.$firmwareMinor.$firmwarePatch"
+
+    /**
+     * The version an offered image should be compared against: the running
+     * image's own app descriptor, not the build-time constant at the front of
+     * the FF06 read. After an update the two must agree, and this is the one
+     * that cannot be stale.
+     */
+    val runningFirmwareVersion: FirmwareVersion?
+        get() = ota?.running
 
     /**
      * True only when the device explicitly reports its motors latched off.
@@ -143,7 +272,11 @@ data class DeviceState(
      */
     val directModeActive: Boolean = false,
     /** Most recent FF09 acknowledgement — used to surface rejected commands. */
-    val lastCommandResult: CommandResult? = null
+    val lastCommandResult: CommandResult? = null,
+    /** Pack level (0x2A19) and the low-power policy the device reports (FF07). */
+    val battery: BatteryStatus = BatteryStatus(),
+    /** The 0x180A strings, once read. Null before the first read lands. */
+    val deviceInformation: DeviceInformation? = null
 ) {
     val capabilities: Capabilities get() = systemInfo?.effectiveCapabilities ?: Capabilities.DEFAULT
 }

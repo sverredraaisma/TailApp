@@ -2,6 +2,8 @@ package com.tailapp.ble.protocol
 
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.nio.ByteBuffer
@@ -109,6 +111,37 @@ class CommandBuilderTest {
         assertArrayEquals(byteArrayOf(0x09, 0x00), MotionCommands.enableMotors(false))
     }
 
+    @Test
+    fun `beginSequence is eight bytes with slot, u16 length and u32 crc`() {
+        val cmd = MotionCommands.beginSequence(slot = 3, totalLength = 1544, crc32 = 0x12345678)
+        assertEquals(8, cmd.size)
+        assertEquals(0x0C.toByte(), cmd[0])
+        assertEquals(0x03.toByte(), cmd[1])
+        assertEquals(1544, cmd.u16At(2))
+        assertEquals(0x12345678, cmd.i32At(4))
+    }
+
+    @Test
+    fun `beginSequence keeps the high bit of a large crc`() {
+        val cmd = MotionCommands.beginSequence(slot = 0, totalLength = 20, crc32 = -1)
+        assertEquals(-1, cmd.i32At(4))
+    }
+
+    @Test
+    fun `uploadSequenceChunk prefixes a little-endian u16 offset`() {
+        val payload = byteArrayOf(9, 8, 7)
+        val cmd = MotionCommands.uploadSequenceChunk(offset = 1200, data = payload)
+        assertEquals(0x0D.toByte(), cmd[0])
+        assertEquals(1200, cmd.u16At(1))
+        assertArrayEquals(payload, cmd.copyOfRange(3, cmd.size))
+    }
+
+    @Test
+    fun `finalizeSequence and selectSequence are two bytes`() {
+        assertArrayEquals(byteArrayOf(0x0E, 0x01), MotionCommands.finalizeSequence(1))
+        assertArrayEquals(byteArrayOf(0x0F, 0x02), MotionCommands.selectSequence(2))
+    }
+
     // ── FF03 LED ───────────────────────────────────────────────────
 
     @Test
@@ -197,6 +230,44 @@ class CommandBuilderTest {
         val cmd = SystemCommands.setLedMatrix(List(30) { 4.toByte() }, maxRings = 20)
         assertEquals(20, cmd[1].toInt())
         assertEquals(22, cmd.size)
+    }
+
+    @Test
+    fun `setDeviceName is the command byte then raw UTF-8`() {
+        val cmd = SystemCommands.setDeviceName("Foxtail")
+        assertArrayEquals(byteArrayOf(0x04) + "Foxtail".toByteArray(Charsets.UTF_8), cmd)
+    }
+
+    @Test
+    fun `setDeviceName refuses what the device would refuse`() {
+        // The firmware rejects both rather than repairing either: truncating
+        // would advertise a name the user did not choose, and an empty name
+        // advertises nothing findable at all. Truncating here would hide that.
+        assertEquals(DeviceNameError.TOO_LONG, SystemCommands.deviceNameError("a".repeat(32)))
+        assertEquals(DeviceNameError.EMPTY, SystemCommands.deviceNameError(""))
+        assertNull(SystemCommands.deviceNameError("a".repeat(Protocol.MAX_DEVICE_NAME_LEN)))
+
+        assertThrows(IllegalArgumentException::class.java) {
+            SystemCommands.setDeviceName("a".repeat(Protocol.MAX_DEVICE_NAME_LEN + 1))
+        }
+        assertThrows(IllegalArgumentException::class.java) { SystemCommands.setDeviceName("") }
+    }
+
+    @Test
+    fun `the device name limit is counted in UTF-8 bytes not characters`() {
+        // 8 emoji = 32 UTF-8 bytes, one past the 31-byte limit, while the string
+        // is only 16 UTF-16 chars long.
+        assertEquals(DeviceNameError.TOO_LONG, SystemCommands.deviceNameError("🦊".repeat(8)))
+        assertNull(SystemCommands.deviceNameError("🦊".repeat(7)))
+        assertEquals(29, SystemCommands.setDeviceName("🦊".repeat(7)).size)
+    }
+
+    @Test
+    fun `bond commands are two bytes and all-bonds has its own index`() {
+        assertArrayEquals(byteArrayOf(0x05, 0x02), SystemCommands.forgetBond(2))
+        assertArrayEquals(byteArrayOf(0x05, 0xFF.toByte()), SystemCommands.forgetAllBonds())
+        assertEquals(Protocol.BOND_INDEX_ALL, SystemCommands.forgetAllBonds()[1])
+        assertArrayEquals(byteArrayOf(0x06), SystemCommands.listBonds())
     }
 
     // ── FF08 profiles ──────────────────────────────────────────────

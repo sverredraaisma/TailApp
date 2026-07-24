@@ -2,12 +2,15 @@ package com.tailapp.ble
 
 import android.util.Log
 import com.tailapp.ble.protocol.CharacteristicUuids
+import com.tailapp.ble.protocol.FirmwareImage
 import com.tailapp.ble.protocol.Protocol
 import com.tailapp.ble.protocol.SystemEvent
 import com.tailapp.model.Capabilities
+import com.tailapp.model.FirmwareVersion
 import com.tailapp.model.LayerConfig
 import com.tailapp.model.MotionLimits
 import com.tailapp.model.MotionPattern
+import com.tailapp.model.OtaTransferState
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -18,6 +21,7 @@ import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.UUID
+import java.util.zip.CRC32
 
 /**
  * A [BleTransport] that pretends to be a tail, for testing the app without one.
@@ -74,6 +78,46 @@ class VirtualTailTransport : BleTransport {
     private var outputGamma = true
     private var outputLimitMa = 0
 
+    /** Advertised name (SYS-6). Empty means "advertise the firmware default". */
+    private var deviceName = ""
+
+    /**
+     * Bonded peers, as the FF06 identity block reports them: `[addr_type][addr]`,
+     * least-significant byte first the way NimBLE hands them out.
+     */
+    private val bonds: MutableList<Pair<Int, ByteArray>> = mutableListOf(
+        1 to byteArrayOf(0x11, 0x22, 0x33, 0x44, 0x55, 0x66),
+        0 to byteArrayOf(0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F)
+    )
+
+    /** The FF07 readable ring, oldest first. */
+    private val eventLog: MutableList<Byte> = mutableListOf()
+
+    // --- simulated OTA transfer (mirrors OtaManager) ---
+    //
+    // A firmware update never reaches a real slot here — there is none — but the
+    // whole accept/refuse path is modelled so the app streams against the same
+    // rules a device enforces: the length/CRC/version check at BEGIN, the offset
+    // echo as the only flow control, and a FINALIZE that refuses a transfer that
+    // never completed or whose bytes do not sum to the armed CRC.
+    private var otaState = OtaTransferState.IDLE
+    private var otaTotal = 0
+    private var otaExpectedCrc = 0
+    private var otaAccepted = 0
+    private var otaLastEcho = 0
+    private var otaLastResult = RESULT_OK
+    private val otaCrc = CRC32()
+    private val otaHeader = ByteArrayOutputStream()
+
+    /** Running image's own version, as the FF06 OTA block reports it. */
+    private val otaRunning = intArrayOf(1, 0, 0)
+
+    /** The other slot's version once a finalize stages one, else null. */
+    private var otaOther: FirmwareVersion? = null
+
+    /** The staged image's descriptor version, captured when its header validates. */
+    private var otaStagedVersion: FirmwareVersion? = null
+
     private val profiles = arrayOfNulls<ProfileSnapshot>(Protocol.MAX_PROFILE_SLOTS)
 
     private class ProfileSnapshot(
@@ -111,6 +155,11 @@ class VirtualTailTransport : BleTransport {
         CharacteristicUuids.LED_STATE -> ledStateBytes()
         CharacteristicUuids.SYSTEM_CONFIG -> systemInfoBytes()
         CharacteristicUuids.PROFILE_MGMT -> profileListBytes()
+        CharacteristicUuids.SYSTEM_EVENTS -> eventLogBytes()
+        // FF0E is readable as well as notified, for the same reason FF09 is: a
+        // dropped echo would strand an update, so the app can read the offset
+        // it should resume from.
+        CharacteristicUuids.OTA_DATA -> otaStatusBytes()
         // The standard services, so a simulated tail exercises the same code
         // path a real one does rather than only the FF00 custom service.
         CharacteristicUuids.BATTERY_LEVEL -> byteArrayOf(batteryPercent.toByte())
@@ -136,6 +185,12 @@ class VirtualTailTransport : BleTransport {
     }
 
     override fun writeWithoutResponse(uuid: UUID, data: ByteArray) {
+        // FF0E carries the image itself, unacknowledged like the streams below;
+        // its only answer is the offset echo, emitted from here.
+        if (uuid == CharacteristicUuids.OTA_DATA) {
+            applyOtaData(data)
+            return
+        }
         // FF05 (FFT frames) and FF0A (direct pixels) are fire-and-forget with no
         // ACK. There is no strip to push to; the on-screen preview is the output.
     }
@@ -193,7 +248,21 @@ class VirtualTailTransport : BleTransport {
      */
     fun simulateStall() {
         motorsEnabled = false
-        emit(CharacteristicUuids.SYSTEM_EVENTS, byteArrayOf(SystemEvent.STALL.code))
+        emitEvent(SystemEvent.STALL)
+    }
+
+    /**
+     * Simulates the low-battery policy crossing into [event], the way the
+     * firmware announces it — on the crossing only, and without moving the
+     * reported percentage.
+     *
+     * A hook rather than a discharge model on purpose: the pack level here is
+     * fixed, because a simulator that drained would engage the policy in the
+     * middle of tests that have nothing to do with the battery.
+     */
+    fun simulateBatteryPolicy(event: SystemEvent) {
+        require(event.isBatteryPolicy) { "$event is not a battery policy event" }
+        emitEvent(event)
     }
 
     private fun applyLed(data: ByteArray): Int { return when (data[0].toInt()) {
@@ -285,7 +354,33 @@ class VirtualTailTransport : BleTransport {
             ledsPerRing = (0 until count).map { data[2 + it].toInt() and 0xFF }.toMutableList()
             RESULT_OK
         }
-        else -> RESULT_OK // get-info / get-caps are no-ops; the block is always in the read
+        0x04 -> { // set device name — refused, never truncated, like the firmware
+            if (data.size < 2) return RESULT_BAD_LENGTH
+            if (data.size - 1 > Protocol.MAX_DEVICE_NAME_LEN) return RESULT_OUT_OF_RANGE
+            deviceName = String(data, 1, data.size - 1, Charsets.UTF_8)
+            RESULT_OK
+        }
+        0x05 -> { // forget bond
+            if (data.size < 2) return RESULT_BAD_LENGTH
+            val index = data[1]
+            if (index == Protocol.BOND_INDEX_ALL) {
+                bonds.clear()
+                return RESULT_OK
+            }
+            // An index the device does not have is a rejection, not a no-op: the
+            // app's copy of the list is up to a second old, and a false success
+            // would report a phone as unpaired while it is still bonded.
+            val slot = index.toInt() and 0xFF
+            if (slot !in bonds.indices) return RESULT_OUT_OF_RANGE
+            bonds.removeAt(slot)
+            RESULT_OK
+        }
+        // OTA control (SYS-2). The image data rides FF0E; these three arm, install
+        // and cancel it, and are acknowledged on FF09 like every other command.
+        0x08 -> applyOtaBegin(data)
+        0x09 -> applyOtaFinalize()
+        0x0A -> applyOtaAbort()
+        else -> RESULT_OK // get-info / get-caps / list-bonds are no-ops; the blocks are always in the read
     } }
 
     private fun applyProfile(data: ByteArray): Int {
@@ -310,7 +405,7 @@ class VirtualTailTransport : BleTransport {
                 snapshot.motionParams.copyInto(motionParams)
                 // The device raises CONFIG_CHANGED after a load; the app re-reads
                 // FF02/FF04/FF06 on it, so the whole UI resyncs to the new config.
-                emit(CharacteristicUuids.SYSTEM_EVENTS, byteArrayOf(0x03))
+                emitEvent(SystemEvent.CONFIG_CHANGED)
                 RESULT_OK
             }
             0x04 -> { // delete
@@ -334,6 +429,187 @@ class VirtualTailTransport : BleTransport {
             else -> RESULT_OK
         }
     }
+
+    // --- OTA transfer (mirrors OtaManager) ---
+
+    /**
+     * `0x08` BEGIN. The length/CRC/version claim is checked in the firmware's
+     * order, before any slot is opened, so a doomed image is refused for the
+     * first rule it breaks rather than after a transfer.
+     */
+    private fun applyOtaBegin(data: ByteArray): Int {
+        if (data.size < 12) return RESULT_BAD_LENGTH
+        val total = readU32(data, 1)
+        val expectedCrc = readU32(data, 5)
+        val major = data[9].toInt() and 0xFF
+        val minor = data[10].toInt() and 0xFF
+        val patch = data[11].toInt() and 0xFF
+
+        if (total < Protocol.OTA_IMAGE_HEADER_BYTES) return otaFail(RESULT_OTA_BAD_IMAGE)
+        if (total > Protocol.OTA_SLOT_BYTES) return otaFail(RESULT_OUT_OF_RANGE)
+        // The claimed version is checked before the slot is erased so a pointless
+        // reinstall costs one packet; the descriptor is checked again once the
+        // header lands, which is what catches a claim that was wrong.
+        if (major == otaRunning[0] && minor == otaRunning[1] && patch == otaRunning[2]) {
+            return otaFail(RESULT_OTA_SAME_VERSION)
+        }
+
+        otaState = OtaTransferState.RECEIVING
+        otaTotal = total
+        otaExpectedCrc = expectedCrc
+        otaAccepted = 0
+        otaLastEcho = 0
+        otaLastResult = RESULT_OK
+        otaCrc.reset()
+        otaHeader.reset()
+        otaStagedVersion = null
+        emitOtaStatus()
+        return RESULT_OK
+    }
+
+    /**
+     * FF0E image data: `[offset u32 LE][bytes]`. A chunk at any offset other than
+     * the one echoed, or one that overruns the declared length, is discarded and
+     * answered with the resume point — the offset echo is the whole flow control.
+     */
+    private fun applyOtaData(data: ByteArray) {
+        if (data.size < 4) return
+        val offset = readU32(data, 0)
+        val len = data.size - 4
+
+        if (otaState != OtaTransferState.RECEIVING) {
+            // The tail of an aborted or finished transfer still in flight. Echo so
+            // the sender stops rather than emptying its queue into a dead transfer.
+            emitOtaStatus()
+            return
+        }
+        if (len == 0) return
+        if (offset != otaAccepted || otaAccepted.toLong() + len > otaTotal) {
+            emitOtaStatus()
+            return
+        }
+
+        // Buffer the header until the accept/refuse decision can be made from it.
+        // Nothing is "written" here, but the CRC covers every byte including the
+        // header, exactly as the firmware sums it.
+        if (otaHeader.size() < Protocol.OTA_IMAGE_HEADER_BYTES) {
+            val room = Protocol.OTA_IMAGE_HEADER_BYTES - otaHeader.size()
+            otaHeader.write(data, 4, minOf(room, len))
+            if (otaHeader.size() >= Protocol.OTA_IMAGE_HEADER_BYTES) {
+                val verdict = validateOtaHeader()
+                if (verdict != RESULT_OK) {
+                    otaFail(verdict)
+                    return
+                }
+            }
+        }
+
+        otaCrc.update(data, 4, len)
+        otaAccepted += len
+        if (otaAccepted - otaLastEcho >= Protocol.OTA_ECHO_BYTES || otaAccepted == otaTotal) {
+            emitOtaStatus()
+        }
+    }
+
+    /**
+     * `0x09` FINALIZE. Refuses a transfer that never completed (short, and left
+     * armed so it can resume) or whose bytes do not sum to the armed CRC (corrupt,
+     * and destroyed). Only a full, matching image is marked bootable.
+     */
+    private fun applyOtaFinalize(): Int {
+        if (otaState != OtaTransferState.RECEIVING) {
+            otaLastResult = RESULT_BAD_STATE
+            emitOtaStatus()
+            return RESULT_BAD_STATE
+        }
+        if (otaAccepted != otaTotal) {
+            // Short, not corrupt: every byte is one the app sent, so the transfer
+            // stays RECEIVING and resumable and the echo names where to carry on.
+            otaLastResult = RESULT_BAD_STATE
+            emitOtaStatus()
+            return RESULT_BAD_STATE
+        }
+        if (otaCrc.value.toInt() != otaExpectedCrc) {
+            return otaFail(RESULT_BAD_STATE)
+        }
+
+        otaState = OtaTransferState.READY
+        otaLastResult = RESULT_OK
+        // The staged image now occupies the other slot; a reset would run it. The
+        // running version does not change until that reset, which the simulator
+        // cannot perform — so pending_verify stays 0 here.
+        otaOther = otaStagedVersion ?: FirmwareVersion(otaRunning[0], otaRunning[1], otaRunning[2])
+        emitOtaStatus()
+        return RESULT_OK
+    }
+
+    /** `0x0A` ABORT. Discards an in-flight transfer; always `OK`, even with nothing armed. */
+    private fun applyOtaAbort(): Int {
+        otaState = OtaTransferState.IDLE
+        otaTotal = 0
+        otaAccepted = 0
+        otaLastEcho = 0
+        otaLastResult = RESULT_OK
+        otaCrc.reset()
+        otaHeader.reset()
+        otaStagedVersion = null
+        emitOtaStatus()
+        return RESULT_OK
+    }
+
+    /**
+     * Reads the buffered header with the same offsets the device uses, and turns
+     * the three checks it makes into their result codes: not an application
+     * image, somebody else's project, the version already running.
+     */
+    private fun validateOtaHeader(): Int {
+        val info = FirmwareImage.describe(otaHeader.toByteArray()) ?: return RESULT_OTA_BAD_IMAGE
+        if (info.projectName.isNotEmpty() && info.projectName != FirmwareImage.EXPECTED_PROJECT) {
+            return RESULT_OTA_WRONG_PROJECT
+        }
+        val version = info.version
+        if (version != null &&
+            version.major == otaRunning[0] &&
+            version.minor == otaRunning[1] &&
+            version.patch == otaRunning[2]
+        ) {
+            return RESULT_OTA_SAME_VERSION
+        }
+        otaStagedVersion = version
+        return RESULT_OK
+    }
+
+    private fun otaFail(result: Int): Int {
+        otaState = OtaTransferState.ERROR
+        otaLastResult = result
+        otaAccepted = 0
+        otaCrc.reset()
+        otaHeader.reset()
+        otaStagedVersion = null
+        emitOtaStatus()
+        return result
+    }
+
+    private fun emitOtaStatus() {
+        otaLastEcho = otaAccepted
+        emit(CharacteristicUuids.OTA_DATA, otaStatusBytes())
+    }
+
+    /** FF0E status echo: `[accepted u32 LE][state u8][result u8]`. */
+    private fun otaStatusBytes(): ByteArray = Writer().apply {
+        u8(otaAccepted and 0xFF)
+        u8((otaAccepted shr 8) and 0xFF)
+        u8((otaAccepted shr 16) and 0xFF)
+        u8((otaAccepted shr 24) and 0xFF)
+        u8(otaState.code)
+        u8(otaLastResult)
+    }.toByteArray()
+
+    private fun readU32(data: ByteArray, offset: Int): Int =
+        (data[offset].toInt() and 0xFF) or
+            ((data[offset + 1].toInt() and 0xFF) shl 8) or
+            ((data[offset + 2].toInt() and 0xFF) shl 16) or
+            ((data[offset + 3].toInt() and 0xFF) shl 24)
 
     // --- serialisation (mirrors FirmwarePayloads) ---
 
@@ -399,7 +675,45 @@ class VirtualTailTransport : BleTransport {
             f32(lim.maxVelocity).f32(lim.maxAcceleration).f32(lim.maxJerk)
             u8(lim.stallThreshold)
         }
+        // Blocks nothing on this side models, emitted at their real lengths
+        // because the identity block after them is only findable by walking
+        // them: motion tuning, OTA version/rollback, per-IMU tap, axis mix.
+        repeat(4) { f32(1f) }          // units per deg/s
+        f32(0.5f)                      // gentle scale
+        u8(0).u8(0)                    // keyframe slot, sequence occupancy
+        // OTA version/rollback (SYS-2). The other slot fills in once a finalize
+        // stages an image, which is how "installed — restart to apply" is shown
+        // without the app having to remember it just uploaded something.
+        u8(otaRunning[0]).u8(otaRunning[1]).u8(otaRunning[2])
+        u8(0)                          // pending verify: no reboot in the simulator
+        val other = otaOther
+        bool(other != null)
+        u8(other?.major ?: 0).u8(other?.minor ?: 0).u8(other?.patch ?: 0)
+        repeat(2) { u8(1).u8(40).u8(2).u8(50).u8(0) } // tap: engine, thresh, sens, quiet ms
+        f32(0f).f32(1f).f32(1f).u8(0).u8(0)           // axis mix: identity
+        // Identity block (SYS-6): the advertised name, then the bond list.
+        val nameBytes = deviceName.toByteArray(Charsets.UTF_8)
+        u8(nameBytes.size)
+        bytes(nameBytes)
+        u8(bonds.size)
+        bonds.forEach { (type, address) -> u8(type).bytes(address) }
     }.toByteArray()
+
+    /**
+     * FF07 read: `[count][event]...`, oldest first. A notify is best-effort, so
+     * the device also keeps a small readable ring — which is how an app that
+     * connects after the fact finds out the pack went critical.
+     */
+    private fun eventLogBytes(): ByteArray = Writer().apply {
+        u8(eventLog.size)
+        eventLog.forEach { u8(it.toInt()) }
+    }.toByteArray()
+
+    private fun emitEvent(event: SystemEvent) {
+        if (eventLog.size >= EVENT_LOG_MAX) eventLog.removeAt(0)
+        eventLog.add(event.code)
+        emit(CharacteristicUuids.SYSTEM_EVENTS, byteArrayOf(event.code))
+    }
 
     private fun profileListBytes(): ByteArray = Writer().apply {
         profiles.forEach { snapshot ->
@@ -453,6 +767,9 @@ class VirtualTailTransport : BleTransport {
         private const val TAG = "VirtualTail"
         private const val DEFAULT_MTU = 247
 
+        /** `EVENT_LOG_MAX` — how many events the firmware's readable ring holds. */
+        private const val EVENT_LOG_MAX = 16
+
         /** 48 LEDs across five rings — a plausible tail, and what the tests use. */
         private val DEFAULT_MATRIX = listOf(8, 10, 12, 10, 8)
 
@@ -460,6 +777,12 @@ class VirtualTailTransport : BleTransport {
         private const val RESULT_BAD_LENGTH = 0x01
         private const val RESULT_OUT_OF_RANGE = 0x04
         private const val RESULT_BAD_STATE = 0x05
+
+        // The four OTA rejections (FF09 0x07-0x0A). Distinct codes because each is
+        // a different cause with a different thing for the user to do about it.
+        private const val RESULT_OTA_BAD_IMAGE = 0x07
+        private const val RESULT_OTA_WRONG_PROJECT = 0x08
+        private const val RESULT_OTA_SAME_VERSION = 0x09
 
         private fun defaultRainbowLayer() = LayerConfig(
             effectId = 0x00, // Rainbow
