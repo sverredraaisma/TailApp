@@ -65,7 +65,7 @@
 > the compatibility banner on every connect, and five v4 features were
 > firmware-only. Worst of them, `SYS_EVENT_STALL` was *silently dropped* — a
 > stall latches every motor off, and the user's only clue was a tail that
-> stopped. All of it is closed; both sides now speak **v5**. Kept as the record
+> stopped. All of it is closed; both sides now speak **v6**. Kept as the record
 > of what the drift cost, because it is the standing failure mode of a
 > two-repository protocol and will happen again.
 
