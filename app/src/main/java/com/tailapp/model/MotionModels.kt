@@ -136,7 +136,15 @@ data class MotionState(
      * driving; what is actually on the motors is
      * [BehaviorRuntime.drivingPatternId].
      */
-    val behavior: BehaviorRuntime? = null
+    val behavior: BehaviorRuntime? = null,
+    /**
+     * Logical segment positions (MOT-0), in `[baseX, tipX, baseY, tipY]` order —
+     * what the patterns emit, before the axis mix turns them into the two
+     * physical axis targets carried by [encoderPositions]. Null on firmware
+     * without the mixer; equal to the physical positions under an identity mix,
+     * which is every device until the diagonal mechanism ships.
+     */
+    val logicalPositions: List<Float>? = null
 ) {
     val activePattern: MotionPattern? get() = MotionPattern.fromId(activePatternId)
 }

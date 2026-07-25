@@ -32,7 +32,13 @@ import com.tailapp.model.MotionState
 @Composable
 fun TailPositionView(
     motionState: MotionState?,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    /**
+     * Plot the logical (pre-mix) segment positions rather than the physical
+     * (post-mix) ones. Only differs under a non-identity axis mix; ignored, and
+     * the physical positions shown, when the device reports no logical block.
+     */
+    showLogical: Boolean = false
 ) {
     val surface = MaterialTheme.colorScheme.surfaceVariant
     val outline = MaterialTheme.colorScheme.outline
@@ -73,7 +79,11 @@ fun TailPositionView(
                 return ((value - (max + min) / 2f) / half).coerceIn(-1f, 1f)
             }
 
-            val positions = motionState.encoderPositions
+            // Logical positions have no axis limits of their own on the wire, so
+            // they are normalised against the same window; under an identity mix
+            // the two spaces coincide and the plot is unchanged.
+            val positions = motionState.logicalPositions?.takeIf { showLogical }
+                ?: motionState.encoderPositions
             val x1 = normalised(positions.getOrElse(0) { 0f }, motionState.xAxisMin, motionState.xAxisMax)
             val y1 = normalised(positions.getOrElse(2) { 0f }, motionState.yAxisMin, motionState.yAxisMax)
             val x2 = normalised(positions.getOrElse(1) { 0f }, motionState.xAxisMin, motionState.xAxisMax)

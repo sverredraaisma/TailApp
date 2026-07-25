@@ -195,6 +195,29 @@ data class BatteryStatus(
     val isDerated: Boolean get() = policy == BatteryPolicy.LOW || policy == BatteryPolicy.CRITICAL
 }
 
+/**
+ * Per-motor and global motion tuning as the device reports it (FF06).
+ *
+ * @property motorScales velocity-command units per deg/s, one per motor. `0`
+ *   means the motor is using the compile-time default rather than a calibrated
+ *   value — the same convention the firmware uses on the command path.
+ * @property gentleScale global multiplier on every motor's velocity and
+ *   acceleration limit (MOT-4). `1.0` is full speed.
+ * @property keyframeSlot the slot the keyframe pattern replays (MOT-8).
+ * @property sequenceSlotsOccupied bitmask of which sequence slots hold data, so
+ *   the keyframe editor can show occupancy without a read per slot.
+ */
+data class MotionTuning(
+    val motorScales: List<Float>,
+    val gentleScale: Float,
+    val keyframeSlot: Int,
+    val sequenceSlotsOccupied: Int
+) {
+    /** True if sequence [slot] (0-based) holds an uploaded sequence. */
+    fun isSequenceSlotOccupied(slot: Int): Boolean =
+        slot in 0..7 && (sequenceSlotsOccupied shr slot) and 1 == 1
+}
+
 data class SystemInfo(
     val protocolVersion: Int,
     val firmwareMajor: Int,
@@ -219,7 +242,14 @@ data class SystemInfo(
      * updated over the air at all, which is why the update screen offers nothing
      * rather than assuming a running version of 0.0.0.
      */
-    val ota: OtaInfo? = null
+    val ota: OtaInfo? = null,
+
+    /**
+     * The motion-tuning block (MOT-2 / MOT-4 / MOT-8). Null on firmware that
+     * does not publish it. The device already reports these values, so the app
+     * shows the settings that are actually in force rather than its own guesses.
+     */
+    val tuning: MotionTuning? = null
 ) {
     val firmwareVersion: String get() = "$firmwareMajor.$firmwareMinor.$firmwarePatch"
 

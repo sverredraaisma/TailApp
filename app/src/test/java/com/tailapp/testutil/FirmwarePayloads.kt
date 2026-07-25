@@ -56,7 +56,8 @@ object FirmwarePayloads {
         gravity: Triple<Float, Float, Float> = Triple(0f, 0f, 1f),
         xLimits: Pair<Float, Float> = -90f to 90f,
         yLimits: Pair<Float, Float> = -45f to 45f,
-        behavior: BehaviorBlock? = null
+        behavior: BehaviorBlock? = null,
+        logical: List<Float>? = null
     ): ByteArray {
         val w = Writer()
         w.u8(patternId.toInt())
@@ -65,11 +66,17 @@ object FirmwarePayloads {
         w.f32(gravity.first).f32(gravity.second).f32(gravity.third)
         w.f32(xLimits.first).f32(xLimits.second)
         w.f32(yLimits.first).f32(yLimits.second)
-        if (behavior != null) {
-            w.u8(behavior.stateIndex)
-            w.u8(behavior.reason)
-            w.u8(behavior.flags)
-            w.u8(behavior.drivingPatternId)
+        // The logical block (MOT-0) sits after the behavior block (MOT-6), so a
+        // device that reports logical positions also reports the behavior block.
+        val beh = behavior ?: if (logical != null) BehaviorBlock() else null
+        if (beh != null) {
+            w.u8(beh.stateIndex)
+            w.u8(beh.reason)
+            w.u8(beh.flags)
+            w.u8(beh.drivingPatternId)
+        }
+        if (logical != null) {
+            repeat(4) { w.f32(logical.getOrElse(it) { 0f }) }
         }
         return w.toByteArray()
     }
@@ -191,7 +198,8 @@ object FirmwarePayloads {
         motion: MotionSystemState? = DEFAULT_MOTION,
         deviceName: String? = null,
         bonds: List<BondRecord> = emptyList(),
-        ota: OtaBlock = OtaBlock()
+        ota: OtaBlock = OtaBlock(),
+        tuning: TuningBlock = TuningBlock()
     ): ByteArray {
         val w = Writer()
         w.u8(protocolVersion)
@@ -230,7 +238,7 @@ object FirmwarePayloads {
             w.u8(lim.stallThreshold)
         }
         if (deviceName == null) return w.toByteArray()
-        w.unmodelledBlocks(servos.size, imus.size, ota)
+        w.unmodelledBlocks(servos.size, imus.size, ota, tuning)
         val nameBytes = deviceName.toByteArray(Charsets.UTF_8)
         w.u8(nameBytes.size)
         w.bytes(nameBytes)
@@ -251,10 +259,23 @@ object FirmwarePayloads {
      * after them cannot be located without walking them, so a length that
      * disagreed with the firmware would silently move the bond list.
      */
-    private fun Writer.unmodelledBlocks(numServos: Int, numImus: Int, ota: OtaBlock) {
-        repeat(numServos) { f32(1f) }                  // units per deg/s
-        f32(0.5f)                                      // gentle scale
-        u8(0).u8(0)                                    // keyframe slot, sequence occupancy
+    /** The motion-tuning block's values; defaults reproduce the original bytes. */
+    data class TuningBlock(
+        val motorScales: List<Float> = listOf(1f, 1f, 1f, 1f),
+        val gentleScale: Float = 0.5f,
+        val keyframeSlot: Int = 0,
+        val sequenceOccupancy: Int = 0
+    )
+
+    private fun Writer.unmodelledBlocks(
+        numServos: Int,
+        numImus: Int,
+        ota: OtaBlock,
+        tuning: TuningBlock = TuningBlock()
+    ) {
+        repeat(numServos) { i -> f32(tuning.motorScales.getOrElse(i) { 1f }) } // units per deg/s
+        f32(tuning.gentleScale)                        // gentle scale
+        u8(tuning.keyframeSlot).u8(tuning.sequenceOccupancy) // keyframe slot, sequence occupancy
         // OTA version/rollback block (OTA_INFO_BLOCK_SIZE = 8).
         u8(ota.running.first).u8(ota.running.second).u8(ota.running.third)
         bool(ota.pendingVerify)

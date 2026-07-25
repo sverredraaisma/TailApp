@@ -43,6 +43,15 @@ object MotionStateParser {
             null
         }
 
+        // MOT-0's logical positions sit after the behavior block. Gated on the
+        // full size rather than "any remaining bytes", so a future appended
+        // block can never be mistaken for these four floats.
+        val logical = if (data.size >= Protocol.MOTION_STATE_WITH_LOGICAL_SIZE) {
+            List(4) { buf.float }
+        } else {
+            null
+        }
+
         return MotionState(
             activePatternId = patternId,
             params = params,
@@ -50,7 +59,8 @@ object MotionStateParser {
             gravityX = gx, gravityY = gy, gravityZ = gz,
             xAxisMin = xMin, xAxisMax = xMax,
             yAxisMin = yMin, yAxisMax = yMax,
-            behavior = behavior
+            behavior = behavior,
+            logicalPositions = logical
         )
     }
 }

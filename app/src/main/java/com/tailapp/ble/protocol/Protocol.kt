@@ -117,6 +117,15 @@ object Protocol {
     const val MOTION_STATE_WITH_BEHAVIOR_SIZE = MOTION_STATE_SIZE + 4
 
     /**
+     * With MOT-0's logical-position block: the behavior payload plus four floats
+     * (base X, tip X, base Y, tip Y — the same `[axis*2 + segment]` order the
+     * physical positions use). The two spaces differ only when a non-identity
+     * axis mix is configured, so plotting one while labelled the other would
+     * mislead exactly when the mixer is doing something.
+     */
+    const val MOTION_STATE_WITH_LOGICAL_SIZE = MOTION_STATE_WITH_BEHAVIOR_SIZE + 16
+
+    /**
      * Bytes per layer entry in the FF04 LED-state payload: 8 header bytes
      * (effect, blend, enabled, 4 transforms, opacity) plus 8 float params.
      */

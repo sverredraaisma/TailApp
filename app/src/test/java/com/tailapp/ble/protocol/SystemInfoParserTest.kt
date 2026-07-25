@@ -356,6 +356,56 @@ class SystemInfoParserTest {
     }
 
     @Test
+    fun `the motion tuning block is read, not just walked past`() {
+        // The device already reports these; the app showing a slider at its own
+        // guess while the tail runs on the reported value is the drift this closes.
+        val info = SystemInfoParser.parse(
+            FirmwarePayloads.systemInfo(
+                deviceName = "Tail",
+                tuning = FirmwarePayloads.TuningBlock(
+                    motorScales = listOf(0.62f, 0.62f, 1.25f, 0.62f),
+                    gentleScale = 0.75f,
+                    keyframeSlot = 2,
+                    sequenceOccupancy = 0b0000_1010
+                )
+            )
+        )
+        requireNotNull(info)
+        val tuning = requireNotNull(info.tuning)
+        assertEquals(listOf(0.62f, 0.62f, 1.25f, 0.62f), tuning.motorScales)
+        assertEquals(0.75f, tuning.gentleScale, 1e-6f)
+        assertEquals(2, tuning.keyframeSlot)
+        // Slots 1 and 3 occupied, 0 and 2 free — the bitmask the editor reads.
+        assertFalse(tuning.isSequenceSlotOccupied(0))
+        assertTrue(tuning.isSequenceSlotOccupied(1))
+        assertFalse(tuning.isSequenceSlotOccupied(2))
+        assertTrue(tuning.isSequenceSlotOccupied(3))
+    }
+
+    @Test
+    fun `firmware without the tuning block reports null tuning, not zeros`() {
+        // A motion-only payload (no identity block) predates the tuning block.
+        // Null keeps "not reported" distinct from "every motor on the default".
+        val info = SystemInfoParser.parse(FirmwarePayloads.systemInfo(deviceName = null))
+        requireNotNull(info)
+        assertNull(info.tuning)
+    }
+
+    @Test
+    fun `the OTA block still parses correctly once tuning is consumed separately`() {
+        // parseOta stopped skipping the tuning block; this guards the seam
+        // between the two so a version does not get read from tuning bytes.
+        val info = SystemInfoParser.parse(
+            FirmwarePayloads.systemInfo(
+                deviceName = "Tail",
+                ota = FirmwarePayloads.OtaBlock(running = Triple(2, 3, 4))
+            )
+        )
+        requireNotNull(info)
+        assertEquals("2.3.4", info.runningFirmwareVersion.toString())
+    }
+
+    @Test
     fun `the longest name the device accepts still parses`() {
         val name = "a".repeat(Protocol.MAX_DEVICE_NAME_LEN)
         val info = requireNotNull(

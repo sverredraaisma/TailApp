@@ -55,6 +55,40 @@ class MotionStateParserTest {
         assertEquals(0x7F.toByte(), state.activePatternId)
         assertNull(state.activePattern)
     }
+
+    @Test
+    fun `the MOT-0 logical positions are read when present`() {
+        val payload = FirmwarePayloads.motionState(
+            encoders = listOf(5f, 6f, 7f, 8f),          // physical (post-mix)
+            logical = listOf(1f, 2f, 3f, 4f)            // pre-mix, base X / tip X / base Y / tip Y
+        )
+        val state = requireNotNull(MotionStateParser.parse(payload))
+        assertEquals(listOf(5f, 6f, 7f, 8f), state.encoderPositions)
+        assertEquals(listOf(1f, 2f, 3f, 4f), state.logicalPositions)
+    }
+
+    @Test
+    fun `firmware without the logical block reports null, not the physical values`() {
+        // The behavior block can be present without the logical block (a device
+        // with the engine but no mixer). Null must not be mistaken for "the two
+        // spaces are equal", which would hide a mis-plotted mix.
+        val withBehaviorOnly = FirmwarePayloads.motionState(
+            behavior = FirmwarePayloads.BehaviorBlock(stateIndex = 1)
+        )
+        val state = requireNotNull(MotionStateParser.parse(withBehaviorOnly))
+        assertNull(state.logicalPositions)
+    }
+
+    @Test
+    fun `logical positions need the whole block, not merely some trailing bytes`() {
+        // A payload one float short of the logical block must not read three
+        // floats and a zero; it reads none.
+        val short = FirmwarePayloads.motionState(
+            behavior = FirmwarePayloads.BehaviorBlock()
+        ) + ByteArray(12)
+        val state = requireNotNull(MotionStateParser.parse(short))
+        assertNull(state.logicalPositions)
+    }
 }
 
 class LedStateParserTest {

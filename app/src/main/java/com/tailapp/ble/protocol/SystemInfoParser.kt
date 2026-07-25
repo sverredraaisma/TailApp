@@ -3,6 +3,7 @@ package com.tailapp.ble.protocol
 import com.tailapp.model.BondedPeer
 import com.tailapp.model.Capabilities
 import com.tailapp.model.FirmwareVersion
+import com.tailapp.model.MotionTuning
 import com.tailapp.model.ImuConfig
 import com.tailapp.model.MotionLimits
 import com.tailapp.model.MotionSystemState
@@ -32,7 +33,9 @@ import java.nio.ByteOrder
  * -- motion (protocol v4) --
  * [motors_enabled u8]
  * per motor (13 B): [max_vel f32][max_accel f32][max_jerk f32][stall_thresh u8]
- * -- motion tuning: walked past, not modelled --
+ * -- motion tuning (MOT-2/4/8) --
+ * per motor: [units_per_deg_per_sec f32]
+ * [gentle_scale f32][keyframe_slot u8][sequence_slots_occupied u8]
  * -- OTA version/rollback (SYS-2) --
  * [running 3 x u8][pending_verify u8][other_valid u8][other 3 x u8]
  * -- per-IMU tap config and axis mix: walked past, not modelled --
@@ -108,19 +111,40 @@ object SystemInfoParser {
 
         val capabilities = parseCapabilities(buf)
         val motion = if (capabilities != null) parseMotion(buf, numServos) else null
-        val ota = if (motion != null) parseOta(buf, numServos) else null
+        val tuning = if (motion != null) parseTuning(buf, numServos) else null
+        val ota = if (tuning != null) parseOta(buf) else null
         val identity = if (ota != null) parseIdentity(buf, numImus) else null
         return SystemInfo(
             protocolVersion, major, minor, patch, servos, imus, capabilities, motion,
             deviceName = identity?.name,
             bonds = identity?.bonds,
-            ota = ota
+            ota = ota,
+            tuning = tuning
         )
     }
 
     /**
-     * Reads the OTA version/rollback block (SYS-2), which sits one block past the
-     * motion block with the motion-tuning block in between.
+     * Reads the motion-tuning block (MOT-2 / MOT-4 / MOT-8), which sits right
+     * after the motion block and before the OTA block. Advancing the buffer here
+     * is what lets the blocks after it be read by walking forward rather than by
+     * counting lengths back from the payload's end.
+     *
+     * Returns null on firmware that predates the block; the OTA block sits behind
+     * it on the wire, so its absence means there is nothing further to read.
+     */
+    private fun parseTuning(buf: ByteBuffer, numServos: Int): MotionTuning? {
+        if (buf.remaining() < numServos * TUNING_ENTRY_SIZE + TUNING_TRAILER_SIZE) return null
+        val scales = List(numServos) { buf.float }
+        val gentleScale = buf.float
+        val keyframeSlot = buf.u8()
+        val occupancy = buf.u8()
+        return MotionTuning(scales, gentleScale, keyframeSlot, occupancy)
+    }
+
+    /**
+     * Reads the OTA version/rollback block (SYS-2). The tuning block before it
+     * has already been consumed by [parseTuning], so this reads from the OTA
+     * block's own offset.
      *
      * Walked forward from the front rather than counted back from the end of the
      * payload. Counting back is correct exactly until the device appends
@@ -129,10 +153,8 @@ object SystemInfoParser {
      * Returns null on firmware that predates the block, which is not the same as
      * a device running 0.0.0.
      */
-    private fun parseOta(buf: ByteBuffer, numServos: Int): OtaInfo? {
-        val tuningBlock = numServos * TUNING_ENTRY_SIZE + TUNING_TRAILER_SIZE
-        if (buf.remaining() < tuningBlock + Protocol.OTA_INFO_BLOCK_SIZE) return null
-        buf.position(buf.position() + tuningBlock)
+    private fun parseOta(buf: ByteBuffer): OtaInfo? {
+        if (buf.remaining() < Protocol.OTA_INFO_BLOCK_SIZE) return null
 
         val runningMajor = buf.u8()
         val runningMinor = buf.u8()

@@ -133,11 +133,27 @@ fun MotionConfigScreen(
                     Column(modifier = Modifier.padding(16.dp)) {
                         Text("Current Positions", style = MaterialTheme.typography.titleMedium)
                         Spacer(Modifier.height(8.dp))
+                        // The toggle only appears once the device reports the
+                        // logical block; under an identity mix the two coincide,
+                        // so it is offered when it can actually show a difference.
+                        var showLogical by remember { mutableStateOf(false) }
+                        if (motionState.logicalPositions != null) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    if (showLogical) "Logical (pre-mix)" else "Physical (post-mix)",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Switch(checked = showLogical, onCheckedChange = { showLogical = it })
+                            }
+                            Spacer(Modifier.height(8.dp))
+                        }
                         // Four numbers in degrees are unreadable while the tail
                         // is moving; the plot makes a wag distinguishable from
                         // a jitter at a glance.
                         TailPositionView(
                             motionState = motionState,
+                            showLogical = showLogical,
                             modifier = Modifier.fillMaxWidth()
                         )
                         Spacer(Modifier.height(8.dp))
