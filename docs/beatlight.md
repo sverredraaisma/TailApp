@@ -99,7 +99,7 @@ three apart with a 0.86 ms residual — see [beat-model.md](beat-model.md).
 | `com.tailapp.drop` | transient detector, section-state tracker, `DropEvent`, `SectionState` |
 | `com.tailapp.genre` | `GenreState`, `GenreClassifier`, `EffnetMelSpectrogram`, `OnnxGenreClassifier`, `GenreModelStore` — see [genre-model.md](genre-model.md) |
 | `com.tailapp.effects` | `LightingEngine`, `BeatLightSession`, `BeatLightService`, `DeviceAudioStream` |
-| `com.tailapp.composer` | the effect graph: `ReactiveContext`, `ReactiveEffect`, `CompositionRenderer`, `CompositionScene`, the 20 effects — see [composer.md](composer.md) |
+| `com.tailapp.composer` | the effect graph: `ReactiveContext`, `ReactiveEffect`, `CompositionRenderer`, `CompositionScene`, the 25 effects — see [composer.md](composer.md) |
 | `com.tailapp.lighting` | `LightingOutput`, `TailDirectLedOutput`, preview sink |
 | `com.tailapp.led` | Kotlin port of the firmware LED engine — coordinates, effects, compositor |
 | `app/src/main/cpp` | Oboe capture + lock-free ring buffer |
@@ -176,7 +176,7 @@ covered by `gradlew.bat testDebugUnitTest`:
 | FF0A direct pixel streaming | done |
 | LED engine port + live preview | done |
 | Effect profiles, controller, renderer | **replaced** by the composer — see [composer.md](composer.md) |
-| Effect composer (layer/folder graph, 20 effects, editor, persistence) | done |
+| Effect composer (layer/folder graph, 25 effects, editor, persistence) | done |
 | LightingEngine + session + service | done |
 | BeatLight screen (monitor, calibration, stack selection) | done |
 | ONNX genre model (Discogs-EffNet) | done — installed onto the device, not shipped; falls back to `NoGenreClassifier` when absent |
