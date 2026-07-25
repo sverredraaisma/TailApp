@@ -1,5 +1,6 @@
 package com.tailapp.led
 
+import com.tailapp.led.effects.AnimationRenderer
 import com.tailapp.led.effects.AudioBarRenderer
 import com.tailapp.led.effects.AudioFreqBarsRenderer
 import com.tailapp.led.effects.AudioPowerRenderer
@@ -62,6 +63,9 @@ object FirmwareEffectFactory {
             LedEffect.MOTION_GLOW -> MotionGlowRenderer(motion)
             LedEffect.TAP_RIPPLE -> TapRippleRenderer(motion)
             LedEffect.GRAVITY_LEVEL -> GravityLevelRenderer(motion)
+            // Its frames are on the device, not the phone; the renderer is an
+            // honest black placeholder. See AnimationRenderer.
+            LedEffect.ANIMATION -> AnimationRenderer()
         }
 
         config.params.forEachIndexed { id, value -> renderer.setParam(id, value) }

@@ -163,6 +163,24 @@ enum class LedEffect(val id: Byte, val displayName: String, val params: List<Par
             ParamMetadata(2, "Blue", 255f, 0f, 255f),
             ParamMetadata(3, "Contrast", 1.2f, 0f, 3f)
         )
+    ),
+
+    /**
+     * LED-5: plays a multi-frame animation uploaded to a device flash slot.
+     * The frames live on the device, not in a parameter, so the app can select
+     * and configure the effect but cannot preview the pixels — the composer's
+     * live preview has no access to the tail's flash. Ranges mirror
+     * `AnimationEffect::describe_params()` in TailFirmware.
+     */
+    ANIMATION(
+        0x11, "Animation", listOf(
+            ParamMetadata(0, "Slot", 0f, 0f, 3f),
+            ParamMetadata(1, "Speed", 1f, 0f, 16f, "x"),
+            ParamMetadata(2, "Loop", 1f, 0f, 1f),
+            ParamMetadata(3, "Beat lock", 0f, 0f, 1f),
+            ParamMetadata(4, "Beats", 4f, 1f, 16f),
+            ParamMetadata(5, "Orientation", 0f, 0f, 3f)
+        )
     );
 
     companion object {

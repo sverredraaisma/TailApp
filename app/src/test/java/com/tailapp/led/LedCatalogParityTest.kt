@@ -482,9 +482,11 @@ class LedCatalogParityTest {
     }
 
     @Test
-    fun `catalogue ids run unbroken from rainbow to gravity level`() {
+    fun `catalogue ids run unbroken from rainbow to animation`() {
+        // Contiguous 0x00..0x11: a gap would mean an id was retired rather than
+        // appended, which the persisted ids in saved stacks do not survive.
         assertEquals(
-            (0x00..0x10).map { it.toByte() },
+            (0x00..0x11).map { it.toByte() },
             LedEffect.entries.map { it.id }
         )
     }
