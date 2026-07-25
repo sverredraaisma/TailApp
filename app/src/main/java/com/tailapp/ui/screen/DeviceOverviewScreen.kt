@@ -68,6 +68,7 @@ fun DeviceOverviewScreen(
     onNavigateToAudio: () -> Unit,
     onNavigateToBeatLight: () -> Unit,
     onNavigateToFirmware: () -> Unit,
+    onNavigateToDiagnostics: () -> Unit,
     onDisconnected: () -> Unit
 ) {
     val state by viewModel.deviceState.collectAsStateWithLifecycle()
@@ -441,6 +442,7 @@ fun DeviceOverviewScreen(
                 Button(onClick = onNavigateToLed) { Text("LED Config") }
                 Button(onClick = onNavigateToAudio) { Text("Audio Config") }
                 Button(onClick = onNavigateToBeatLight) { Text("BeatLight") }
+                Button(onClick = onNavigateToDiagnostics) { Text("Diagnostics") }
                 // Only offered when the device published an OTA block — firmware
                 // that cannot be updated over the air shows no entry point at all.
                 if (si?.ota != null) {

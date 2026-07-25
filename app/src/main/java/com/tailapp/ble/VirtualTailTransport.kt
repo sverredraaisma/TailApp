@@ -160,6 +160,10 @@ class VirtualTailTransport : BleTransport {
         // dropped echo would strand an update, so the app can read the offset
         // it should resume from.
         CharacteristicUuids.OTA_DATA -> otaStatusBytes()
+        // FF0C diagnostics: a fixed, healthy snapshot so the diagnostics screen
+        // has something to render against the virtual tail. Fixed, not drifting —
+        // a live-changing snapshot would perturb tests that never touch it.
+        CharacteristicUuids.DIAGNOSTICS -> diagnosticsBytes()
         // The standard services, so a simulated tail exercises the same code
         // path a real one does rather than only the FF00 custom service.
         CharacteristicUuids.BATTERY_LEVEL -> byteArrayOf(batteryPercent.toByte())
@@ -775,6 +779,45 @@ class VirtualTailTransport : BleTransport {
         eventLog.forEach { u8(it.toInt()) }
     }.toByteArray()
 
+    /**
+     * FF0C diagnostics (format_version 3, 96 bytes), mirroring
+     * `app_bridge.cpp::build_diagnostics`. A fixed, healthy device: no stalls, no
+     * overruns, every sensor answering, driver faults clear. The battery figures
+     * match the FF06/0x2A19 reads so the simulated tail tells one story.
+     */
+    private fun diagnosticsBytes(): ByteArray = Writer().apply {
+        u8(DIAG_FORMAT_VERSION)
+        u32(3661L)                     // uptime: 1h 1m 1s
+        u32(120_000L)                  // free heap
+        u32(90_000L)                   // min free heap
+        u32(0L)                        // stall count
+        u32(0L)                        // command queue dropped
+        u32(0L)                        // motion overruns
+        u32(0L)                        // render overruns
+        u32(0L)                        // frames skipped
+        u32(8_000L)                    // last frame us
+        u32(8_200L)                    // mean frame us
+        u32(15_000L)                   // max frame us
+        u8(30)                         // frame rate hz
+        val stacks = listOf(512, 480, 600, 320, 700)
+        u8(stacks.size)
+        stacks.forEach { u16(it) }
+        u8(2)                          // num IMUs, base then tip
+        repeat(2) { u16(0).u8(0) }     // healthy: no failures, not disabled
+        u8(batteryPercent)
+        u16(3900)                      // pack millivolts
+        u8(1)                          // battery level: normal
+        // format_version 2: encoder health.
+        u8(4)                          // num encoders
+        repeat(4) { u16(0).u8(0) }     // healthy
+        u16(0)                         // rehome count
+        // format_version 3: TMC2209 driver health.
+        u8(4)                          // num motors
+        repeat(4) { u8(0) }            // no DRV_STATUS faults
+        u32(0L)                        // driver lost writes
+        u32(0L)                        // driver read failures
+    }.toByteArray()
+
     private fun emitEvent(event: SystemEvent) {
         if (eventLog.size >= EVENT_LOG_MAX) eventLog.removeAt(0)
         eventLog.add(event.code)
@@ -813,6 +856,8 @@ class VirtualTailTransport : BleTransport {
     private class Writer {
         private val out = ByteArrayOutputStream()
         fun u8(value: Int) = apply { out.write(value and 0xFF) }
+        fun u16(value: Int) = apply { u8(value); u8(value shr 8) }
+        fun u32(value: Long) = apply { u8((value and 0xFF).toInt()); u8((value shr 8).toInt()); u8((value shr 16).toInt()); u8((value shr 24).toInt()) }
         fun bool(value: Boolean) = u8(if (value) 1 else 0)
         fun f32(value: Float) = apply {
             out.write(ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putFloat(value).array())
@@ -835,6 +880,9 @@ class VirtualTailTransport : BleTransport {
 
         /** `EVENT_LOG_MAX` — how many events the firmware's readable ring holds. */
         private const val EVENT_LOG_MAX = 16
+
+        /** `DIAGNOSTICS_VERSION` — the FF0C format the simulated tail publishes. */
+        private const val DIAG_FORMAT_VERSION = 3
 
         /** 48 LEDs across five rings — a plausible tail, and what the tests use. */
         private val DEFAULT_MATRIX = listOf(8, 10, 12, 10, 8)

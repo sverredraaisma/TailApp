@@ -23,6 +23,11 @@ object FirmwarePayloads {
     private class Writer {
         private val out = ByteArrayOutputStream()
         fun u8(value: Int) = apply { out.write(value and 0xFF) }
+        fun u16(value: Int) = apply { u8(value); u8(value shr 8) }
+        fun u32(value: Long) = apply {
+            u8((value and 0xFF).toInt()); u8((value shr 8).toInt())
+            u8((value shr 16).toInt()); u8((value shr 24).toInt())
+        }
         fun bool(value: Boolean) = u8(if (value) 1 else 0)
         fun f32(value: Float) = apply {
             out.write(ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putFloat(value).array())
@@ -293,6 +298,83 @@ object FirmwarePayloads {
      */
     fun batteryLevel(percent: Int?): ByteArray =
         byteArrayOf((percent ?: Protocol.BATTERY_PERCENT_UNKNOWN).toByte())
+
+    /** One `[failures u16][disabled u8]` health record, for IMUs and encoders alike. */
+    data class DiagSensor(val failures: Int = 0, val disabled: Boolean = false)
+
+    /** One motor's `DRV_STATUS` fault mask (`STEPPER_FAULT_*`). */
+    data class DiagMotor(val faults: Int = 0)
+
+    /**
+     * The FF0C diagnostics block, mirroring `app_bridge.cpp::build_diagnostics`
+     * byte for byte (little-endian). The current firmware always writes
+     * `format_version` 3 (96 bytes); pass a lower [formatVersion] to reproduce the
+     * shorter block an older firmware sends — 2 omits the driver block (83 bytes),
+     * 1 omits both the encoder and driver blocks (68-byte version-1 core) — so the
+     * parser's version-tolerance is exercised against the real truncation, not a
+     * hand-sliced one.
+     */
+    fun diagnostics(
+        formatVersion: Int = 3,
+        uptimeSeconds: Long = 1000L,
+        freeHeapBytes: Long = 100_000L,
+        minFreeHeapBytes: Long = 80_000L,
+        stallCount: Long = 0,
+        commandQueueDropped: Long = 0,
+        motionOverruns: Long = 0,
+        renderOverruns: Long = 0,
+        framesSkipped: Long = 0,
+        lastFrameMicros: Long = 8_000,
+        meanFrameMicros: Long = 8_200,
+        maxFrameMicros: Long = 15_000,
+        frameRateHz: Int = 30,
+        taskStacks: List<Int> = listOf(512, 480, 600, 320, 700),
+        imus: List<DiagSensor> = listOf(DiagSensor(), DiagSensor()),
+        batteryPercent: Int? = 78,
+        batteryMillivolts: Int = 3_900,
+        batteryLevel: Int = 1,
+        encoders: List<DiagSensor> = listOf(DiagSensor(), DiagSensor(), DiagSensor(), DiagSensor()),
+        rehomeCount: Int = 0,
+        motors: List<DiagMotor> = listOf(DiagMotor(), DiagMotor(), DiagMotor(), DiagMotor()),
+        driverLostWrites: Long = 0,
+        driverReadFailures: Long = 0
+    ): ByteArray {
+        val w = Writer()
+        w.u8(formatVersion)
+        w.u32(uptimeSeconds)
+        w.u32(freeHeapBytes)
+        w.u32(minFreeHeapBytes)
+        w.u32(stallCount)
+        w.u32(commandQueueDropped)
+        w.u32(motionOverruns)
+        w.u32(renderOverruns)
+        w.u32(framesSkipped)
+        w.u32(lastFrameMicros)
+        w.u32(meanFrameMicros)
+        w.u32(maxFrameMicros)
+        w.u8(frameRateHz)
+        w.u8(taskStacks.size)
+        taskStacks.forEach { w.u16(it) }
+        w.u8(imus.size)
+        imus.forEach { w.u16(it.failures).bool(it.disabled) }
+        w.u8(batteryPercent ?: Protocol.BATTERY_PERCENT_UNKNOWN)
+        w.u16(batteryMillivolts)
+        w.u8(batteryLevel)
+        // The trailing blocks are append-only: an older firmware simply stops
+        // after the core, which is exactly what a lower formatVersion reproduces.
+        if (formatVersion >= 2) {
+            w.u8(encoders.size)
+            encoders.forEach { w.u16(it.failures).bool(it.disabled) }
+            w.u16(rehomeCount)
+        }
+        if (formatVersion >= 3) {
+            w.u8(motors.size)
+            motors.forEach { w.u8(it.faults) }
+            w.u32(driverLostWrites)
+            w.u32(driverReadFailures)
+        }
+        return w.toByteArray()
+    }
 
     /** FF07 read payload — the device's recent-event ring, `[count][event]...`. */
     fun eventLog(events: List<Int>): ByteArray {

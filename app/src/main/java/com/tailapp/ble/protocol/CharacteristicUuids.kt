@@ -25,6 +25,17 @@ object CharacteristicUuids {
     val MOTION_TARGET: UUID   = UUID.fromString("0000FF0B-0000-1000-8000-00805F9B34FB")
 
     /**
+     * Diagnostics snapshot, read + notify (SYS-3).
+     *
+     * Readable with no prior write and no handshake: a support screen exists for a
+     * device that is already misbehaving, and a handshake is one more thing that
+     * can be the thing that is broken. The notify carries the same payload once a
+     * second — uptime moves every second, so the subscription is itself the rate
+     * control and there is no unchanged snapshot to suppress.
+     */
+    val DIAGNOSTICS: UUID     = UUID.fromString("0000FF0C-0000-1000-8000-00805F9B34FB")
+
+    /**
      * OTA firmware image in, offset echo out (SYS-2).
      *
      * Both directions on one characteristic: write-without-response for the

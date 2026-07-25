@@ -8,6 +8,7 @@ import com.tailapp.ble.protocol.CharacteristicUuids
 import com.tailapp.ble.protocol.CommandResult
 import com.tailapp.ble.protocol.CommandResultParser
 import com.tailapp.ble.protocol.Crc32
+import com.tailapp.ble.protocol.DiagnosticsParser
 import com.tailapp.ble.protocol.DirectPixelFrame
 import com.tailapp.ble.protocol.FftFrameBuilder
 import com.tailapp.ble.protocol.LedCommands
@@ -166,11 +167,15 @@ class DeviceRepository(
         // interrupted transfer stays armed on the device across the reconnect
         // that follows it.
         transport.enableNotifications(CharacteristicUuids.OTA_DATA)
+        // FF0C re-publishes once a second (uptime moves every second), so the
+        // subscription keeps a diagnostics screen live rather than needing a poll.
+        transport.enableNotifications(CharacteristicUuids.DIAGNOSTICS)
 
         Log.d(TAG, "onConnected: reading initial state")
         refreshAll()
         refreshBatteryLevel()
         refreshDeviceInformation()
+        refreshDiagnostics()
         seedBatteryPolicyFromEventLog()
         Log.d(TAG, "onConnected: setup complete")
     }
@@ -223,6 +228,11 @@ class DeviceRepository(
                     OtaStatusParser.parse(update.value)?.let { status ->
                         _otaStatus.value = status
                         otaEchoes.trySend(status)
+                    }
+
+                CharacteristicUuids.DIAGNOSTICS ->
+                    DiagnosticsParser.parse(update.value)?.let { diagnostics ->
+                        _deviceState.update { it.copy(diagnostics = diagnostics) }
                     }
 
                 CharacteristicUuids.CMD_RESULT ->
@@ -356,6 +366,28 @@ class DeviceRepository(
             return
         }
         _deviceState.update { it.copy(deviceInformation = info) }
+    }
+
+    /**
+     * Reads the FF0C diagnostics snapshot (SYS-3).
+     *
+     * Public and read-on-open: the diagnostics screen must show something the
+     * moment it opens, so it reads directly rather than waiting for the first
+     * once-a-second notify. A payload too short for even the version-1 core parses
+     * to null and is dropped rather than shown as zeros.
+     */
+    suspend fun refreshDiagnostics() {
+        val data = transport.readCharacteristic(CharacteristicUuids.DIAGNOSTICS)
+        if (data == null) {
+            Log.w(TAG, "FF0C read returned null")
+            return
+        }
+        val parsed = DiagnosticsParser.parse(data)
+        if (parsed == null) {
+            Log.w(TAG, "FF0C parse failed (${data.size} bytes)")
+            return
+        }
+        _deviceState.update { it.copy(diagnostics = parsed) }
     }
 
     private fun setBatteryPercent(percent: Int?) {

@@ -32,6 +32,9 @@ sealed class NavRoutes(val route: String) {
     data object FirmwareUpdate : NavRoutes("device/{address}/firmware") {
         fun create(address: String) = "device/${URLEncoder.encode(address, "UTF-8")}/firmware"
     }
+    data object Diagnostics : NavRoutes("device/{address}/diagnostics") {
+        fun create(address: String) = "device/${URLEncoder.encode(address, "UTF-8")}/diagnostics"
+    }
 
     companion object {
         fun decodeAddress(encoded: String?): String? =

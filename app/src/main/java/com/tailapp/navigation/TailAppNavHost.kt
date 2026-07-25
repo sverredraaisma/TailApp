@@ -14,6 +14,7 @@ import com.tailapp.ui.screen.AudioConfigScreen
 import com.tailapp.ui.screen.BeatLightScreen
 import com.tailapp.ui.screen.BehaviorConfigScreen
 import com.tailapp.ui.screen.DeviceOverviewScreen
+import com.tailapp.ui.screen.DiagnosticsScreen
 import com.tailapp.ui.screen.EffectComposerScreen
 import com.tailapp.ui.screen.FirmwareUpdateScreen
 import com.tailapp.ui.screen.KeyframeEditorScreen
@@ -24,6 +25,7 @@ import com.tailapp.viewmodel.AudioConfigViewModel
 import com.tailapp.viewmodel.BeatLightViewModel
 import com.tailapp.viewmodel.BehaviorConfigViewModel
 import com.tailapp.viewmodel.DeviceOverviewViewModel
+import com.tailapp.viewmodel.DiagnosticsViewModel
 import com.tailapp.viewmodel.EffectComposerViewModel
 import com.tailapp.viewmodel.FirmwareUpdateViewModel
 import com.tailapp.viewmodel.KeyframeEditorViewModel
@@ -67,6 +69,7 @@ fun TailAppNavHost(
                 onNavigateToAudio = { navController.navigate(NavRoutes.AudioConfig.create(address)) },
                 onNavigateToBeatLight = { navController.navigate(NavRoutes.BeatLight.create(address)) },
                 onNavigateToFirmware = { navController.navigate(NavRoutes.FirmwareUpdate.create(address)) },
+                onNavigateToDiagnostics = { navController.navigate(NavRoutes.Diagnostics.create(address)) },
                 onDisconnected = {
                     navController.popBackStack(NavRoutes.Scan.route, inclusive = false)
                 }
@@ -187,6 +190,16 @@ fun TailAppNavHost(
                 FirmwareUpdateViewModel(container.deviceRepository)
             })
             FirmwareUpdateScreen(viewModel = vm, onBack = { navController.popBackStack() })
+        }
+
+        composable(
+            route = NavRoutes.Diagnostics.route,
+            arguments = listOf(navArgument("address") { type = NavType.StringType })
+        ) {
+            val vm: DiagnosticsViewModel = viewModel(factory = factory {
+                DiagnosticsViewModel(container.deviceRepository)
+            })
+            DiagnosticsScreen(viewModel = vm, onBack = { navController.popBackStack() })
         }
     }
 }

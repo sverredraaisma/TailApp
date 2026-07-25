@@ -60,6 +60,7 @@ class DeviceRepositoryTest {
         readResponses[CharacteristicUuids.LED_STATE] = FirmwarePayloads.ledState(layers = ledLayers)
         readResponses[CharacteristicUuids.SYSTEM_CONFIG] = systemInfo
         readResponses[CharacteristicUuids.PROFILE_MGMT] = FirmwarePayloads.profileList(profiles)
+        readResponses[CharacteristicUuids.DIAGNOSTICS] = FirmwarePayloads.diagnostics()
     }
 
     private fun TestScope.newRepository(transport: FakeBleTransport): DeviceRepository {
@@ -99,7 +100,10 @@ class DeviceRepositoryTest {
                 // FF0E notifies the OTA offset echo, the transfer's only flow
                 // control, so the subscription is live for the whole session
                 // rather than opened per update.
-                CharacteristicUuids.OTA_DATA
+                CharacteristicUuids.OTA_DATA,
+                // FF0C re-publishes the diagnostics snapshot once a second, so the
+                // subscription keeps the diagnostics screen live (SYS-3).
+                CharacteristicUuids.DIAGNOSTICS
             ),
             transport.enabledNotifications
         )
@@ -892,6 +896,34 @@ class DeviceRepositoryTest {
         transport.notify(CharacteristicUuids.BATTERY_LEVEL, FirmwarePayloads.batteryLevel(null))
         advanceUntilIdle()
         assertNull(repository.deviceState.value.battery.percent)
+    }
+
+    @Test
+    fun `diagnostics are read on connect`() = runTest {
+        val transport = FakeBleTransport()
+        val repository = connected(transport)
+
+        assertEquals(1, transport.readCountFor(CharacteristicUuids.DIAGNOSTICS))
+        val diagnostics = requireNotNull(repository.deviceState.value.diagnostics)
+        assertEquals(3, diagnostics.formatVersion)
+        assertEquals(30, diagnostics.frameRateHz)
+        assertTrue(diagnostics.hasDriverHealth)
+    }
+
+    @Test
+    fun `diagnostics notifications update the cached snapshot`() = runTest {
+        val transport = FakeBleTransport()
+        val repository = connected(transport)
+
+        transport.notify(
+            CharacteristicUuids.DIAGNOSTICS,
+            FirmwarePayloads.diagnostics(uptimeSeconds = 12_345L, stallCount = 4)
+        )
+        advanceUntilIdle()
+
+        val diagnostics = requireNotNull(repository.deviceState.value.diagnostics)
+        assertEquals(12_345L, diagnostics.uptimeSeconds)
+        assertEquals(4L, diagnostics.stallCount)
     }
 
     @Test

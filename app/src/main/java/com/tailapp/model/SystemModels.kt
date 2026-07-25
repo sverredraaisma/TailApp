@@ -306,7 +306,12 @@ data class DeviceState(
     /** Pack level (0x2A19) and the low-power policy the device reports (FF07). */
     val battery: BatteryStatus = BatteryStatus(),
     /** The 0x180A strings, once read. Null before the first read lands. */
-    val deviceInformation: DeviceInformation? = null
+    val deviceInformation: DeviceInformation? = null,
+    /**
+     * The FF0C diagnostics snapshot (SYS-3). Null before the first read lands, and
+     * again on disconnect. Live thereafter — the device notifies it once a second.
+     */
+    val diagnostics: Diagnostics? = null
 ) {
     val capabilities: Capabilities get() = systemInfo?.effectiveCapabilities ?: Capabilities.DEFAULT
 }
