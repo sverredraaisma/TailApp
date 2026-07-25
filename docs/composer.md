@@ -297,7 +297,7 @@ timeout has to work for the disconnect case anyway.
 | `composer/MotionChoreography.kt` | the same context, turned into motor targets |
 | `composer/FirmwareExport.kt` | mapping a stack onto the device's own layers |
 | `composer/CompositionSerializer.kt`, `Json.kt`, `CompositionLibrary.kt` | persistence |
-| `composer/effects/` | the 20 effects |
+| `composer/effects/` | the 25 effects |
 | `ui/screen/EffectComposerScreen.kt`, `viewmodel/EffectComposerViewModel.kt` | the editor |
 
 ## Testing
