@@ -197,13 +197,16 @@ class VirtualTailTransport : BleTransport {
 
     // --- command application ---
 
-    private fun applyMotion(data: ByteArray): Int { return when (data[0].toInt()) {
+    private fun applyMotion(data: ByteArray): Int { val cmd = data[0].toInt() and 0xFF; return when (cmd) {
         0x01 -> { // select pattern — adopts the pattern's own defaults
             if (data.size < 2) return RESULT_BAD_LENGTH
+            // An id the device cannot build is rejected, not silently accepted:
+            // the firmware answers UNKNOWN_ID and leaves the pattern untouched.
+            val pattern = MotionPattern.fromId(data[1]) ?: return RESULT_UNKNOWN_ID
             patternId = data[1].toInt() and 0xFF
-            val defaults = MotionPattern.fromId(data[1])?.params?.map { it.default }
             motionParams.fill(0f)
-            defaults?.forEachIndexed { i, v -> if (i in motionParams.indices) motionParams[i] = v }
+            pattern.params.map { it.default }
+                .forEachIndexed { i, v -> if (i in motionParams.indices) motionParams[i] = v }
             // Selecting a pattern is an explicit run intent, so it clears a
             // stall latch — same as the firmware.
             motorsEnabled = true
@@ -216,8 +219,13 @@ class VirtualTailTransport : BleTransport {
             motionParams[id] = data.f32(2)
             RESULT_OK
         }
+        0x04 -> { // set PID — vestigial (open-loop), but the servo index is still bounded
+            if (data.size < 14) return RESULT_BAD_LENGTH
+            if ((data[1].toInt() and 0xFF) >= MAX_SERVOS) RESULT_OUT_OF_RANGE else RESULT_OK
+        }
         0x06 -> { // set axis limits — an inverted window pins the axis to one end
             if (data.size < 10) return RESULT_BAD_LENGTH
+            if ((data[1].toInt() and 0xFF) >= MAX_AXES) return RESULT_OUT_OF_RANGE
             if (data.f32(2) >= data.f32(6)) RESULT_OUT_OF_RANGE else RESULT_OK
         }
         0x08 -> { // set motion limits
@@ -237,8 +245,32 @@ class VirtualTailTransport : BleTransport {
             motorsEnabled = data[1].toInt() != 0
             RESULT_OK
         }
+        0x0A -> { // set motor scale — zero would round every command to a dead motor
+            if (data.size < 6) return RESULT_BAD_LENGTH
+            if ((data[1].toInt() and 0xFF) >= MAX_SERVOS) return RESULT_OUT_OF_RANGE
+            val scale = data.f32(2)
+            if (scale < MOTOR_SCALE_MIN || scale > MOTOR_SCALE_MAX) RESULT_OUT_OF_RANGE else RESULT_OK
+        }
+        0x0B -> { // set gentle scale
+            if (data.size < 5) return RESULT_BAD_LENGTH
+            val scale = data.f32(1)
+            if (scale < GENTLE_SCALE_MIN || scale > GENTLE_SCALE_MAX) RESULT_OUT_OF_RANGE else RESULT_OK
+        }
+        0x15 -> { // set axis mix — a zero gain makes the mix non-invertible
+            if (data.size < 15) return RESULT_BAD_LENGTH
+            val rotation = data.f32(1)
+            val gainX = data.f32(5)
+            val gainY = data.f32(9)
+            if (kotlin.math.abs(rotation) > AXIS_MIX_ROTATION_MAX) return RESULT_OUT_OF_RANGE
+            if (gainX < AXIS_MIX_GAIN_MIN || gainX > AXIS_MIX_GAIN_MAX ||
+                gainY < AXIS_MIX_GAIN_MIN || gainY > AXIS_MIX_GAIN_MAX
+            ) RESULT_OUT_OF_RANGE else RESULT_OK
+        }
         0x05 -> { motorsEnabled = true; RESULT_OK } // calibrate also clears the latch
-        else -> RESULT_OK // PID, tap: accepted, not modelled
+        // Known-but-unmodelled commands (servo cfg, tap enable/config, sequence
+        // upload, behavior, encoder cfg) are still accepted; an id outside the
+        // allocated motion range is UNKNOWN_CMD, the way the firmware answers one.
+        else -> if (cmd in MOTION_CMD_RANGE) RESULT_OK else RESULT_UNKNOWN_CMD
     } }
 
     /**
@@ -265,10 +297,13 @@ class VirtualTailTransport : BleTransport {
         emitEvent(event)
     }
 
-    private fun applyLed(data: ByteArray): Int { return when (data[0].toInt()) {
+    private fun applyLed(data: ByteArray): Int { val cmd = data[0].toInt() and 0xFF; return when (cmd) {
         0x01 -> { // set layer effect
             if (data.size < 4) return RESULT_BAD_LENGTH
             val index = data[1].toInt() and 0xFF
+            if (index >= MAX_LED_LAYERS) return RESULT_OUT_OF_RANGE
+            if ((data[2].toInt() and 0xFF) > MAX_EFFECT_ID) return RESULT_UNKNOWN_ID
+            if ((data[3].toInt() and 0xFF) > MAX_BLEND_ID) return RESULT_UNKNOWN_ID
             while (layers.size <= index) layers.add(LayerConfig.empty())
             layers[index] = LayerConfig(
                 effectId = data[2], blendMode = data[3], enabled = true,
@@ -280,18 +315,29 @@ class VirtualTailTransport : BleTransport {
         0x02 -> { // set effect parameter
             if (data.size < 7) return RESULT_BAD_LENGTH
             val index = data[1].toInt() and 0xFF
+            if (index >= MAX_LED_LAYERS) return RESULT_OUT_OF_RANGE
             val paramId = data[2].toInt() and 0xFF
-            layers.getOrNull(index)?.let { layer ->
-                val params = layer.params.toMutableList()
-                if (paramId in params.indices) params[paramId] = data.f32(3)
-                layers[index] = layer.copy(params = params)
-            } ?: return RESULT_OUT_OF_RANGE
+            if (paramId >= 8) return RESULT_OUT_OF_RANGE
+            // A param write to an in-range layer that holds no effect is BAD_STATE,
+            // not OUT_OF_RANGE: the index is valid, the layer is simply empty. The
+            // growable layer list conflated the two before this.
+            val layer = layers.getOrNull(index)
+            if (layer == null || layer.isEmpty) return RESULT_BAD_STATE
+            val params = layer.params.toMutableList()
+            params[paramId] = data.f32(3)
+            layers[index] = layer.copy(params = params)
             RESULT_OK
         }
         0x03 -> { // remove layer — stamp empty in place, don't shift indices
+            if (data.size < 2) return RESULT_BAD_LENGTH
             val index = data[1].toInt() and 0xFF
-            if (index !in layers.indices) return RESULT_OUT_OF_RANGE
-            layers[index] = LayerConfig.empty()
+            if (index >= MAX_LED_LAYERS) return RESULT_OUT_OF_RANGE
+            if (index < layers.size) {
+                layers[index] = LayerConfig.empty()
+                // Trailing empty slots stop being reported, mirroring the
+                // firmware's num_layers trim; a populated layer keeps its index.
+                while (layers.isNotEmpty() && layers.last().isEmpty) layers.removeAt(layers.size - 1)
+            }
             RESULT_OK
         }
         0x04 -> { // set transform
@@ -343,11 +389,18 @@ class VirtualTailTransport : BleTransport {
             outputLimitMa = (data[3].toInt() and 0xFF) or ((data[4].toInt() and 0xFF) shl 8)
             RESULT_OK
         }
+        0x0C -> { // set frame rate — out of range is rejected, not clamped
+            if (data.size < 2) return RESULT_BAD_LENGTH
+            val fps = data[1].toInt() and 0xFF
+            if (fps < LED_FRAME_RATE_MIN || fps > LED_FRAME_RATE_MAX) RESULT_OUT_OF_RANGE else RESULT_OK
+        }
         0x05, 0x08 -> RESULT_OK // image chunk / begin: accepted, no CRC to verify here
-        else -> RESULT_OK
+        // Known-but-unmodelled commands (animation upload/finalize) are accepted;
+        // an id outside the allocated LED range is UNKNOWN_CMD.
+        else -> if (cmd in LED_CMD_RANGE) RESULT_OK else RESULT_UNKNOWN_CMD
     } }
 
-    private fun applySystem(data: ByteArray): Int { return when (data[0].toInt()) {
+    private fun applySystem(data: ByteArray): Int { val cmd = data[0].toInt() and 0xFF; return when (cmd) {
         0x01 -> { // set LED matrix
             val count = data[1].toInt() and 0xFF
             if (data.size < 2 + count) return RESULT_BAD_LENGTH
@@ -380,7 +433,10 @@ class VirtualTailTransport : BleTransport {
         0x08 -> applyOtaBegin(data)
         0x09 -> applyOtaFinalize()
         0x0A -> applyOtaAbort()
-        else -> RESULT_OK // get-info / get-caps / list-bonds are no-ops; the blocks are always in the read
+        // get-info / get-caps / list-bonds / select-descriptors are no-ops (their
+        // blocks are always in the FF06 read); an id outside the allocated system
+        // range is UNKNOWN_CMD.
+        else -> if (cmd in SYSTEM_CMD_RANGE) RESULT_OK else RESULT_UNKNOWN_CMD
     } }
 
     private fun applyProfile(data: ByteArray): Int {
@@ -426,7 +482,9 @@ class VirtualTailTransport : BleTransport {
                 )
                 RESULT_OK
             }
-            else -> RESULT_OK
+            // list-profiles is a no-op (the list is always in the FF08 read); an
+            // id outside the allocated profile range is UNKNOWN_CMD.
+            else -> if ((data[0].toInt() and 0xFF) in PROFILE_CMD_RANGE) RESULT_OK else RESULT_UNKNOWN_CMD
         }
     }
 
@@ -620,6 +678,14 @@ class VirtualTailTransport : BleTransport {
         f32(0f).f32(0f).f32(1f)        // gravity, resting flat
         f32(-90f).f32(90f)             // x limits
         f32(-45f).f32(45f)             // y limits
+        // Behavior block (MOT-6) then logical block (MOT-0), appended so the
+        // simulator emits the current firmware's 97-byte FF02 rather than the
+        // pre-behavior 77-byte layout. The behavior engine is not modelled:
+        // engine off, no reason, no flags, not the pattern on the motors. Logical
+        // positions equal the physical ones under the identity mix, which is what
+        // the simulator reports.
+        u8(0xFF).u8(0x00).u8(0x00).u8(0xFF)
+        repeat(4) { f32(0f) }          // logical positions
     }.toByteArray()
 
     private fun ledStateBytes(): ByteArray = Writer().apply {
@@ -775,6 +841,8 @@ class VirtualTailTransport : BleTransport {
 
         private const val RESULT_OK = 0x00
         private const val RESULT_BAD_LENGTH = 0x01
+        private const val RESULT_UNKNOWN_CMD = 0x02
+        private const val RESULT_UNKNOWN_ID = 0x03
         private const val RESULT_OUT_OF_RANGE = 0x04
         private const val RESULT_BAD_STATE = 0x05
 
@@ -783,6 +851,39 @@ class VirtualTailTransport : BleTransport {
         private const val RESULT_OTA_BAD_IMAGE = 0x07
         private const val RESULT_OTA_WRONG_PROJECT = 0x08
         private const val RESULT_OTA_SAME_VERSION = 0x09
+
+        // Bounds the simulator validates a command against, so an ACK reports the
+        // same accept/reject the firmware would. All mirror the firmware's own
+        // limits (config_types.h / ble_protocol.h); a value here that disagreed
+        // would be a conformance divergence rather than a fix for one.
+        private const val MAX_SERVOS = 4
+        private const val MAX_AXES = 2
+        private const val MAX_LED_LAYERS = 8
+
+        // The device's effect/blend catalogue range. Effects are checked against
+        // the *firmware's* range (0..EFFECT_ANIMATION), not the app's LedEffect
+        // enum, which still lags the firmware's LED-3 additions - validating
+        // against the enum would reject effect ids a real device accepts.
+        private const val MAX_EFFECT_ID = 0x11
+        private const val MAX_BLEND_ID = 0x06 // BLEND_NORMAL
+
+        private const val LED_FRAME_RATE_MIN = 5
+        private const val LED_FRAME_RATE_MAX = 60
+        private const val MOTOR_SCALE_MIN = 0.001f
+        private const val MOTOR_SCALE_MAX = 100.0f
+        private const val GENTLE_SCALE_MIN = 0.05f
+        private const val GENTLE_SCALE_MAX = 1.0f
+        private const val AXIS_MIX_ROTATION_MAX = 180.0f
+        private const val AXIS_MIX_GAIN_MIN = 0.05f
+        private const val AXIS_MIX_GAIN_MAX = 20.0f
+
+        // Allocated command-id ranges per write characteristic. An id inside the
+        // range that the simulator does not model is still a real command and is
+        // accepted; an id outside it is answered UNKNOWN_CMD, as the firmware does.
+        private val MOTION_CMD_RANGE = 0x01..0x16
+        private val LED_CMD_RANGE = 0x01..0x0F
+        private val SYSTEM_CMD_RANGE = 0x01..0x0A
+        private val PROFILE_CMD_RANGE = 0x01..0x05
 
         private fun defaultRainbowLayer() = LayerConfig(
             effectId = 0x00, // Rainbow
