@@ -2,8 +2,8 @@
 
 > ## Delivery status
 >
-> Milestones **M1–M4 are complete on both sides**. M5 has its streaming and
-> catalogue half; M6 has not started. Everything below is the plan as written;
+> **All six milestones are complete on both sides**, and the protocol has had its
+> one announced breaking cleanup (v6). Everything below is the plan as written;
 > the [milestone table](#5-joint-milestones) carries the live status.
 >
 > | Milestone | State |
@@ -11,30 +11,40 @@
 > | M1 — Honest tethered control | **done** |
 > | M2 — A body the effects can feel | **done** |
 > | M3 — One mic, one beat | **done** |
-> | M4 — Looks that survive the phone leaving | **done** — LED-1/2/3/4/7, the app's parity mirror and the native export mapping (A3-1..3) |
-> | M5 — Motion that dances | **streaming (MOT-11 + A4-2), the visualizer (A4-1), the pattern catalogue (MOT-5), crossfade (MOT-7) and gravity fusion (MOT-9) done**; MOT-0, MOT-6, MOT-8 and A4-3/A4-4 outstanding |
-> | M6 — A shippable device | not started; A5-3's acknowledgement correlation landed early |
->
-> **A parked branch, not lost work.** `TailFirmware` `wip/roadmap-phase2` holds an
-> interrupted first pass at MOT-2/3/4/6/8/10, SYS-1/2/3/6/9, LED-5/6 and QA-1/2.
-> It **does not build** and none of it has tests, which is why it is on its own
-> branch rather than merged: an untested firmware feature that looks finished is
-> worse than an absent one, because it gets trusted. Its commit message carries
-> the command-id allocation each feature was written against, so resuming one at
-> a time does not produce collisions.
+> | M4 — Looks that survive the phone leaving | **done** — LED-1/2/3/4/7, the app parity mirror + native export (A3-1..3) |
+> | M5 — Motion that dances | **done** — MOT-0 mixer, MOT-1 encoder assist, MOT-5 catalogue, MOT-6 behavior engine, MOT-7 crossfade, MOT-8 keyframes, MOT-9 fusion, MOT-11 streaming; app A4-1..4 |
+> | M6 — A shippable device | **done** — SYS-1 battery, SYS-2 OTA, SYS-3 diagnostics, SYS-6 DIS/name/bonds, SYS-9 descriptors, MOT-3 driver health; app A5-1..3 |
 >
 > The device is no longer dependent on a paired phone for anything beyond a
-> rainbow: it has seventeen LED effects and ten motion patterns of its own, and
-> the three tail-reactive effects light it from its own movement. What the phone
-> still uniquely provides is the microphone — hence the FF05 beat trailer, which
-> is what lets the device's own audio wag lock to a beat it cannot hear.
+> rainbow: it has eighteen LED effects and ten motion patterns of its own, a mood
+> state machine, and three tail-reactive effects that light it from its own
+> movement. What the phone still uniquely provides is the microphone — hence the
+> FF05 beat trailer, which lets the device's own audio wag and animations lock to
+> a beat it cannot hear.
 >
-> The protocol landed as **v5** rather than in two steps: nothing shipped between
-> the v4 catch-up and the additive v5 changes, so they were bundled into one
-> announced version on both sides rather than inventing an intermediate release.
+> **The protocol reached v6 in three announced steps.** v4/v5 were bundled into
+> one version (nothing shipped between them). **v6 (SYS-8 / A5-3)** is the one
+> planned break, released on both repos together: it retired the vestigial PID
+> (the motors have been open-loop steppers since `d4973bf`) and made the FF06 read
+> self-describing — each trailing block now carries a `[tag][len]` prefix, so a
+> reader skips a block it does not know rather than mis-reading the bytes of
+> whatever used to follow it. That ends the positional drift that produced a
+> recurring class of bug: an appended block silently shifting every offset behind
+> it. A v5 device is surfaced as an unsupported-version banner, not parsed on a
+> best-effort basis.
 >
-> **Date:** 2026-07-24 · **Scope:** the app's implemented feature surface (this repo),
-> the firmware's implemented surface and its 2026-07-24 design review
+> **Two guards keep the "green tests, dead on device" failure from recurring.**
+> The host build fakes the hardware seams, so a source absent from the firmware
+> build, or a function defined only in a fake, can pass every test while never
+> running on the device — which happened repeatedly. `check_sources_registered.sh`
+> catches the first; `check_ble_service_defined.sh` the second; both run in CI. The
+> QA-5 conformance vectors, exported from the firmware's own dispatch path and
+> replayed against the app's simulator, catch the two implementations drifting
+> apart on the wire.
+>
+> **Report dated** 2026-07-24; **delivery completed** 2026-07-25 (protocol v6).
+> **Scope:** the app's implemented feature surface (this repo), the firmware's
+> implemented surface and its 2026-07-24 design review
 > (`TailFirmware/docs/design-review-and-roadmap.md`), and the alignment between the two.
 >
 > This document supersedes `docs/DevelopmentPlan.md` for forward planning — that plan's
@@ -272,8 +282,8 @@ runs before/alongside M2 and must be complete before M4.
 | **M2 — A body the effects can feel** | Tap the tail and the lights ripple; wag it and they glow | A1-1..5 | HARD-9, SYS-7 | **done** (MOT-10 still later) |
 | **M3 — One mic, one beat** | BeatLight and the firmware's own effects run at once, and the device knows the beat | A2-1, A2-2 | LED-8, M2-fix (loudness wiring) | **done** |
 | **M4 — Looks that survive the phone leaving** | A composer look (or its honest approximation) installs to a profile and works standalone | A3-1..3 | HARD-2/3, LED-1, LED-2, LED-3, LED-4, LED-7 | **done** — the ten-effect catalogue, the palettes, the app's parity mirror, and eight effects now exporting natively instead of degrading |
-| **M5 — Motion that dances** | The tail moves to the same analysis as the lights: streamed targets, keyframes, behavior engine | A4-1..4 | MOT-0, MOT-7, MOT-11, MOT-8, MOT-6 | **MOT-11, A4-1, A4-2, MOT-5, MOT-7, MOT-9 done**; MOT-0/6/8 and A4-3/A4-4 outstanding (first pass parked on `wip/roadmap-phase2`) |
-| **M6 — A shippable device** | OTA, battery, diagnostics, and one clean protocol break | A5-1..3 | SYS-1, SYS-2, SYS-3, SYS-6, SYS-8, SYS-9 | not started. Two pieces landed early because they were correctness gaps rather than features: A6-3's liveness pairing, and A5-3's FF09 acknowledgement correlation |
+| **M5 — Motion that dances** | The tail moves to the same analysis as the lights: streamed targets, keyframes, behavior engine | A4-1..4 | MOT-0, MOT-7, MOT-11, MOT-8, MOT-6 | **done** — mixer, encoder assist, catalogue, behavior engine, crossfade, keyframes, fusion and streaming; app visualizer, manual pad, keyframe editor and behavior UI |
+| **M6 — A shippable device** | OTA, battery, diagnostics, and one clean protocol break | A5-1..3 | SYS-1, SYS-2, SYS-3, SYS-6, SYS-8, SYS-9 | **done** — battery, OTA, diagnostics, DIS/name/bonds, descriptors and driver health; protocol v6 (SYS-8/A5-3) is the one announced break, released on both repos together |
 
 ### What M4 delivered, and what it did not
 
