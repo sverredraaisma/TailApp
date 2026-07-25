@@ -7,7 +7,6 @@ import com.tailapp.model.LayerConfig
 import com.tailapp.model.LedOutputState
 import com.tailapp.model.MotionLimits
 import com.tailapp.model.MotionSystemState
-import com.tailapp.model.PidGains
 import com.tailapp.model.ServoConfig
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
@@ -33,15 +32,37 @@ object FirmwarePayloads {
             out.write(ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putFloat(value).array())
         }
         fun bytes(value: ByteArray) = apply { out.write(value) }
+
+        /**
+         * Writes a v6 FF06 framed block: `[tag][len u16 LE][payload]`. The
+         * payload is built into its own buffer so its length is known before the
+         * prefix — the same shape `app_bridge.cpp` writes, and what lets the
+         * parser locate a block by tag and skip one it does not model by `len`.
+         */
+        fun block(tag: Int, build: Writer.() -> Unit) = apply {
+            val payload = Writer().apply(build).toByteArray()
+            u8(tag).u16(payload.size).bytes(payload)
+        }
+
         fun toByteArray(): ByteArray = out.toByteArray()
     }
 
     val DEFAULT_SERVOS: List<ServoConfig> = listOf(
-        ServoConfig(axis = 0, half = 0, invert = false, muxChannel = 0, pid = PidGains(1.0f, 0f, 0f)),
-        ServoConfig(axis = 0, half = 1, invert = true, muxChannel = 1, pid = PidGains(2.0f, 0.1f, 0.5f)),
-        ServoConfig(axis = 1, half = 0, invert = false, muxChannel = 2, pid = PidGains(3.0f, 0.2f, 1.5f)),
-        ServoConfig(axis = 1, half = 1, invert = true, muxChannel = 3, pid = PidGains(4.0f, 0.3f, 2.5f))
+        ServoConfig(axis = 0, half = 0, invert = false, muxChannel = 0),
+        ServoConfig(axis = 0, half = 1, invert = true, muxChannel = 1),
+        ServoConfig(axis = 1, half = 0, invert = false, muxChannel = 2),
+        ServoConfig(axis = 1, half = 1, invert = true, muxChannel = 3)
     )
+
+    // FF06_BLK_* tags — the v6 framing prefix for each trailing block, from
+    // TailFirmware `main/ble/ble_protocol.h`.
+    private const val FF06_BLK_CAPABILITIES = 0x01
+    private const val FF06_BLK_MOTION = 0x02
+    private const val FF06_BLK_TUNING = 0x03
+    private const val FF06_BLK_OTA = 0x04
+    private const val FF06_BLK_TAP = 0x05
+    private const val FF06_BLK_AXIS_MIX = 0x06
+    private const val FF06_BLK_IDENTITY = 0x07
 
     val DEFAULT_IMUS: List<ImuConfig> = listOf(
         ImuConfig(muxChannel = 4, tapEnabled = true),
@@ -179,18 +200,19 @@ object FirmwarePayloads {
     )
 
     /**
-     * FF06 system info + capabilities + motion block, and optionally the SYS-6
-     * identity block.
+     * FF06 system info: the fixed preamble, then the v6 framed blocks.
      *
-     * Pass `capabilities = null` for pre-capability firmware, or `motion = null`
-     * for firmware older than protocol v4. The motion block is only emitted when
-     * the capability block is, matching the device's own layout.
+     * The preamble carries the 4-byte servo record (assignment only — the PID
+     * gains are retired as of v6). Each trailing block is emitted with its
+     * `[tag][len]` prefix, so a reader finds it by tag and skips one it does not
+     * model by `len`.
      *
-     * `deviceName` non-null emits the identity block — and with it the four
-     * blocks the device puts in front of it (motion tuning, OTA version/rollback,
-     * per-IMU tap config, axis mix), because on a real device the identity block
-     * only exists on firmware that already publishes all of them, and it is only
-     * findable by walking their exact lengths.
+     * The gates mirror what an older device would omit rather than the wire
+     * order (which v6 no longer fixes): `capabilities = null` stops after the
+     * preamble; `motion = null` stops after the capability block; and
+     * `deviceName` non-null is what adds the tuning, OTA, tap, axis-mix and
+     * identity blocks, because those arrived together on the firmware that first
+     * published a name.
      */
     fun systemInfo(
         protocolVersion: Int = Protocol.SUPPORTED_PROTOCOL_VERSION,
@@ -215,7 +237,6 @@ object FirmwarePayloads {
             w.u8(servo.half)
             w.bool(servo.invert)
             w.u8(servo.muxChannel)
-            w.f32(servo.pid.kp).f32(servo.pid.ki).f32(servo.pid.kd)
         }
         if (imus == null) return w.toByteArray()
         w.u8(imus.size)
@@ -224,46 +245,60 @@ object FirmwarePayloads {
             w.bool(imu.tapEnabled)
         }
         if (capabilities == null) return w.toByteArray()
-        w.u8(capabilities.patternIds.size)
-        capabilities.patternIds.forEach { w.u8(it.toInt()) }
-        w.u8(capabilities.effectIds.size)
-        capabilities.effectIds.forEach { w.u8(it.toInt()) }
-        w.u8(capabilities.blendModeIds.size)
-        capabilities.blendModeIds.forEach { w.u8(it.toInt()) }
-        w.u8(capabilities.maxLayers)
-        w.u8(capabilities.maxServos)
-        w.u8(capabilities.maxImus)
-        w.u8(capabilities.maxLedRings)
-        w.u8(capabilities.imageMaxDim)
+        w.block(FF06_BLK_CAPABILITIES) {
+            u8(capabilities.patternIds.size)
+            capabilities.patternIds.forEach { u8(it.toInt()) }
+            u8(capabilities.effectIds.size)
+            capabilities.effectIds.forEach { u8(it.toInt()) }
+            u8(capabilities.blendModeIds.size)
+            capabilities.blendModeIds.forEach { u8(it.toInt()) }
+            u8(capabilities.maxLayers)
+            u8(capabilities.maxServos)
+            u8(capabilities.maxImus)
+            u8(capabilities.maxLedRings)
+            u8(capabilities.imageMaxDim)
+        }
         if (motion == null) return w.toByteArray()
-        w.bool(motion.motorsEnabled)
-        repeat(servos.size) { i ->
-            val lim = motion.limits.getOrElse(i) { MotionLimits.FIRMWARE_DEFAULT }
-            w.f32(lim.maxVelocity).f32(lim.maxAcceleration).f32(lim.maxJerk)
-            w.u8(lim.stallThreshold)
+        w.block(FF06_BLK_MOTION) {
+            bool(motion.motorsEnabled)
+            repeat(servos.size) { i ->
+                val lim = motion.limits.getOrElse(i) { MotionLimits.FIRMWARE_DEFAULT }
+                f32(lim.maxVelocity).f32(lim.maxAcceleration).f32(lim.maxJerk)
+                u8(lim.stallThreshold)
+            }
         }
         if (deviceName == null) return w.toByteArray()
-        w.unmodelledBlocks(servos.size, imus.size, ota, tuning)
-        val nameBytes = deviceName.toByteArray(Charsets.UTF_8)
-        w.u8(nameBytes.size)
-        w.bytes(nameBytes)
-        w.u8(bonds.size)
-        bonds.forEach { bond ->
-            w.u8(bond.addressType)
-            bond.address.forEach { w.u8(it) }
+        w.block(FF06_BLK_TUNING) {
+            repeat(servos.size) { i -> f32(tuning.motorScales.getOrElse(i) { 1f }) }
+            f32(tuning.gentleScale)
+            u8(tuning.keyframeSlot).u8(tuning.sequenceOccupancy)
+        }
+        w.block(FF06_BLK_OTA) {
+            u8(ota.running.first).u8(ota.running.second).u8(ota.running.third)
+            bool(ota.pendingVerify)
+            val other = ota.other
+            bool(other != null)
+            u8(other?.first ?: 0).u8(other?.second ?: 0).u8(other?.third ?: 0)
+        }
+        w.block(FF06_BLK_TAP) {
+            repeat(imus.size) { u8(1).u8(40).u8(2).u8(50).u8(0) }
+        }
+        w.block(FF06_BLK_AXIS_MIX) {
+            f32(0f).f32(1f).f32(1f).u8(0).u8(0)        // identity mix
+        }
+        w.block(FF06_BLK_IDENTITY) {
+            val nameBytes = deviceName.toByteArray(Charsets.UTF_8)
+            u8(nameBytes.size)
+            bytes(nameBytes)
+            u8(bonds.size)
+            bonds.forEach { bond ->
+                u8(bond.addressType)
+                bond.address.forEach { u8(it) }
+            }
         }
         return w.toByteArray()
     }
 
-    /**
-     * The blocks the device emits between the motion block and the identity
-     * block, at their real lengths: motion tuning, the OTA version/rollback
-     * block, per-IMU tap config, and the axis mix.
-     *
-     * Nothing in the app reads them. They are here because the identity block
-     * after them cannot be located without walking them, so a length that
-     * disagreed with the firmware would silently move the bond list.
-     */
     /** The motion-tuning block's values; defaults reproduce the original bytes. */
     data class TuningBlock(
         val motorScales: List<Float> = listOf(1f, 1f, 1f, 1f),
@@ -271,25 +306,6 @@ object FirmwarePayloads {
         val keyframeSlot: Int = 0,
         val sequenceOccupancy: Int = 0
     )
-
-    private fun Writer.unmodelledBlocks(
-        numServos: Int,
-        numImus: Int,
-        ota: OtaBlock,
-        tuning: TuningBlock = TuningBlock()
-    ) {
-        repeat(numServos) { i -> f32(tuning.motorScales.getOrElse(i) { 1f }) } // units per deg/s
-        f32(tuning.gentleScale)                        // gentle scale
-        u8(tuning.keyframeSlot).u8(tuning.sequenceOccupancy) // keyframe slot, sequence occupancy
-        // OTA version/rollback block (OTA_INFO_BLOCK_SIZE = 8).
-        u8(ota.running.first).u8(ota.running.second).u8(ota.running.third)
-        bool(ota.pendingVerify)
-        val other = ota.other
-        bool(other != null)
-        u8(other?.first ?: 0).u8(other?.second ?: 0).u8(other?.third ?: 0)
-        repeat(numImus) { u8(1).u8(40).u8(2).u8(50).u8(0) }
-        f32(0f).f32(1f).f32(1f).u8(0).u8(0)            // axis mix: identity
-    }
 
     /**
      * The standard Battery Level read (0x2A19). `percent = null` builds the

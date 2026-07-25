@@ -223,10 +223,7 @@ class VirtualTailTransport : BleTransport {
             motionParams[id] = data.f32(2)
             RESULT_OK
         }
-        0x04 -> { // set PID — vestigial (open-loop), but the servo index is still bounded
-            if (data.size < 14) return RESULT_BAD_LENGTH
-            if ((data[1].toInt() and 0xFF) >= MAX_SERVOS) RESULT_OUT_OF_RANGE else RESULT_OK
-        }
+        0x04 -> RESULT_UNKNOWN_CMD // set PID retired in v6; the id answers UNKNOWN_CMD and is never reused
         0x06 -> { // set axis limits — an inverted window pins the axis to one end
             if (data.size < 10) return RESULT_BAD_LENGTH
             if ((data[1].toInt() and 0xFF) >= MAX_AXES) return RESULT_OUT_OF_RANGE
@@ -716,6 +713,8 @@ class VirtualTailTransport : BleTransport {
 
     private fun systemInfoBytes(): ByteArray = Writer().apply {
         val caps = Capabilities.DEFAULT
+        // Preamble (never framed). The servo record is the assignment only since
+        // v6 — the PID gains that used to follow it are retired.
         u8(Protocol.SUPPORTED_PROTOCOL_VERSION)
         u8(1).u8(0).u8(0)              // firmware version, arbitrary
         u8(4)                          // num servos
@@ -724,49 +723,62 @@ class VirtualTailTransport : BleTransport {
             u8(i % 2)                  // half
             bool(false)               // invert
             u8(i)                      // mux channel
-            f32(1f).f32(0f).f32(0f)    // PID
         }
         u8(2)                          // num IMUs
         u8(4).bool(false)
         u8(5).bool(false)
-        u8(caps.patternIds.size); caps.patternIds.forEach { u8(it.toInt()) }
-        u8(caps.effectIds.size); caps.effectIds.forEach { u8(it.toInt()) }
-        u8(caps.blendModeIds.size); caps.blendModeIds.forEach { u8(it.toInt()) }
-        u8(caps.maxLayers)
-        u8(caps.maxServos)
-        u8(caps.maxImus)
-        u8(caps.maxLedRings)
-        u8(caps.imageMaxDim)
-        // Motion block (protocol v4): live motor state + per-motor open-loop
-        // limits. Reporting the profile's real defaults rather than zeros, the
-        // way the firmware does.
-        bool(motorsEnabled)
-        motionLimits.forEach { lim ->
-            f32(lim.maxVelocity).f32(lim.maxAcceleration).f32(lim.maxJerk)
-            u8(lim.stallThreshold)
+        // Framed blocks: each is [tag][len u16 LE][payload]. Order is not part of
+        // the contract, so the natural declaration order is emitted here and the
+        // app finds each block by tag; an app that skips one it does not model
+        // still lands on the next.
+        block(FF06_BLK_CAPABILITIES) {
+            u8(caps.patternIds.size); caps.patternIds.forEach { u8(it.toInt()) }
+            u8(caps.effectIds.size); caps.effectIds.forEach { u8(it.toInt()) }
+            u8(caps.blendModeIds.size); caps.blendModeIds.forEach { u8(it.toInt()) }
+            u8(caps.maxLayers)
+            u8(caps.maxServos)
+            u8(caps.maxImus)
+            u8(caps.maxLedRings)
+            u8(caps.imageMaxDim)
         }
-        // Blocks nothing on this side models, emitted at their real lengths
-        // because the identity block after them is only findable by walking
-        // them: motion tuning, OTA version/rollback, per-IMU tap, axis mix.
-        repeat(4) { f32(1f) }          // units per deg/s
-        f32(0.5f)                      // gentle scale
-        u8(0).u8(0)                    // keyframe slot, sequence occupancy
+        // Motion block: live motor state + per-motor open-loop limits. Reporting
+        // the profile's real defaults rather than zeros, the way the firmware does.
+        block(FF06_BLK_MOTION) {
+            bool(motorsEnabled)
+            motionLimits.forEach { lim ->
+                f32(lim.maxVelocity).f32(lim.maxAcceleration).f32(lim.maxJerk)
+                u8(lim.stallThreshold)
+            }
+        }
+        block(FF06_BLK_TUNING) {
+            repeat(4) { f32(1f) }      // units per deg/s
+            f32(0.5f)                  // gentle scale
+            u8(0).u8(0)                // keyframe slot, sequence occupancy
+        }
         // OTA version/rollback (SYS-2). The other slot fills in once a finalize
         // stages an image, which is how "installed — restart to apply" is shown
         // without the app having to remember it just uploaded something.
-        u8(otaRunning[0]).u8(otaRunning[1]).u8(otaRunning[2])
-        u8(0)                          // pending verify: no reboot in the simulator
-        val other = otaOther
-        bool(other != null)
-        u8(other?.major ?: 0).u8(other?.minor ?: 0).u8(other?.patch ?: 0)
-        repeat(2) { u8(1).u8(40).u8(2).u8(50).u8(0) } // tap: engine, thresh, sens, quiet ms
-        f32(0f).f32(1f).f32(1f).u8(0).u8(0)           // axis mix: identity
+        block(FF06_BLK_OTA) {
+            u8(otaRunning[0]).u8(otaRunning[1]).u8(otaRunning[2])
+            u8(0)                      // pending verify: no reboot in the simulator
+            val other = otaOther
+            bool(other != null)
+            u8(other?.major ?: 0).u8(other?.minor ?: 0).u8(other?.patch ?: 0)
+        }
+        block(FF06_BLK_TAP) {
+            repeat(2) { u8(1).u8(40).u8(2).u8(50).u8(0) } // engine, thresh, sens, quiet ms
+        }
+        block(FF06_BLK_AXIS_MIX) {
+            f32(0f).f32(1f).f32(1f).u8(0).u8(0)           // identity mix
+        }
         // Identity block (SYS-6): the advertised name, then the bond list.
-        val nameBytes = deviceName.toByteArray(Charsets.UTF_8)
-        u8(nameBytes.size)
-        bytes(nameBytes)
-        u8(bonds.size)
-        bonds.forEach { (type, address) -> u8(type).bytes(address) }
+        block(FF06_BLK_IDENTITY) {
+            val nameBytes = deviceName.toByteArray(Charsets.UTF_8)
+            u8(nameBytes.size)
+            bytes(nameBytes)
+            u8(bonds.size)
+            bonds.forEach { (type, address) -> u8(type).bytes(address) }
+        }
     }.toByteArray()
 
     /**
@@ -863,6 +875,18 @@ class VirtualTailTransport : BleTransport {
             out.write(ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putFloat(value).array())
         }
         fun bytes(value: ByteArray) = apply { out.write(value) }
+
+        /**
+         * Writes a v6 FF06 framed block: `[tag][len u16 LE][payload]`. The
+         * payload is built into its own buffer so its length is known before the
+         * prefix is written — the reader locates the block by tag and skips one
+         * it does not know by this length.
+         */
+        fun block(tag: Int, build: Writer.() -> Unit) = apply {
+            val payload = Writer().apply(build).toByteArray()
+            u8(tag).u16(payload.size).bytes(payload)
+        }
+
         fun toByteArray(): ByteArray = out.toByteArray()
     }
 
@@ -883,6 +907,16 @@ class VirtualTailTransport : BleTransport {
 
         /** `DIAGNOSTICS_VERSION` — the FF0C format the simulated tail publishes. */
         private const val DIAG_FORMAT_VERSION = 3
+
+        // FF06_BLK_* tags — the v6 framing prefix for each trailing block, from
+        // TailFirmware `main/ble/ble_protocol.h`.
+        private const val FF06_BLK_CAPABILITIES = 0x01
+        private const val FF06_BLK_MOTION = 0x02
+        private const val FF06_BLK_TUNING = 0x03
+        private const val FF06_BLK_OTA = 0x04
+        private const val FF06_BLK_TAP = 0x05
+        private const val FF06_BLK_AXIS_MIX = 0x06
+        private const val FF06_BLK_IDENTITY = 0x07
 
         /** 48 LEDs across five rings — a plausible tail, and what the tests use. */
         private val DEFAULT_MATRIX = listOf(8, 10, 12, 10, 8)

@@ -55,17 +55,6 @@ class CommandBuilderTest {
     }
 
     @Test
-    fun `setPidGains is fourteen bytes`() {
-        val cmd = MotionCommands.setPidGains(servoId = 3, kp = 1.5f, ki = 0.25f, kd = 0.125f)
-        assertEquals(14, cmd.size)
-        assertEquals(0x04.toByte(), cmd[0])
-        assertEquals(3.toByte(), cmd[1])
-        assertEquals(1.5f, cmd.f32At(2), 0f)
-        assertEquals(0.25f, cmd.f32At(6), 0f)
-        assertEquals(0.125f, cmd.f32At(10), 0f)
-    }
-
-    @Test
     fun `calibrateZero has no payload`() {
         assertArrayEquals(byteArrayOf(0x05), MotionCommands.calibrateZero())
     }

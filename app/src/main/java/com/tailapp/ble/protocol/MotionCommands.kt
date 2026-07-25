@@ -36,15 +36,10 @@ object MotionCommands {
         byteArrayOf(0x03, servoId, axis, half, invert, muxChannel)
     }
 
-    fun setPidGains(servoId: Byte, kp: Float, ki: Float, kd: Float): ByteArray {
-        val buf = ByteBuffer.allocate(14).order(ByteOrder.LITTLE_ENDIAN)
-        buf.put(0x04)
-        buf.put(servoId)
-        buf.putFloat(kp)
-        buf.putFloat(ki)
-        buf.putFloat(kd)
-        return buf.array()
-    }
+    // Command id `0x04` (Set PID gains) is retired as of protocol v6 and never
+    // reused: the motors run open-loop, so the gains never shaped motion, and a
+    // write of `0x04` now answers `UNKNOWN_CMD`. Motion is shaped by
+    // [setMotionLimits] instead.
 
     fun calibrateZero(): ByteArray = byteArrayOf(0x05)
 
@@ -64,8 +59,8 @@ object MotionCommands {
      * `0x08` Set the open-loop motion limits and StallGuard threshold for one
      * motor (protocol v4).
      *
-     * These are what actually shape motion now that the steppers run open-loop —
-     * [setPidGains] is retained only for wire compatibility. A limit of `0` means
+     * These are what shape motion now that the steppers run open-loop — the PID
+     * gains they replaced are retired as of protocol v6. A limit of `0` means
      * "keep the firmware default" rather than "don't move".
      *
      * [stallThreshold] is the TMC2209 SGTHRS value; `0` disables stall detection

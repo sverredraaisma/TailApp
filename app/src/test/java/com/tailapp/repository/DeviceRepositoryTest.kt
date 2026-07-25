@@ -319,20 +319,6 @@ class DeviceRepositoryTest {
     }
 
     @Test
-    fun `setPidGains updates the cached gains so sliders do not snap back`() = runTest {
-        val transport = FakeBleTransport()
-        val repository = connected(transport)
-
-        repository.setPidGains(servoId = 2, kp = 5f, ki = 0.4f, kd = 1f)
-        advanceUntilIdle()
-
-        val pid = requireNotNull(repository.deviceState.value.systemInfo).servos[2].pid
-        assertEquals(5f, pid.kp, 0f)
-        assertEquals(0.4f, pid.ki, 1e-6f)
-        assertEquals(1f, pid.kd, 0f)
-    }
-
-    @Test
     fun `selecting a pattern clears the cached params like the firmware does`() = runTest {
         val transport = FakeBleTransport()
         val repository = connected(transport)
@@ -378,7 +364,7 @@ class DeviceRepositoryTest {
         val repository = connected(transport)
         val before = repository.deviceState.value.systemInfo
 
-        repository.setPidGains(servoId = 9, kp = 1f, ki = 1f, kd = 1f)
+        repository.setServoConfig(servoId = 9, axis = 0, half = 0, invert = 0)
         repository.setImuTap(imuId = 9, enabled = true)
         advanceUntilIdle()
 
@@ -764,7 +750,7 @@ class DeviceRepositoryTest {
         val info = requireNotNull(repository.deviceState.value.systemInfo)
         assertEquals(99, info.protocolVersion)
         assertFalse(info.isProtocolSupported)
-        assertEquals(5, Protocol.SUPPORTED_PROTOCOL_VERSION)
+        assertEquals(6, Protocol.SUPPORTED_PROTOCOL_VERSION)
     }
 
     // ── Stall handling ─────────────────────────────────────────────

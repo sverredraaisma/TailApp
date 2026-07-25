@@ -532,14 +532,6 @@ class DeviceRepository(
         }
     }
 
-    suspend fun setPidGains(servoId: Byte, kp: Float, ki: Float, kd: Float) {
-        sendCommand(
-            CharacteristicUuids.MOTION_CMD,
-            MotionCommands.setPidGains(servoId, kp, ki, kd)
-        )
-        updateServo(servoId.toInt()) { it.copy(pid = it.pid.copy(kp = kp, ki = ki, kd = kd)) }
-    }
-
     suspend fun calibrateZero() {
         sendCommand(CharacteristicUuids.MOTION_CMD, MotionCommands.calibrateZero())
     }
@@ -559,8 +551,8 @@ class DeviceRepository(
     /**
      * Sets the open-loop motion limits and stall sensitivity for one motor.
      *
-     * These are what shape motion on the current firmware; [setPidGains] is kept
-     * only for wire compatibility with the vestigial FF06 fields.
+     * These are what shape motion on the current firmware; the PID gains they
+     * replaced are retired as of protocol v6.
      */
     suspend fun setMotionLimits(
         servoId: Byte,

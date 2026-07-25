@@ -4,18 +4,17 @@ import com.tailapp.ble.ConnectionState
 import com.tailapp.ble.protocol.CommandResult
 import com.tailapp.ble.protocol.Protocol
 
-data class PidGains(
-    val kp: Float,
-    val ki: Float,
-    val kd: Float
-)
-
+/**
+ * One motor's physical assignment, from the FF06 servo record. Since protocol
+ * v6 the record is the assignment only ([axis][half][invert][muxChannel], 4
+ * bytes): the PID gains that used to follow are retired, because the steppers
+ * run open-loop and motion is shaped by [MotionLimits], not gains.
+ */
 data class ServoConfig(
     val axis: Int,
     val half: Int,
     val invert: Boolean,
-    val muxChannel: Int,
-    val pid: PidGains
+    val muxChannel: Int
 )
 
 data class ImuConfig(

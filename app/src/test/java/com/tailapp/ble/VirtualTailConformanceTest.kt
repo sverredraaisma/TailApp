@@ -180,17 +180,18 @@ class VirtualTailConformanceTest {
             ("motion_set_axis_limits" to 2)
                 to "FF02 telemetry + demo default pattern differ; length asserted",
 
-            // FF06 (char 6): a positional payload whose earlier blocks reflect a
-            // distinct device instance (servo config, and a capability catalogue
-            // that lags the firmware's effect set), and whose SYS-6 identity block
-            // the firmware on wip/roadmap-phase2 does not yet emit at all. Both
-            // are reported findings; the command's ACK is asserted.
+            // FF06 (char 6): the v6 read is framed, so the app locates each block
+            // by tag, but the simulator's block *contents* reflect a distinct
+            // device instance rather than this firmware's — the capability
+            // catalogue lags it (the app's LedEffect set has no ANIMATION, 17 ids
+            // vs 18) and the resting tap/tuning defaults differ. The framing is
+            // exercised; the byte compare is excluded, and the ACK is asserted.
             ("motion_set_motion_limits" to 6)
-                to "FF06 is positional over a distinct device config (servo/caps); firmware omits the identity block",
+                to "FF06 block contents reflect a distinct device instance (caps lag the firmware effect set; resting defaults differ)",
             ("motion_enable_motors_disable" to 6)
-                to "FF06 is positional over a distinct device config; firmware omits the identity block",
+                to "FF06 block contents reflect a distinct device instance (caps lag the firmware effect set; resting defaults differ)",
             ("system_set_device_name" to 6)
-                to "firmware's FF06 serialiser does not emit the SYS-6 device-name/bond block the app/docs expect (reported)",
+                to "FF06 block contents reflect a distinct device instance (caps lag the firmware effect set; resting defaults differ)",
 
             // FF04 (char 4): LCMD_SET_LAYER adopts the effect's own default params
             // on the device; the simulator zeroes them (it does not carry the

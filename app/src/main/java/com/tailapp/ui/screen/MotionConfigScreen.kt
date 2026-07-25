@@ -488,9 +488,9 @@ private fun ServoConfigRow(
                 valueFormat = "%.0f"
             )
 
-            // Motion limits — what actually shapes movement on this firmware.
-            // The steppers run open-loop through a jerk-limited profile, so
-            // these are the real controls; PID below is vestigial.
+            // Motion limits — what shapes movement on this firmware. The
+            // steppers run open-loop through a jerk-limited profile, so these
+            // are the real controls; the PID gains they replaced are retired.
             if (limits != null) {
                 Spacer(Modifier.height(8.dp))
                 Text("Motion limits", style = MaterialTheme.typography.bodyMedium)
@@ -551,46 +551,6 @@ private fun ServoConfigRow(
                         "too low never catches a real jam — tune against your mechanics.",
                     style = MaterialTheme.typography.bodySmall
                 )
-            }
-
-            // Vestigial: the motors are TMC2209 steppers driven open-loop as of
-            // firmware d4973bf, so these gains are stored and reported but no
-            // longer affect motion. Collapsed rather than removed because the
-            // firmware still accepts them and old profiles carry values.
-            var showLegacy by remember { mutableStateOf(false) }
-            Spacer(Modifier.height(8.dp))
-            TextButton(onClick = { showLegacy = !showLegacy }) {
-                Text(if (showLegacy) "Hide legacy PID gains" else "Show legacy PID gains")
-            }
-            AnimatedVisibility(visible = showLegacy) {
-                Column {
-                    Text(
-                        "Not used for control — the motors run open-loop. Kept for " +
-                            "compatibility with the FF06 layout.",
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                    DebouncedSlider(
-                        label = "Kp",
-                        value = servo.pid.kp,
-                        onValueChange = { viewModel.setPidGains(index.toByte(), it, servo.pid.ki, servo.pid.kd) },
-                        valueRange = 0f..10f,
-                        valueFormat = "%.2f"
-                    )
-                    DebouncedSlider(
-                        label = "Ki",
-                        value = servo.pid.ki,
-                        onValueChange = { viewModel.setPidGains(index.toByte(), servo.pid.kp, it, servo.pid.kd) },
-                        valueRange = 0f..1f,
-                        valueFormat = "%.3f"
-                    )
-                    DebouncedSlider(
-                        label = "Kd",
-                        value = servo.pid.kd,
-                        onValueChange = { viewModel.setPidGains(index.toByte(), servo.pid.kp, servo.pid.ki, it) },
-                        valueRange = 0f..5f,
-                        valueFormat = "%.2f"
-                    )
-                }
             }
         }
     }

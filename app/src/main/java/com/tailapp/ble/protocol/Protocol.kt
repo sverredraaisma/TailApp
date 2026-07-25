@@ -15,8 +15,15 @@ object Protocol {
      * v4 added the stall event, motor enable/disable, per-motor motion limits,
      * and the FF06 motion block. v5 added the FF09 sequence byte and readable
      * result, the readable FF07 event ring, and `RESULT_BUSY`.
+     *
+     * v6 is a bundled break: it retired the vestigial PID (FF01 `0x04` now
+     * answers `UNKNOWN_CMD`, the servo record shrank from 16 bytes to 4) and
+     * framed the FF06 trailing blocks with a `[tag][len]` prefix. A v5 device is
+     * therefore *unsupported* — its unframed FF06 and 16-byte servo record would
+     * mis-parse — which is why the mismatch is surfaced as a banner rather than
+     * parsed on a best-effort basis.
      */
-    const val SUPPORTED_PROTOCOL_VERSION = 5
+    const val SUPPORTED_PROTOCOL_VERSION = 6
 
     /** Profile slots the firmware exposes on FF08 (`MAX_PROFILE_SLOTS`). */
     const val MAX_PROFILE_SLOTS = 4

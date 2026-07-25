@@ -143,7 +143,7 @@ such thing as a non-reactive effect.
 nav argument. `composer` (the layer/folder editor) is reached from the BeatLight
 screen's "Edit" button rather than from the overview.
 
-## BLE protocol (v5)
+## BLE protocol (v6)
 
 `Protocol.SUPPORTED_PROTOCOL_VERSION` is the contract version this app targets;
 the device reports its own as the **first byte** of the FF06 read. A mismatch is
@@ -154,7 +154,11 @@ fail with `BAD_STATE`.
 Version history that still matters here: **v3** fixed the image CRC polynomial;
 **v4** added the stall event, motor enable/disable, per-motor motion limits and
 the FF06 motion block; **v5** added the FF09 sequence byte and readable last
-result, the readable FF07 event ring, and `RESULT_BUSY`.
+result, the readable FF07 event ring, and `RESULT_BUSY`. **v6** is a bundled
+break: it retired the vestigial PID (FF01 `0x04` now answers `UNKNOWN_CMD`, and
+the FF06 servo record shrank from 16 bytes to 4) and framed the FF06 trailing
+blocks with a `[tag][len]` prefix, so a v5 device is now *unsupported* rather
+than parsed on a best-effort basis.
 
 | UUID | Direction | Purpose |
 |---|---|---|
@@ -163,12 +167,14 @@ result, the readable FF07 event ring, and `RESULT_BUSY`.
 | FF03 | write | LED commands |
 | FF04 | read + notify | LED state |
 | FF05 | write-no-response | FFT audio stream |
-| FF06 | read/write | System info + capabilities |
+| FF06 | read/write | System info + capabilities. The read is a fixed preamble (4-byte servo record, no PID) then framed `[tag][len]` blocks, located by tag |
 | FF07 | read + notify | Events: tap base/tip, config changed, stall. The read returns a recent-event ring (`[count][evt]...`) |
 | FF08 | read/write | Profile slots (occupancy + names) |
 | FF09 | read + notify | Command result (ACK/error) for every non-FF05/FF0A write |
 | FF0A | write-no-response | Direct LED pixel stream (`DeviceRepository.streamDirectFrame`) |
 | FF0B | write-no-response | Live motion targets (`DeviceRepository.streamMotionTargets`) |
+| FF0C | read + notify (~1 Hz) | Diagnostics snapshot (`DiagnosticsParser`) |
+| FF0E | write-no-response + read/notify | OTA firmware image and its offset echo |
 
 Things worth remembering when touching this layer:
 
@@ -186,17 +192,21 @@ Things worth remembering when touching this layer:
   FF06 motion block's `motors_enabled` byte mirrors the latch — but only v4+
   firmware publishes that block, so `SystemInfo.motorsStalled` is deliberately
   false when it is absent rather than treating "unknown" as "stalled".
-- **PID is vestigial.** The motors are open-loop steppers; `MCMD_SET_MOTION_LIMITS`
-  (velocity/acceleration/jerk + StallGuard threshold) is what shapes motion now.
-  The PID commands and FF06 fields are retained for wire compatibility only, and
-  the UI keeps them behind a collapsed "legacy" section.
+- **PID is retired (v6).** The motors are open-loop steppers; `MCMD_SET_MOTION_LIMITS`
+  (velocity/acceleration/jerk + StallGuard threshold) is what shapes motion. The
+  `MCMD_SET_PID` command (`0x04`) now answers `UNKNOWN_CMD` and its id is never
+  reused; the gains left `ServoConfig` and the FF06 servo record, which is a
+  4-byte assignment record. There is no longer a legacy PID section in the UI.
 - **Image uploads use BEGIN → chunks → FINALIZE.** BEGIN (`0x08`) arms a length
   and CRC check that FINALIZE verifies.
 - **The image CRC is standard CRC-32 as of v3** (`java.util.zip.CRC32`).
   Firmware ≤ v2 used a non-standard `0xEDB88420` polynomial; `Crc32Test` asserts
   we no longer produce that variant.
-- **FF06 read offsets** are all shifted one byte by the leading
-  `protocol_version`, and the capability block is appended after the IMU block.
+- **FF06 read is framed (v6).** A fixed preamble (`protocol_version`, firmware
+  version, the 4-byte servo records, the IMU records) then `[tag][len]` blocks to
+  the end of the payload. `SystemInfoParser` finds each block by tag and skips an
+  unknown one by its `len`, so **block order is not part of the contract** and a
+  future block the app does not know is passed over, not fatal.
 - **`servo_config_t` is a historical name.** The motors are TMC2209 steppers as
   of firmware `d4973bf`; the FF01/FF06 servo payloads were deliberately left
   unchanged, so nothing on this side needed to move.

@@ -29,13 +29,10 @@ class MotionConfigViewModel(
         viewModelScope.launch { deviceRepository.setServoConfig(servoId, axis, half, invert, muxChannel) }
     }
 
-    fun setPidGains(servoId: Byte, kp: Float, ki: Float, kd: Float) {
-        viewModelScope.launch { deviceRepository.setPidGains(servoId, kp, ki, kd) }
-    }
-
     /**
      * Sets the open-loop motion limits and stall sensitivity for one motor.
-     * These shape motion on the current firmware; [setPidGains] no longer does.
+     * These shape motion on the current firmware; the PID gains they replaced
+     * were retired in protocol v6.
      */
     fun setMotionLimits(
         servoId: Byte,

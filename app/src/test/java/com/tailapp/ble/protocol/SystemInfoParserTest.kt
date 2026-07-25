@@ -11,8 +11,32 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 
+/**
+ * The FF06 read is protocol v6: a fixed preamble with a 4-byte servo record (no
+ * PID), then framed `[tag][len]` blocks located by tag rather than position.
+ * These tests assert numbers off a hand-built payload — including one whose
+ * blocks are out of declaration order with an unknown tag between them — and
+ * that a v5-style unframed payload is refused rather than mis-read.
+ */
 class SystemInfoParserTest {
+
+    // FF06_BLK_* tags (TailFirmware main/ble/ble_protocol.h).
+    private val CAPS = 0x01
+    private val MOTION = 0x02
+    private val TUNING = 0x03
+    private val OTA = 0x04
+    private val IDENTITY = 0x07
+
+    private fun f32(v: Float): ByteArray =
+        ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putFloat(v).array()
+
+    /** `[tag][len u16 LE][payload]` — one framed FF06 block. */
+    private fun frame(tag: Int, payload: ByteArray): ByteArray =
+        byteArrayOf(tag.toByte(), (payload.size and 0xFF).toByte(), ((payload.size shr 8) and 0xFF).toByte()) +
+            payload
 
     @Test
     fun `parses protocol version firmware version servos and imus`() {
@@ -27,9 +51,10 @@ class SystemInfoParserTest {
     }
 
     @Test
-    fun `servo fields land on the right offsets`() {
-        // Regression: before the protocol_version byte was accounted for, every
-        // field here was shifted by one and num_servos parsed as 0.
+    fun `the servo record is four bytes of assignment with no pid`() {
+        // Regression: the v6 servo record dropped the 12 bytes of PID gains, so a
+        // reader still striding 16 bytes would read every field past servo 0 out
+        // of the wrong place. The mux channel is what catches that.
         val info = requireNotNull(SystemInfoParser.parse(FirmwarePayloads.systemInfo()))
 
         val second = info.servos[1]
@@ -37,15 +62,11 @@ class SystemInfoParserTest {
         assertEquals(1, second.half)
         assertTrue(second.invert)
         assertEquals(1, second.muxChannel)
-        assertEquals(2.0f, second.pid.kp, 0f)
-        assertEquals(0.1f, second.pid.ki, 1e-6f)
-        assertEquals(0.5f, second.pid.kd, 0f)
 
         val fourth = info.servos[3]
         assertEquals(1, fourth.axis)
         assertEquals(1, fourth.half)
         assertEquals(3, fourth.muxChannel)
-        assertEquals(4.0f, fourth.pid.kp, 0f)
     }
 
     @Test
@@ -73,19 +94,17 @@ class SystemInfoParserTest {
     }
 
     @Test
-    fun `payload size tracks the capability lists it carries`() {
-        // The capability block is variable-length by construction - it lists
-        // whatever ids this firmware supports - so pinning one number would
-        // just have to be re-pinned every time an effect is added. Pin the
-        // arithmetic instead.
+    fun `payload size tracks the framed blocks it carries`() {
+        // Pin the framing arithmetic rather than a magic size: the capability
+        // block is variable-length by construction, and each block now costs a
+        // 3-byte [tag][len] prefix.
         val caps = Capabilities.DEFAULT
-        val capsBytes = 3 + caps.patternIds.size + caps.effectIds.size +
-            caps.blendModeIds.size + 5
-        val header = 5 + 4 * 16 + 1 + 2 * 2 // proto+fw+servos+imus
-        val motion = 1 + 4 * 13
+        val preamble = 5 + 4 * 4 + 1 + 2 * 2 // proto+fw+servos(4B each)+imus
+        val capsBlock = 3 + (3 + caps.patternIds.size + caps.effectIds.size + caps.blendModeIds.size + 5)
+        val motionBlock = 3 + (1 + 4 * 13)
 
-        assertEquals(header + capsBytes, FirmwarePayloads.systemInfo(motion = null).size)
-        assertEquals(header + capsBytes + motion, FirmwarePayloads.systemInfo().size)
+        assertEquals(preamble + capsBlock, FirmwarePayloads.systemInfo(motion = null).size)
+        assertEquals(preamble + capsBlock + motionBlock, FirmwarePayloads.systemInfo().size)
     }
 
     @Test
@@ -111,6 +130,139 @@ class SystemInfoParserTest {
         assertEquals(listOf(LedEffect.RAINBOW), parsed.effects)
     }
 
+    // ── framing: order-independence and unknown-tag skipping ────────
+
+    @Test
+    fun `framed blocks are found by tag regardless of order, unknown tag skipped`() {
+        // The blocks below are deliberately out of declaration order — identity
+        // first, an unknown tag next, then motion, and capabilities LAST — to
+        // prove the reader locates each by tag and skips the block it does not
+        // model by its length rather than depending on where it sits.
+        val preamble = byteArrayOf(
+            6,          // protocol v6
+            1, 2, 3,    // firmware 1.2.3
+            2,          // num servos
+            0, 0, 0, 5, // servo0: axis0 half0 invert0 mux5
+            1, 1, 1, 6, // servo1: axis1 half1 invert1 mux6
+            1,          // num imus
+            7, 1        // imu0: mux7 tap on
+        )
+        val capsPayload = byteArrayOf(1, 0, 1, 0, 1, 0, 8, 4, 2, 20, 32)
+        val motionPayload = byteArrayOf(1) +
+            f32(720f) + f32(3600f) + f32(36000f) + byteArrayOf(0) +
+            f32(360f) + f32(1800f) + f32(18000f) + byteArrayOf(60)
+        val identityPayload = byteArrayOf(2, 'H'.code.toByte(), 'i'.code.toByte(), 0)
+        val unknownPayload = byteArrayOf(9, 9, 9)
+
+        val data = preamble +
+            frame(IDENTITY, identityPayload) +
+            frame(0x42, unknownPayload) +   // a block this build does not model
+            frame(MOTION, motionPayload) +
+            frame(CAPS, capsPayload)
+
+        val info = requireNotNull(SystemInfoParser.parse(data))
+
+        assertEquals(6, info.protocolVersion)
+        assertEquals("1.2.3", info.firmwareVersion)
+        assertEquals(2, info.servos.size)
+        assertEquals(6, info.servos[1].muxChannel)
+
+        val caps = requireNotNull(info.capabilities)
+        assertEquals(listOf<Byte>(0), caps.patternIds)
+        assertEquals(8, caps.maxLayers)
+
+        val motion = requireNotNull(info.motion)
+        assertTrue(motion.motorsEnabled)
+        assertEquals(2, motion.limits.size)
+        assertEquals(720f, motion.limits[0].maxVelocity, 0f)
+        assertEquals(60, motion.limits[1].stallThreshold)
+
+        assertEquals("Hi", info.deviceName)
+    }
+
+    @Test
+    fun `a malformed block is skipped by its length, later blocks still parse`() {
+        // A correctly-framed capability block whose payload is too short to be a
+        // capability block, then a valid motion block. The bad block is dropped
+        // to null and skipped by its declared length, so the motion block after
+        // it is still located — a truncated payload would instead end the walk.
+        val preamble = byteArrayOf(
+            6, 1, 0, 0, 1, /* servo0 */ 0, 0, 0, 0, /* imus */ 1, 3, 0
+        )
+        val badCaps = frame(CAPS, byteArrayOf(5)) // readIdList wants 5 ids, has 0
+        val motionPayload = byteArrayOf(1) + f32(720f) + f32(3600f) + f32(36000f) + byteArrayOf(0)
+
+        val info = requireNotNull(SystemInfoParser.parse(preamble + badCaps + frame(MOTION, motionPayload)))
+
+        assertNull(info.capabilities)
+        val motion = requireNotNull(info.motion)
+        assertEquals(1, motion.limits.size)
+        assertEquals(720f, motion.limits[0].maxVelocity, 0f)
+    }
+
+    @Test
+    fun `a block whose length runs past the payload ends the walk cleanly`() {
+        // A frame that claims more bytes than remain is a framing error, not a
+        // field: the walk stops rather than reading a partial block, so nothing
+        // after the break is invented.
+        val preamble = byteArrayOf(6, 1, 0, 0, 1, 0, 0, 0, 0, 1, 3, 0)
+        val overlong = byteArrayOf(CAPS.toByte(), 0xFF.toByte(), 0x00) + byteArrayOf(1, 2, 3)
+
+        val info = requireNotNull(SystemInfoParser.parse(preamble + overlong))
+        assertNull(info.capabilities)
+        assertNull(info.motion)
+    }
+
+    // ── v5 rejection ────────────────────────────────────────────────
+
+    @Test
+    fun `a v5-style unframed payload is refused as unsupported, not mis-parsed`() {
+        // v5 carried a 16-byte servo record (with PID) and unframed trailing
+        // blocks. Fed to the v6 reader — which strides 4 bytes per servo and then
+        // expects frames — those bytes read as different servos and as a frame
+        // whose length overshoots, so the walk stops. What must hold is that this
+        // is refused (version says v5) and that no block is reconstructed from the
+        // PID floats: a v5 device is now unsupported, and that has to be visible.
+        val v5 = buildV5SystemInfo()
+        val info = requireNotNull(SystemInfoParser.parse(v5))
+
+        assertEquals(5, info.protocolVersion)
+        assertFalse(info.isProtocolSupported)
+        // servo 0's first four bytes are the same in both layouts; everything
+        // past it is misaligned, so the record is not silently accepted.
+        assertEquals(63, info.servos[1].muxChannel) // a byte of servo 0's kp float, not the v5 mux
+        // Nothing trailing is fabricated out of the 16-byte body.
+        assertNull(info.capabilities)
+        assertNull(info.motion)
+        assertNull(info.bonds)
+        assertNull(info.deviceName)
+    }
+
+    /** A representative v5 FF06 read: 16-byte servo records, unframed blocks. */
+    private fun buildV5SystemInfo(): ByteArray {
+        val out = ArrayList<Byte>()
+        fun u8(v: Int) { out.add((v and 0xFF).toByte()) }
+        fun f(v: Float) { f32(v).forEach { out.add(it) } }
+        u8(5); u8(1); u8(0); u8(0); u8(4) // proto v5, fw, num servos
+        val servos = listOf(
+            intArrayOf(0, 0, 0, 0), intArrayOf(0, 1, 1, 1),
+            intArrayOf(1, 0, 0, 2), intArrayOf(1, 1, 1, 3)
+        )
+        val gains = listOf(1.0f, 2.0f, 3.0f, 4.0f)
+        servos.forEachIndexed { i, s ->
+            u8(s[0]); u8(s[1]); u8(s[2]); u8(s[3]); f(gains[i]); f(0f); f(0f) // 16 bytes each
+        }
+        u8(2); u8(4); u8(1); u8(5); u8(0) // imus
+        // Unframed v5 capability block, positional as v5 had it.
+        u8(11); (0..10).forEach { u8(it) }
+        u8(17); (0..16).forEach { u8(it) }
+        u8(7); (0..6).forEach { u8(it) }
+        u8(8); u8(4); u8(2); u8(20); u8(32)
+        return out.toByteArray()
+    }
+
+    // ── preamble validation ─────────────────────────────────────────
+
     @Test
     fun `payload without a capability block still parses`() {
         val info = SystemInfoParser.parse(FirmwarePayloads.systemInfo(capabilities = null))
@@ -133,23 +285,13 @@ class SystemInfoParserTest {
 
     @Test
     fun `truncated capability block is dropped instead of throwing`() {
-        // Truncate a payload that ends at the capability block, so this cuts
-        // into the capabilities rather than the motion block that follows them.
+        // Cut into the capability block's framed payload: its declared length now
+        // overshoots what is left, so the walk stops and the block is null.
         val full = FirmwarePayloads.systemInfo(motion = null)
         val truncated = full.copyOfRange(0, full.size - 3)
         val info = SystemInfoParser.parse(truncated)
         assertNotNull(info)
         assertNull(requireNotNull(info).capabilities)
-    }
-
-    @Test
-    fun `a dropped capability block takes the motion block with it`() {
-        // The motion block sits after the capabilities and is only locatable by
-        // walking them, so it must not be parsed from whatever bytes follow.
-        val full = FirmwarePayloads.systemInfo(motion = null)
-        val info = requireNotNull(SystemInfoParser.parse(full.copyOfRange(0, full.size - 3)))
-        assertNull(info.capabilities)
-        assertNull(info.motion)
     }
 
     @Test
@@ -160,7 +302,8 @@ class SystemInfoParserTest {
 
     @Test
     fun `payload claiming more servos than it carries is rejected`() {
-        val data = byteArrayOf(1, 1, 0, 0, 4) + ByteArray(16) // says 4 servos, carries 1
+        // Says 4 servos (16 bytes at 4 B each) but carries 15.
+        val data = byteArrayOf(6, 1, 0, 0, 4) + ByteArray(15)
         assertNull(SystemInfoParser.parse(data))
     }
 
@@ -179,6 +322,12 @@ class SystemInfoParserTest {
         assertFalse(older.isProtocolSupported)
         assertEquals(2, older.protocolVersion)
 
+        // v5 is now unsupported: its unframed FF06 and 16-byte servo record do
+        // not match this build, and the mismatch must surface rather than be
+        // parsed on a best-effort basis.
+        val v5 = requireNotNull(SystemInfoParser.parse(FirmwarePayloads.systemInfo(protocolVersion = 5)))
+        assertFalse(v5.isProtocolSupported)
+
         val future = requireNotNull(
             SystemInfoParser.parse(
                 FirmwarePayloads.systemInfo(
@@ -189,8 +338,10 @@ class SystemInfoParserTest {
         assertFalse(future.isProtocolSupported)
     }
 
+    // ── motion block ────────────────────────────────────────────────
+
     @Test
-    fun `parses the motion block appended after the capabilities`() {
+    fun `parses the framed motion block`() {
         val info = requireNotNull(SystemInfoParser.parse(FirmwarePayloads.systemInfo()))
         val motion = requireNotNull(info.motion)
 
@@ -219,8 +370,9 @@ class SystemInfoParserTest {
 
     @Test
     fun `firmware without a motion block is not reported as stalled`() {
-        // Absence of evidence is not a stall: pre-v4 firmware publishes nothing
-        // here, and rendering that as "motors stopped" would be a lie.
+        // Absence of evidence is not a stall: firmware that publishes no motion
+        // block reports nothing here, and rendering that as "motors stopped"
+        // would be a lie.
         val info = requireNotNull(
             SystemInfoParser.parse(FirmwarePayloads.systemInfo(motion = null))
         )
@@ -234,7 +386,7 @@ class SystemInfoParserTest {
         val truncated = full.copyOf(full.size - 5)
         val info = requireNotNull(SystemInfoParser.parse(truncated))
 
-        assertNotNull(info.capabilities) // everything before it still parsed
+        assertNotNull(info.capabilities) // the block before it still parsed
         assertNull(info.motion)
         assertFalse(info.motorsStalled)
     }
@@ -242,7 +394,7 @@ class SystemInfoParserTest {
     // ── identity block: device name + bonds (SYS-6) ─────────────────
 
     @Test
-    fun `parses the device name and bond list from the end of the payload`() {
+    fun `parses the device name and bond list from the identity block`() {
         val payload = FirmwarePayloads.systemInfo(
             deviceName = "Foxtail",
             bonds = listOf(
@@ -276,19 +428,22 @@ class SystemInfoParserTest {
     }
 
     @Test
-    fun `the identity block sits exactly where the device puts it`() {
-        // Pin the arithmetic rather than a magic size: the block is only findable
-        // by walking the four blocks the app does not model, so a wrong length
-        // for any of them would move the bond list without anything noticing.
+    fun `the framed payload is the sum of its blocks`() {
+        // Pin the framing arithmetic: every block costs its 3-byte prefix, and
+        // the identity block's own length is name + bonds. A wrong length on any
+        // block would move the total.
         val caps = Capabilities.DEFAULT
-        val upToMotion = 5 + 4 * 16 + 1 + 2 * 2 +
-            (3 + caps.patternIds.size + caps.effectIds.size + caps.blendModeIds.size + 5) +
-            (1 + 4 * 13)
-        val unmodelled = (4 * 4 + 6) + 8 + (2 * 5) + 14
-        val identity = 1 + "Foxtail".toByteArray(Charsets.UTF_8).size + 1 + 2 * 7
+        val preamble = 5 + 4 * 4 + 1 + 2 * 2
+        val capsBlock = 3 + (3 + caps.patternIds.size + caps.effectIds.size + caps.blendModeIds.size + 5)
+        val motionBlock = 3 + (1 + 4 * 13)
+        val tuningBlock = 3 + (4 * 4 + 6)
+        val otaBlock = 3 + 8
+        val tapBlock = 3 + (2 * 5)
+        val axisMixBlock = 3 + 14
+        val identityBlock = 3 + (1 + "Foxtail".toByteArray(Charsets.UTF_8).size + 1 + 2 * 7)
 
         assertEquals(
-            upToMotion + unmodelled + identity,
+            preamble + capsBlock + motionBlock + tuningBlock + otaBlock + tapBlock + axisMixBlock + identityBlock,
             FirmwarePayloads.systemInfo(
                 deviceName = "Foxtail",
                 bonds = List(2) { FirmwarePayloads.BondRecord() }
@@ -314,35 +469,45 @@ class SystemInfoParserTest {
         )
         assertEquals(emptyList<Any>(), none.bonds)
 
-        // Firmware that predates SYS-6 publishes nothing here. Reporting that as
-        // "no phone is paired" would be a claim the device never made.
+        // Firmware that publishes no identity block says nothing here. Reporting
+        // that as "no phone is paired" would be a claim the device never made.
         val absent = requireNotNull(SystemInfoParser.parse(FirmwarePayloads.systemInfo()))
         assertNull(absent.bonds)
         assertNull(absent.deviceName)
     }
 
     @Test
-    fun `an identity block that does not fit exactly is dropped, not guessed`() {
-        // Getting to the block means skipping four blocks by their exact lengths,
-        // so a misalignment would otherwise invent bonded peers out of somebody
-        // else's floats. Requiring an exact fit is what makes that impossible.
+    fun `a truncated identity block is dropped while earlier blocks survive`() {
+        // Cutting the last byte off leaves the identity frame claiming one more
+        // byte than remains, so the walk stops there: the identity block is null
+        // and never guessed, but every block emitted before it still parsed.
         val full = FirmwarePayloads.systemInfo(
             deviceName = "Foxtail",
             bonds = List(2) { FirmwarePayloads.BondRecord() }
         )
-
         val short = requireNotNull(SystemInfoParser.parse(full.copyOf(full.size - 1)))
+
         assertNull(short.bonds)
         assertNull(short.deviceName)
-
-        val long = requireNotNull(SystemInfoParser.parse(full + byteArrayOf(0x00)))
-        assertNull(long.bonds)
-        assertNull(long.deviceName)
-
-        // Everything before it still parsed; only the block that did not add up
-        // was discarded.
         assertNotNull(short.capabilities)
         assertNotNull(short.motion)
+        assertNotNull(short.tuning)
+        assertNotNull(short.ota)
+    }
+
+    @Test
+    fun `a trailing partial frame after the identity block is ignored`() {
+        // Framing tolerates trailing bytes it cannot read as a whole frame: a
+        // stray byte after the last block is dropped, and the identity block —
+        // which fit — is still parsed. (Under the old positional layout this same
+        // extra byte would have discarded the bond list.)
+        val full = FirmwarePayloads.systemInfo(
+            deviceName = "Foxtail",
+            bonds = List(2) { FirmwarePayloads.BondRecord() }
+        )
+        val info = requireNotNull(SystemInfoParser.parse(full + byteArrayOf(0x00)))
+        assertEquals("Foxtail", info.deviceName)
+        assertEquals(2, requireNotNull(info.bonds).size)
     }
 
     @Test
@@ -354,6 +519,8 @@ class SystemInfoParserTest {
         val info = requireNotNull(SystemInfoParser.parse(payload))
         assertNull(info.bonds)
     }
+
+    // ── tuning and OTA blocks ───────────────────────────────────────
 
     @Test
     fun `the motion tuning block is read, not just walked past`() {
@@ -384,17 +551,15 @@ class SystemInfoParserTest {
 
     @Test
     fun `firmware without the tuning block reports null tuning, not zeros`() {
-        // A motion-only payload (no identity block) predates the tuning block.
-        // Null keeps "not reported" distinct from "every motor on the default".
+        // A payload with no identity block does not carry the tuning block
+        // either. Null keeps "not reported" distinct from "every motor on default".
         val info = SystemInfoParser.parse(FirmwarePayloads.systemInfo(deviceName = null))
         requireNotNull(info)
         assertNull(info.tuning)
     }
 
     @Test
-    fun `the OTA block still parses correctly once tuning is consumed separately`() {
-        // parseOta stopped skipping the tuning block; this guards the seam
-        // between the two so a version does not get read from tuning bytes.
+    fun `the OTA block parses from its own frame`() {
         val info = SystemInfoParser.parse(
             FirmwarePayloads.systemInfo(
                 deviceName = "Tail",
