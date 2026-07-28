@@ -46,6 +46,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -59,6 +60,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.UUID
+import kotlin.coroutines.ContinuationInterceptor
+import kotlin.coroutines.CoroutineContext
+import kotlin.coroutines.EmptyCoroutineContext
 
 class DeviceRepository(
     private val transport: BleTransport,
@@ -114,6 +118,22 @@ class DeviceRepository(
     private var notificationJob: Job? = null
     private var setupJob: Job? = null
 
+    /**
+     * Where the repository's long-running work runs: its own [scope]'s dispatcher.
+     *
+     * The bulk jobs here — a firmware image's CRC-32, the FF0E stream loop, the
+     * ~80 acknowledged writes of [installLayerStack] — are `suspend` functions, so
+     * without this they would run on whatever dispatcher the caller had, which for
+     * a view model is the main thread. Taken from the scope rather than named
+     * outright for the same reason [com.tailapp.effects.LightingEngine] takes its
+     * dispatcher as a parameter: a test drives the repository from a
+     * `StandardTestDispatcher` and this then keeps every step on it, virtual time
+     * and all. [EmptyCoroutineContext] leaves the caller's context alone, which is
+     * the right answer for a scope that has no dispatcher of its own.
+     */
+    private val workContext: CoroutineContext =
+        scope.coroutineContext[ContinuationInterceptor] ?: EmptyCoroutineContext
+
     init {
         scope.launch {
             for (result in ackInbox) ackTracker.onResult(result)
@@ -139,7 +159,12 @@ class DeviceRepository(
     private suspend fun onConnected() {
         // Start collecting before subscribing, so notifications that arrive during
         // setup aren't dropped (characteristicUpdate has no replay buffer).
-        notificationJob?.cancel()
+        //
+        // Joined, not merely cancelled: on a fast reconnect the previous collector
+        // can still be inside an emission, and a second FF09 result reaching
+        // [ackTracker] twice shifts its FIFO correlation by one command for the
+        // rest of the connection.
+        notificationJob?.cancelAndJoin()
         notificationJob = scope.launch { collectNotifications() }
 
         Log.d(TAG, "onConnected: requesting MTU")
@@ -155,21 +180,21 @@ class DeviceRepository(
         }
 
         Log.d(TAG, "onConnected: enabling notifications")
-        transport.enableNotifications(CharacteristicUuids.MOTION_STATE)
-        transport.enableNotifications(CharacteristicUuids.LED_STATE)
-        transport.enableNotifications(CharacteristicUuids.SYSTEM_EVENTS)
+        subscribe(CharacteristicUuids.MOTION_STATE, "FF02 motion state")
+        subscribe(CharacteristicUuids.LED_STATE, "FF04 LED state")
+        subscribe(CharacteristicUuids.SYSTEM_EVENTS, "FF07 events")
         // FF09 carries the accept/reject result for every command we send.
-        transport.enableNotifications(CharacteristicUuids.CMD_RESULT)
+        subscribe(CharacteristicUuids.CMD_RESULT, "FF09 command results")
         // 0x2A19 notifies on a change of percentage, not on a timer.
-        transport.enableNotifications(CharacteristicUuids.BATTERY_LEVEL)
+        subscribe(CharacteristicUuids.BATTERY_LEVEL, "0x2A19 battery level")
         // FF0E's offset echo is the only flow control a firmware transfer has.
         // Subscribed on connect rather than when an update starts, because an
         // interrupted transfer stays armed on the device across the reconnect
         // that follows it.
-        transport.enableNotifications(CharacteristicUuids.OTA_DATA)
+        subscribe(CharacteristicUuids.OTA_DATA, "FF0E OTA echo")
         // FF0C re-publishes once a second (uptime moves every second), so the
         // subscription keeps a diagnostics screen live rather than needing a poll.
-        transport.enableNotifications(CharacteristicUuids.DIAGNOSTICS)
+        subscribe(CharacteristicUuids.DIAGNOSTICS, "FF0C diagnostics")
 
         Log.d(TAG, "onConnected: reading initial state")
         refreshAll()
@@ -178,6 +203,22 @@ class DeviceRepository(
         refreshDiagnostics()
         seedBatteryPolicyFromEventLog()
         Log.d(TAG, "onConnected: setup complete")
+    }
+
+    /**
+     * Subscribes to one notify characteristic, and says so when the CCCD write
+     * fails.
+     *
+     * A silent failure here is expensive to diagnose downstream: with no FF09
+     * subscription every [sendCommandAwaitingAck] burns its full retry budget and
+     * reports an unanswered command, with nothing anywhere naming the real cause.
+     * Setup carries on regardless — one missing subscription costs its own feature,
+     * not the connection.
+     */
+    private suspend fun subscribe(uuid: UUID, what: String) {
+        if (!transport.enableNotifications(uuid)) {
+            Log.e(TAG, "onConnected: subscribing to $what failed; its notifications are lost")
+        }
     }
 
     private suspend fun collectNotifications() {
@@ -196,10 +237,17 @@ class DeviceRepository(
                 CharacteristicUuids.SYSTEM_EVENTS ->
                     SystemEventParser.parse(update.value)?.let { event ->
                         Log.d(TAG, "system event: $event")
-                        _systemEvents.tryEmit(event)
+                        if (!_systemEvents.tryEmit(event)) {
+                            Log.w(TAG, "dropped system event $event (no collector keeping up)")
+                        }
                         when (event) {
-                            // A profile load replaces the whole config on the device.
-                            SystemEvent.CONFIG_CHANGED -> refreshAll()
+                            // A profile load replaces the whole config on the
+                            // device. Launched rather than awaited: four
+                            // mutex-serialised reads is seconds of this collector
+                            // not collecting, and the transport's notification
+                            // buffer fills at 20 Hz — the FF09 results dropped
+                            // that way strand unrelated commands in flight.
+                            SystemEvent.CONFIG_CHANGED -> scope.launch { refreshAll() }
                             // Every motor is now latched off. Reflect that
                             // immediately rather than waiting up to a second for
                             // the next FF06 refresh to say so.
@@ -244,7 +292,13 @@ class DeviceRepository(
                                     "cmd=0x%02X -> ${result.result}".format(result.commandId)
                             )
                         }
-                        _commandResults.tryEmit(result)
+                        if (!_commandResults.tryEmit(result)) {
+                            Log.w(
+                                TAG,
+                                "dropped command result ${result.characteristicName} " +
+                                    "cmd=0x%02X (no collector keeping up)".format(result.commandId)
+                            )
+                        }
                         _deviceState.update { it.copy(lastCommandResult = result) }
                         ackInbox.trySend(result)
                     }
@@ -337,7 +391,13 @@ class DeviceRepository(
      * effects and banners for things that already happened.
      */
     private suspend fun seedBatteryPolicyFromEventLog() {
-        val data = transport.readCharacteristic(CharacteristicUuids.SYSTEM_EVENTS) ?: return
+        val data = transport.readCharacteristic(CharacteristicUuids.SYSTEM_EVENTS)
+        if (data == null) {
+            // Worth a line: without the ring a tail that went critical before this
+            // connection existed simply looks healthy.
+            Log.w(TAG, "FF07 read returned null")
+            return
+        }
         val policy = SystemEventParser.parseLog(data).mapNotNull(::batteryPolicyOf).lastOrNull()
         if (policy != null) setBatteryPolicy(policy)
     }
@@ -489,6 +549,36 @@ class DeviceRepository(
             transport.writeCharacteristic(uuid, data)
         }
 
+    /**
+     * Writes an FF01 command whose state lives in the FF06 block, waits for the
+     * verdict, and schedules a re-read.
+     *
+     * The optimistic pattern the rest of the motion commands use rests on the
+     * cached value being corrected by something: FF02 and FF04 both notify, so a
+     * refused command self-corrects within a notify period. The FF06 block does
+     * neither — no notify, no poll — so an optimistic update the device rejected
+     * would stand until the next connection. Worst case is [setMotorsEnabled]
+     * after a stall: the banner clears and the tail never moves again.
+     *
+     * @return true when the caller should apply its optimistic update. An
+     *   unanswered write still counts — the answer is best-effort, the write
+     *   probably landed, and the reconcile below settles it either way.
+     */
+    private suspend fun sendReconciledMotionCommand(data: ByteArray): Boolean {
+        val outcome = sendCommandAwaitingAck(CharacteristicUuids.MOTION_CMD, data)
+        if (!outcome.written || outcome.rejected) {
+            Log.w(
+                TAG,
+                "motion cmd 0x%02X ".format(data.firstOrNull() ?: 0.toByte()) +
+                    (outcome.result?.result?.name ?: "write failed") +
+                    "; leaving the cached state alone"
+            )
+            return false
+        }
+        scheduleSystemInfoReconcile()
+        return true
+    }
+
     // --- Motion commands ---
 
     suspend fun selectPattern(patternId: Byte) {
@@ -518,10 +608,10 @@ class DeviceRepository(
         invert: Byte,
         muxChannel: Byte? = null
     ) {
-        sendCommand(
-            CharacteristicUuids.MOTION_CMD,
+        val ok = sendReconciledMotionCommand(
             MotionCommands.setServoConfig(servoId, axis, half, invert, muxChannel)
         )
+        if (!ok) return
         updateServo(servoId.toInt()) { servo ->
             servo.copy(
                 axis = axis.toInt(),
@@ -561,10 +651,10 @@ class DeviceRepository(
         maxJerk: Float,
         stallThreshold: Byte
     ) {
-        sendCommand(
-            CharacteristicUuids.MOTION_CMD,
+        val ok = sendReconciledMotionCommand(
             MotionCommands.setMotionLimits(servoId, maxVelocity, maxAcceleration, maxJerk, stallThreshold)
         )
+        if (!ok) return
         _deviceState.update { state ->
             val motion = state.systemInfo?.motion ?: return@update state
             val idx = servoId.toInt()
@@ -581,14 +671,12 @@ class DeviceRepository(
      * Re-energizes the motors and clears a stall latch, or forces freewheel.
      *
      * After a stall the device latches every motor off and nothing moves until
-     * this arrives, so the optimistic update matters: the UI has to stop showing
-     * a stall the moment the user acts on it.
+     * this arrives, so the UI has to stop showing a stall the moment the user acts
+     * on it — but only if the device agreed. Clearing the banner on a refused
+     * re-enable leaves the user looking at a healthy tail that cannot move.
      */
     suspend fun setMotorsEnabled(enabled: Boolean) {
-        sendCommand(
-            CharacteristicUuids.MOTION_CMD,
-            MotionCommands.enableMotors(enabled)
-        )
+        if (!sendReconciledMotionCommand(MotionCommands.enableMotors(enabled))) return
         _deviceState.update { state ->
             val motion = state.systemInfo?.motion ?: return@update state
             state.copy(systemInfo = state.systemInfo.copy(motion = motion.copy(motorsEnabled = enabled)))
@@ -596,7 +684,7 @@ class DeviceRepository(
     }
 
     suspend fun setImuTap(imuId: Byte, enabled: Boolean) {
-        sendCommand(CharacteristicUuids.MOTION_CMD, MotionCommands.setImuTap(imuId, enabled))
+        if (!sendReconciledMotionCommand(MotionCommands.setImuTap(imuId, enabled))) return
         _deviceState.update { state ->
             val si = state.systemInfo ?: return@update state
             val idx = imuId.toInt()
@@ -699,7 +787,7 @@ class DeviceRepository(
 
         val begin = step(
             SequenceUploadStep.BEGIN,
-            MotionCommands.beginSequence(slot, blob.size, Crc32.compute(blob))
+            MotionCommands.beginSequence(slot, blob.size, withContext(workContext) { Crc32.compute(blob) })
         )
         if (!begin.succeeded) return begin
 
@@ -847,7 +935,10 @@ class DeviceRepository(
         require(chunkSize > 0) { "chunkSize must be positive" }
         // The firmware rejects a zero-length BEGIN with OUT_OF_RANGE.
         require(rgb.isNotEmpty()) { "image data must not be empty" }
-        if (!beginImage(rgb.size, Crc32.compute(rgb))) {
+        // Off the caller's thread: an image is up to the LED matrix's whole
+        // pixel count and the caller is usually a view model on the main one.
+        val crc = withContext(workContext) { Crc32.compute(rgb) }
+        if (!beginImage(rgb.size, crc)) {
             Log.w(TAG, "uploadImage: BEGIN not acknowledged")
             return false
         }
@@ -1017,7 +1108,10 @@ class DeviceRepository(
         // image.
         drainOtaEchoes()
 
-        val begin = beginFirmwareUpdate(image.size, Crc32.compute(image), version)
+        // A firmware image is hundreds of kilobytes to a megabyte; CRC-32 over
+        // that on the caller's thread is an ANR when the caller is a view model.
+        val crc = withContext(workContext) { Crc32.compute(image) }
+        val begin = beginFirmwareUpdate(image.size, crc, version)
         when {
             !begin.written -> return FirmwareUpdateResult.NotWritten(OtaStep.BEGIN)
             begin.result == null -> return FirmwareUpdateResult.Unanswered(OtaStep.BEGIN)
@@ -1067,6 +1161,17 @@ class DeviceRepository(
      * resending them into a rejection.
      */
     private suspend fun streamFirmware(
+        image: ByteArray,
+        startAt: Int,
+        onProgress: (Int, Int) -> Unit
+    ): FirmwareUpdateResult = withContext(workContext) {
+        // On the repository's own dispatcher rather than the caller's: this runs
+        // for minutes, slicing and writing a packet at a time, and a view model
+        // calling it would otherwise run the whole transfer on the main thread.
+        streamFirmwareLoop(image, startAt, onProgress)
+    }
+
+    private suspend fun streamFirmwareLoop(
         image: ByteArray,
         startAt: Int,
         onProgress: (Int, Int) -> Unit
@@ -1152,7 +1257,16 @@ class DeviceRepository(
         } catch (cancellation: CancellationException) {
             // A cancelled transfer that said nothing would leave the tail armed
             // with a partial image for the rest of its uptime.
-            withContext(NonCancellable) { abortFirmwareUpdate() }
+            //
+            // Only worth sending while the link is up, though: the abort is
+            // uncancellable and costs a GATT timeout plus the ack retries, and when
+            // the cancellation *is* a disconnect it is guaranteed to spend all of
+            // it and reach nothing. A device that went away has nothing armed to
+            // clear from this side anyway — the next connection reads FF0E and
+            // resumes or aborts from there.
+            if (_deviceState.value.connectionState == ConnectionState.CONNECTED) {
+                withContext(NonCancellable) { abortFirmwareUpdate() }
+            }
             throw cancellation
         }
     }
@@ -1208,7 +1322,16 @@ class DeviceRepository(
      *
      * @return true if the stack fits and no write was refused or lost the connection.
      */
-    suspend fun installLayerStack(layers: List<LayerConfig>, saveToSlot: Byte? = null): Boolean {
+    suspend fun installLayerStack(layers: List<LayerConfig>, saveToSlot: Byte? = null): Boolean =
+        // ~80 round-trips, on the repository's dispatcher rather than the caller's
+        // main thread. Nothing here touches a UI object; the screens follow the
+        // result on [deviceState].
+        withContext(workContext) { installLayerStackOnWorker(layers, saveToSlot) }
+
+    private suspend fun installLayerStackOnWorker(
+        layers: List<LayerConfig>,
+        saveToSlot: Byte?
+    ): Boolean {
         val maxLayers = _deviceState.value.capabilities.maxLayers
         if (layers.size > maxLayers) return false
 
@@ -1377,7 +1500,11 @@ class DeviceRepository(
         sendCommand(CharacteristicUuids.PROFILE_MGMT, ProfileCommands.loadProfile(slot))
         // The device also raises SYS_EVENT_CONFIG_CHANGED on success; re-read here
         // too so a load still resyncs if the FF07 subscription didn't take.
-        refreshAll()
+        //
+        // Launched like the event handler's copy: four mutex-serialised reads is
+        // seconds, and this is called straight from a tap. The screens read the
+        // result off the StateFlow, not off this call returning.
+        scope.launch { refreshAll() }
     }
 
     suspend fun deleteProfile(slot: Byte) {

@@ -308,7 +308,11 @@ class SystemEventParserTest {
 
     @Test
     fun `unknown and empty events yield null`() {
-        assertNull(SystemEventParser.parse(byteArrayOf(0x09)))
+        // 0x7F is past the highest event the firmware defines (0x10). This used
+        // to be 0x09, which stopped being unknown when the TMC2209 driver-health
+        // events (0x05-0x0C) were added — a forward-compatibility test has to
+        // reach past the whole allocated range, not just past today's last id.
+        assertNull(SystemEventParser.parse(byteArrayOf(0x7F)))
         assertNull(SystemEventParser.parse(ByteArray(0)))
     }
 }

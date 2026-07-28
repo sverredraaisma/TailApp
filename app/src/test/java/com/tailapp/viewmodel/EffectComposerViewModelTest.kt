@@ -413,4 +413,30 @@ class EffectComposerViewModelTest {
         assertEquals("Renamed", fixture.engine.composition.name)
         assertTrue(fixture.viewModel.hasUnsavedChanges.value)
     }
+
+    @Test
+    fun `leaving the editor without saving hands the engine back the stored stack`() {
+        val fixture = fixture()
+        val stored = fixture.library.active()
+        fixture.viewModel.setCompositionName("Never saved")
+        assertEquals("Never saved", fixture.engine.composition.name)
+
+        fixture.viewModel.restoreEngineToLibrary()
+
+        // Otherwise the tail keeps rendering a tree the library does not have,
+        // while reopening the editor loads the stored one — and hasUnsavedChanges
+        // reads false on the fresh view model, so nothing says they diverged.
+        assertEquals(stored, fixture.engine.composition)
+    }
+
+    @Test
+    fun `leaving after saving changes nothing`() {
+        val fixture = fixture()
+        fixture.viewModel.setCompositionName("Kept")
+        fixture.viewModel.save()
+
+        fixture.viewModel.restoreEngineToLibrary()
+
+        assertEquals("Kept", fixture.engine.composition.name)
+    }
 }

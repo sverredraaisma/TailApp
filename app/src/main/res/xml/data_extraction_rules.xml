@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    The Android 12+ counterpart to android:allowBackup="false".
+
+    allowBackup still governs API 30 and below, but from 31 the platform reads
+    these rules instead, so leaving this out would silently re-enable on new
+    handsets exactly what allowBackup turns off on old ones. Both channels are
+    excluded for the same reason: the app's stored state is saved effect stacks
+    and paired-device records, and restoring those onto a different handset
+    resurrects tails the user no longer owns.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="root" />
+        <exclude domain="file" />
+        <exclude domain="database" />
+        <exclude domain="sharedpref" />
+        <exclude domain="external" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="root" />
+        <exclude domain="file" />
+        <exclude domain="database" />
+        <exclude domain="sharedpref" />
+        <exclude domain="external" />
+    </device-transfer>
+</data-extraction-rules>

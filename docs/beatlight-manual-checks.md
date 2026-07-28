@@ -131,8 +131,11 @@ The layer/folder editor. Everything here is covered by JVM tests
 (`docs/composer.md` lists them); what a phone adds is whether the *looks* work
 and whether editing while the tail is running feels immediate.
 
-- [ ] Each of the six built-in stacks, against music it suits: does it read as
-      deliberate, or as noise? Name any that fall flat and why.
+- [ ] Each of the seven built-in stacks (Pulse, Trance Drift, Spectrum Lab,
+      Hardstyle, Ember, Chill, Alive), against music it suits: does it read as
+      deliberate, or as noise? Name any that fall flat and why. `Alive` is the
+      odd one out — it is the tail-input stack, so check it in **silence**, by
+      tapping and wagging.
 - [ ] Edits are live: drag a colour or a decay slider with the session running
       and confirm the tail changes under your finger, with no restart.
 - [ ] Editing a parameter does **not** restart the stack's animations — a running

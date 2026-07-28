@@ -16,7 +16,9 @@ import kotlinx.coroutines.withTimeoutOrNull
  * indistinguishable, and a dropped notification silently shifted every later
  * answer onto the previous command. The sequence byte is a device-side counter
  * incremented once per command processed (`app_bridge.cpp::publish_result`), so a
- * hole in the numbering is exactly the number of answers that never arrived.
+ * small hole in the numbering is the number of answers that never arrived — but
+ * only a small one: the firmware stamps acks from two independent counters, and
+ * [onResult] says what that costs.
  *
  * Registration order is the correlation key, which is why [send] holds its lock
  * across the write itself rather than around the bookkeeping alone.
@@ -112,11 +114,22 @@ class CommandAckTracker {
             // The whole point of the sequence byte: a gap is the count of
             // acknowledgements that never arrived, which means this result
             // belongs to the command *after* them and not to the oldest one still
-            // waiting. Bounded by the queue length — a stale counter (a device
-            // that rebooted, a baseline from before a reconnect) would otherwise
-            // spin through up to 255 phantom losses.
-            val missed = ((sequence - previous - 1) and 0xFF).coerceAtMost(waiting.size)
-            repeat(missed) { waiting.removeFirst().ack.complete(null) }
+            // waiting.
+            //
+            // Only within a plausible gap, though, because the firmware does not
+            // have one counter. `app_bridge.cpp::publish_result` stamps executed
+            // commands from `g_ack_seq`; `ble_service.c::ack_bad_write` answers a
+            // write rejected before dispatch (zero-length, over the wire cap) from
+            // its own `bad_write_ack_seq`, deliberately separate. One ack from the
+            // other source therefore shows up here as an arbitrary jump — and
+            // reading that as "N answers were lost" would abandon commands the
+            // device is still perfectly well going to answer. Anything past
+            // [MAX_SEQUENCE_GAP] is treated as a counter discontinuity: the
+            // baseline moves (above) and nobody waiting is given up on.
+            val gap = (sequence - previous - 1) and 0xFF
+            if (gap <= MAX_SEQUENCE_GAP) {
+                repeat(gap.coerceAtMost(waiting.size)) { waiting.removeFirst().ack.complete(null) }
+            }
         }
         // Firmware that sends no sequence byte falls through to plain FIFO
         // matching below. What is given up is precisely the loss detection above:
@@ -158,6 +171,17 @@ class CommandAckTracker {
     companion object {
         /** See the bound in [send]. */
         internal const val MAX_OUTSTANDING = 64
+
+        /**
+         * The largest sequence gap still read as lost acknowledgements.
+         *
+         * The device's command queue is eight deep, so no more than that many
+         * answers can be in flight to lose at once. A bigger jump is not a burst
+         * of losses at all — it is the *other* counter (see [onResult]), or a
+         * device that rebooted — and abandoning waiters on it would be the one
+         * failure the sequence byte was added to prevent.
+         */
+        internal const val MAX_SEQUENCE_GAP = 8
     }
 }
 

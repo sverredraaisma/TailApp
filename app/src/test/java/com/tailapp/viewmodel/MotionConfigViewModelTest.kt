@@ -160,7 +160,11 @@ class MotionConfigViewModelTest {
             viewModel.startPuppet(-1f, 0f)
             advanceTimeBy(150)
             viewModel.startPuppet(1f, 0f)
-            advanceTimeBy(150)
+            // Long enough for two resends of the *new* pose. With only one, the
+            // last two writes straddle the change and differ for that reason
+            // rather than because two loops are racing — which is what this is
+            // actually testing.
+            advanceTimeBy(250)
             viewModel.stopPuppet()
 
             // Two live loops would interleave two different poses and the tail
@@ -168,6 +172,73 @@ class MotionConfigViewModelTest {
             assertEquals(listOf(90f, 90f, 0f, 0f), targetsOf(transport.writesWithoutResponse.last().data))
             val tail = transport.writesWithoutResponse.takeLast(2).map { targetsOf(it.data) }.distinct()
             assertEquals(1, tail.size)
+        }
+
+    @Test
+    fun `a drag at pointer rate does not write at pointer rate`() =
+        runTest(dispatcher) {
+            // A pointer emits 60-120 samples a second. Restarting the resend
+            // loop per sample issued one FF0B write per sample, which saturates
+            // the connection interval and starves FF0A pixels and FF09 acks.
+            val transport = FakeBleTransport()
+            val viewModel = newViewModel(transport)
+
+            // 100 samples spread over 500 ms - a normal, unhurried drag.
+            repeat(100) { i ->
+                viewModel.startPuppet(i / 100f, 0f)
+                advanceTimeBy(5)
+            }
+            viewModel.stopPuppet()
+
+            // 500 ms at the 100 ms resend cadence is a handful of writes, not a
+            // hundred. The bound is deliberately loose; the point is the order
+            // of magnitude.
+            assertTrue(
+                "expected pacing by the resend interval, got " +
+                    transport.writesWithoutResponse.size + " writes for 100 samples",
+                transport.writesWithoutResponse.size <= 10
+            )
+        }
+
+    @Test
+    fun `the last sample of a drag is the pose that is held`() =
+        runTest(dispatcher) {
+            val transport = FakeBleTransport()
+            val viewModel = newViewModel(transport, xLimits = -90f to 90f, yLimits = -45f to 45f)
+
+            // Re-aiming between resends must not be lost just because no write
+            // happened to fall on that sample.
+            viewModel.startPuppet(0f, 0f)
+            advanceTimeBy(10)
+            viewModel.startPuppet(1f, 1f)
+            advanceTimeBy(200)
+            viewModel.stopPuppet()
+
+            assertEquals(
+                listOf(90f, 90f, 45f, 45f),
+                targetsOf(transport.writesWithoutResponse.last().data)
+            )
+        }
+
+    @Test
+    fun `dragging before the first motion notify says so instead of doing nothing`() =
+        runTest(dispatcher) {
+            val transport = FakeBleTransport()
+            val scope = CoroutineScope(dispatcher)
+            repositoryScope = scope
+            val viewModel = MotionConfigViewModel(DeviceRepository(transport, scope))
+
+            viewModel.startPuppet(1f, 1f)
+            advanceTimeBy(500)
+
+            // Silence here reads as a broken control; the pad is fine, the tail
+            // simply has not reported its travel yet.
+            assertTrue(
+                "expected an explanation, got ${viewModel.puppetError.value}",
+                viewModel.puppetError.value?.contains("not reported") == true
+            )
+            viewModel.clearPuppetError()
+            assertEquals(null, viewModel.puppetError.value)
         }
 
     @Test

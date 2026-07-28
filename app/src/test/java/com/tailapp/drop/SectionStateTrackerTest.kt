@@ -29,13 +29,14 @@ class SectionStateTrackerTest {
             bassZ: Float = rmsZ,
             onsetDensityZ: Float = 0f,
             warm: Boolean = true,
+            rms: Float = AUDIBLE_RMS,
             drop: DropEvent? = null
         ): List<SectionStateUpdate> {
             val samples = (seconds * config.statsRateHz).toInt().coerceAtLeast(1)
             val changes = mutableListOf<SectionStateUpdate>()
             repeat(samples) { i ->
                 nowNanos += stepNanos
-                val snapshot = snapshot(nowNanos, rmsZ, bassZ, onsetDensityZ, warm)
+                val snapshot = snapshot(nowNanos, rmsZ, bassZ, onsetDensityZ, warm, rms)
                 // A drop, when given, belongs to the first sample of the stretch.
                 val event = if (i == 0) drop?.copy(timestampNanos = nowNanos) else null
                 tracker.update(snapshot, event)?.let(changes::add)
@@ -57,7 +58,13 @@ class SectionStateTrackerTest {
                     // Bass held well below the broadband level: a filtered riser.
                     bassZ = rmsZ - 1f,
                     onsetDensityZ = onsetZFrom + (onsetZTo - onsetZFrom) * t,
-                    warm = true
+                    warm = true,
+                    // A riser genuinely gets louder, so the raw level has to climb
+                    // with the z-score: the build-up criterion is now a rise ratio
+                    // on the level (TransientConfig.buildupRiseRatio), which a
+                    // constant 0.3 would never satisfy. Tied to the z-score rather
+                    // than restarted per call so consecutive ramps keep climbing.
+                    rms = AUDIBLE_RMS * (1f + rmsZ.coerceAtLeast(0f))
                 )
                 tracker.update(snapshot)?.let(changes::add)
             }
@@ -69,14 +76,20 @@ class SectionStateTrackerTest {
             rmsZ: Float,
             bassZ: Float,
             onsetDensityZ: Float,
-            warm: Boolean
+            warm: Boolean,
+            rms: Float
         ) = TransientSnapshot(
             timestampNanos = nowNanos,
-            rms = 0.3f, bass = 0.2f, centroidHz = 1500f,
-            rmsZ = rmsZ, bassZ = bassZ, centroidZ = 0f,
+            rms = rms, bass = rms * 0.66f, centroidHz = 1500f,
+            rmsZ = rmsZ, bassZ = bassZ,
             onsetDensity = 4f, onsetDensityZ = onsetDensityZ,
             bassRise = 1f, warm = warm
         )
+
+        companion object {
+            /** A level a phone mic plausibly captures music at. */
+            const val AUDIBLE_RMS = 0.3f
+        }
     }
 
     private fun feeder(tracker: SectionStateTracker) = Feeder(config, tracker)
@@ -199,6 +212,43 @@ class SectionStateTrackerTest {
 
         assertEquals(SectionState.DROP, tracker.state)
         assertEquals(0f, tracker.currentUpdate(f.nowNanos).ramp, 0f)
+    }
+
+    /**
+     * The failure this tier's presence test exists for.
+     *
+     * Every level threshold here is a z-score against a 45 s trailing window, and
+     * a z-score has no zero. Leave a phone running after a set and the window
+     * turns over to the room's noise floor, so `rmsZ` climbs back to ~0 — the
+     * breakdown branch stops firing, the steady-energy branch keeps firing, and
+     * the state latches into DROP for as long as the process lives, driving
+     * full-intensity lighting in a silent room.
+     *
+     * The silence below is modelled exactly as the real case does: a mic noise
+     * floor three orders of magnitude down, whose z-score has *re-normalised to
+     * zero* because the window now contains nothing else.
+     */
+    @Test
+    fun `a session left running after the music stops does not latch into DROP`() {
+        val tracker = SectionStateTracker(config)
+        val f = feeder(tracker)
+
+        f.feed(20f, rmsZ = 1f, rms = 0.4f)
+        assertEquals(SectionState.DROP, tracker.state)
+
+        // Two minutes of room tone, scored against a window that holds only room
+        // tone: a z-score of zero, which is neither "quiet" nor "loud".
+        f.feed(120f, rmsZ = 0f, rms = 0.0004f)
+
+        assertTrue(
+            "latched into ${tracker.state} with nothing playing",
+            tracker.state != SectionState.DROP
+        )
+        assertEquals(SectionState.OUTRO, tracker.state)
+
+        // And it recovers: real audio comes back and the section follows it.
+        f.feed(10f, rmsZ = 1f, rms = 0.4f)
+        assertEquals(SectionState.DROP, tracker.state)
     }
 
     @Test

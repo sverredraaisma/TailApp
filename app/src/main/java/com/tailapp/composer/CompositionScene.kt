@@ -33,10 +33,11 @@ import java.util.concurrent.atomic.AtomicReference
  * Every method except [setComposition] must be called from the single render/
  * analysis thread `LightingEngine` confines its loops to. [setComposition] is
  * the one cross-thread entry point — the editor calls it from the main thread —
- * so the incoming tree is parked in a `@Volatile` field and swapped in at the
- * top of the next [render]. Compositions are immutable, so publishing one is
- * safe; applying it on the render thread is what keeps the renderer's live
- * effect instances single-threaded.
+ * so the incoming tree is parked in an [AtomicReference] and claimed at the top
+ * of the next [render] with a single `getAndSet` (see [pending] for why a plain
+ * `@Volatile` read-then-null would lose an edit). Compositions are immutable, so
+ * publishing one is safe; applying it on the render thread is what keeps the
+ * renderer's live effect instances single-threaded.
  *
  * ## Calibration
  * [triggerOffsetMillis] shifts every beat and drop timestamp before it reaches
@@ -275,7 +276,7 @@ class CompositionScene(
 
         return ReactiveContext(
             nowNanos = nowNanos,
-            timeSeconds = (nowNanos - originNanos) / NANOS_PER_SECOND,
+            timeSeconds = sessionSeconds(nowNanos),
             dtSeconds = dtSeconds,
             bpm = bpm,
             lastBeat = beat,
@@ -336,6 +337,40 @@ class CompositionScene(
         renderer.reset()
     }
 
+    /**
+     * Seconds since the session's first frame, kept small enough to stay precise.
+     *
+     * A `Float` that simply grew for the whole session would lose the resolution
+     * every time-driven effect depends on: at 24 hours its ulp is 7.8 ms, so a
+     * 25 Hz strobe (40 ms period) quantises to a handful of duty states and a
+     * plasma freezes for frames at a time. So the origin is periodically pushed
+     * forward by exactly [REBASE_SECONDS], which keeps the ulp at half a
+     * millisecond or better for a session of any length.
+     *
+     * The step is a whole number of seconds *and* a power of two, so subtracting
+     * it is exact in both `Long` nanoseconds and `Float` seconds: the re-base
+     * introduces no rounding of its own and cannot drift, and the value is
+     * continuous rather than restarting at zero the way `origin = now` would. Any
+     * rate that divides the step — 8 Hz, 2 Hz, 0.25/s, every whole and half-Hz
+     * setting in the library — crosses it with no phase change whatsoever. The
+     * rest step once every 68 minutes, which is what a bounded `Float` costs;
+     * the alternative is every effect losing resolution for the whole session.
+     */
+    private fun sessionSeconds(nowNanos: Long): Float {
+        if (originNanos == Long.MIN_VALUE) return 0f
+        val elapsed = nowNanos - originNanos
+        // Divide in Double, not Float. The residual runs up to REBASE_NANOS —
+        // ~4.1e12 ns — and Float's 24-bit mantissa cannot represent nanosecond
+        // counts anywhere near that: 60e9 alone lands on 60.000004 rather than
+        // 60.0. The rebase bounds the *result*, not the intermediate.
+        if (elapsed >= REBASE_NANOS) {
+            val whole = elapsed / REBASE_NANOS
+            originNanos += whole * REBASE_NANOS
+            return ((elapsed - whole * REBASE_NANOS) / NANOS_PER_SECOND_D).toFloat()
+        }
+        return (elapsed / NANOS_PER_SECOND_D).toFloat()
+    }
+
     private fun smooth(current: Float, target: Float): Float {
         val coefficient = if (target > current) ATTACK else RELEASE
         return current + (target - current) * coefficient
@@ -345,8 +380,15 @@ class CompositionScene(
 
     private companion object {
         const val NANOS_PER_SECOND = 1_000_000_000f
+
+        /** For elapsed spans too large for `Float` to hold exactly — see `sessionSeconds`. */
+        const val NANOS_PER_SECOND_D = 1_000_000_000.0
         const val NANOS_PER_MILLI = 1_000_000f
         const val SECONDS_PER_MINUTE = 60f
+
+        /** How large [CompositionScene.sessionSeconds] lets the session clock grow. */
+        const val REBASE_SECONDS = 4096L
+        const val REBASE_NANOS = REBASE_SECONDS * 1_000_000_000L
 
         /** The metre the beat tracker assumes when it labels a downbeat. */
         const val BEATS_PER_BAR = 4f

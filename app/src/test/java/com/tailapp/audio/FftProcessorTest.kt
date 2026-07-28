@@ -180,6 +180,89 @@ class FftProcessorTest {
         assertNotEquals(afterLoud, afterReset)
     }
 
+    /**
+     * The bug this pins: the old gain recurrence
+     * `p += (rms - p / 3) * speed` has fixed point `p = 3 * rms`, so
+     * `rms / p * 255` settled on 85 for *every* steady level. The stream
+     * reported 33% whether you whispered or blasted, moving only on changes.
+     */
+    @Test
+    fun `a loud steady tone reports far more loudness than a quiet one`() {
+        fun steady(amplitude: Double): Int {
+            val processor = FftProcessor().apply { numBins = 64 }
+            var loudness = 0
+            // Well past the point where the old recurrence had converged on 85.
+            repeat(60) {
+                loudness = processor
+                    .process(tone(440.0, size = 1470, amplitude = amplitude), sampleRate)
+                    .loudness.toInt() and 0xFF
+            }
+            return loudness
+        }
+
+        val loud = steady(32000.0)
+        val quiet = steady(30.0)
+
+        assertTrue("a steady full-scale tone should be near the top, was $loud", loud > 200)
+        assertTrue("a near-silent steady tone should stay low, was $quiet", quiet < 120)
+        assertTrue("loud ($loud) must be far above quiet ($quiet)", loud > quiet * 2)
+    }
+
+    /**
+     * At the live geometry the lowest output bins all resolve to the same FFT
+     * bin. When that was bin 0 they tracked the microphone's DC offset instead
+     * of the bass, and DC was folded into the loudness RMS as well.
+     */
+    @Test
+    fun `low bins follow the bass, not the DC offset`() {
+        fun lowBins(samples: ShortArray): Pair<Int, List<Int>> {
+            val processor = FftProcessor().apply { numBins = 64 }
+            var result = processor.process(samples, sampleRate)
+            repeat(4) { result = processor.process(samples, sampleRate) }
+            return (result.loudness.toInt() and 0xFF) to
+                (0 until 8).map { result.bins.unsigned(it) }
+        }
+
+        // 30 fps at 44.1 kHz: the frame FftStreamManager actually captures.
+        val (bassLoudness, bassBins) = lowBins(tone(60.0, size = 1470, amplitude = 12000.0))
+        val (dcLoudness, dcBins) = lowBins(ShortArray(1470) { 3000 })
+
+        assertTrue("a 60 Hz tone must move the bottom bars, got $bassBins", bassBins.all { it > 0 })
+        assertTrue("a constant DC offset is not audio, got $dcBins", dcBins.all { it == 0 })
+        assertTrue("DC must not register as loudness, was $dcLoudness", dcLoudness == 0)
+        assertTrue("bass must register as loudness, was $bassLoudness", bassLoudness > 0)
+    }
+
+    @Test
+    fun `the whole frame is analysed, not just its first power of two`() {
+        // 1470 samples used to be truncated to 1024 — 30% of every frame thrown
+        // away. Zeroing only the discarded tail must therefore change the output.
+        val full = tone(1000.0, size = 1470)
+        val tailless = full.copyOf().also { for (i in 1024 until it.size) it[i] = 0 }
+
+        val a = FftProcessor().apply { numBins = 32 }.process(full, sampleRate).bins
+        val b = FftProcessor().apply { numBins = 32 }.process(tailless, sampleRate).bins
+
+        assertNotEquals(a.toList(), b.toList())
+    }
+
+    @Test
+    fun `tunables are read as one snapshot per frame`() {
+        // The four sliders are published together, so a frame can never see a
+        // half-applied drag (an inverted start > end range, say).
+        val processor = FftProcessor().apply {
+            numBins = 16
+            freqRangeStart = 100f
+            freqRangeEnd = 8000f
+            normalizationSpeed = 0.25f
+        }
+        assertEquals(16, processor.numBins)
+        assertEquals(100f, processor.freqRangeStart, 0f)
+        assertEquals(8000f, processor.freqRangeEnd, 0f)
+        assertEquals(0.25f, processor.normalizationSpeed, 0f)
+        assertEquals(16, processor.process(tone(1000.0), sampleRate).bins.size)
+    }
+
     @Test
     fun `result equality compares bin contents`() {
         val a = FftResult(5, byteArrayOf(1, 2, 3))

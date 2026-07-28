@@ -22,6 +22,11 @@ class AudioCaptureManager {
      */
     @SuppressLint("MissingPermission")
     fun start() {
+        // Release anything still open first. A bare assignment would leak the
+        // previous recorder — it keeps holding the mic — and the loser's
+        // teardown would then release the recorder this call just opened.
+        stop()
+
         val record = AudioRecord(
             MediaRecorder.AudioSource.MIC,
             SAMPLE_RATE,

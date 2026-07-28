@@ -3,15 +3,22 @@ package com.tailapp.viewmodel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.tailapp.audio.FftStreamManager
+import com.tailapp.ble.ConnectionState
+import com.tailapp.ble.protocol.CommandResult
 import com.tailapp.ble.protocol.SystemCommands
 import com.tailapp.ble.protocol.SystemEvent
 import com.tailapp.model.DeviceState
 import com.tailapp.repository.AckedWrite
 import com.tailapp.repository.DeviceRepository
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
 /** What the last device-administration command did, for the UI to show. */
@@ -22,13 +29,54 @@ data class DeviceAdminStatus(
 
 class DeviceOverviewViewModel(
     private val deviceRepository: DeviceRepository,
-    private val fftStreamManager: FftStreamManager? = null
+    private val fftStreamManager: FftStreamManager? = null,
+    /**
+     * The address the *route* named. The repository is a singleton with one
+     * connection, so this is what the screen was asked to show rather than proof
+     * of what is connected — see [isConnected] and [connect].
+     */
+    val routeAddress: String? = null
 ) : ViewModel() {
 
     val deviceState: StateFlow<DeviceState> = deviceRepository.deviceState
 
     /** FF07 taps and config-changed notifications, for transient UI feedback. */
     val systemEvents: SharedFlow<SystemEvent> = deviceRepository.systemEvents
+
+    /**
+     * Rejected commands as events rather than as sticky state.
+     *
+     * `DeviceState.lastCommandResult` is never cleared, so observing it means the
+     * same rejection twice in a row looks like one — the user believes the second
+     * attempt worked — and a rotation replays the old one as if it were new. The
+     * repository already publishes every FF09 result on a `SharedFlow`; that is
+     * one delivery per result, which is what a snackbar needs.
+     */
+    val commandFailures: Flow<CommandResult> =
+        deviceRepository.commandResults.filter { !it.isSuccess }
+
+    /** True once the transport reports a live GATT link. */
+    val isConnected: StateFlow<Boolean> = deviceRepository.deviceState
+        .map { it.connectionState == ConnectionState.CONNECTED }
+        .stateIn(
+            viewModelScope,
+            // Eagerly, not WhileSubscribed: this is a cheap map of an in-memory
+            // StateFlow, and a lazily-started one reports a stale `value` to
+            // anything that reads it without collecting.
+            SharingStarted.Eagerly,
+            deviceRepository.deviceState.value.connectionState == ConnectionState.CONNECTED
+        )
+
+    /**
+     * Connects to the address this route names.
+     *
+     * The screen offers this when it is opened without a live connection — a
+     * deep link, or a process death that outlived the link — instead of
+     * rendering whatever the singleton repository happens to hold.
+     */
+    fun connect() {
+        routeAddress?.let { deviceRepository.connect(it) }
+    }
 
     private val _adminStatus = MutableStateFlow<DeviceAdminStatus?>(null)
 

@@ -59,8 +59,17 @@ best-effort.
 
 The app must know the persisted enum names and properties (effect ids, blend
 modes, pattern ids and their parameter ranges) because saved device config stores
-ids, not names, and the app rebuilds its displays from them. As of firmware SYS-9
-the device *also* publishes per-parameter descriptors (name/min/max/default/unit)
-on FF0D, so an app can render usable controls for a pattern or effect it was not
-built to know — the built-in tables stay the fast path, the descriptors the
-forward-compatible fallback.
+ids, not names, and the app rebuilds its displays from them. Those built-in tables
+(`LedEffect`, `MotionPattern`) are currently the *only* source the UI has.
+
+As of firmware SYS-9 the device also publishes per-parameter descriptors
+(name/min/max/default/unit) on FF0D, which would let an app render usable
+controls for a pattern or effect it was not built to know — the built-in tables
+as the fast path, the descriptors as the forward-compatible fallback. **On the
+app side that is half-built.** The protocol layer exists and is tested:
+`ble/protocol/ParamDescriptorParser`, `model/ParamModels`,
+`SystemCommands.selectDescriptors` (the FF06 write that chooses which entity FF0D
+publishes) and `CharacteristicUuids.PARAM_DESC`. Nothing in the repository or the
+UI reads any of it yet, so a firmware pattern this build does not know still shows
+no controls. Finishing it is a repository flow plus a fallback in the parameter
+editors — no new wire work.

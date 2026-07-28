@@ -227,8 +227,11 @@ class FirmwareDefaultTableTest {
         // end while the device ran something else.
         table.states.forEachIndexed { i, state ->
             val pattern = requireNotNull(state.pattern)
-            state.params.forEachIndexed { p, value ->
-                if (!state.overrides(p)) return@forEachIndexed
+            // Labelled because the two loops are both forEachIndexed, so a bare
+            // return@forEachIndexed is ambiguous to a reader even where the
+            // compiler picks the inner one.
+            state.params.forEachIndexed param@{ p, value ->
+                if (!state.overrides(p)) return@param
                 val meta = pattern.params.find { it.id == p }
                 requireNotNull(meta) { "state $i overrides parameter $p, which ${pattern.displayName} does not have" }
                 assertTrue(

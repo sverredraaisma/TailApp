@@ -58,6 +58,10 @@ object SystemInfoParser {
     private const val TAG_OTA = 0x04
     private const val TAG_IDENTITY = 0x07
 
+    // Bits of the OTA block's `flags` byte, from `OtaManager::build_info_block`.
+    private const val OTA_FLAG_PENDING_VERIFY = 0x01
+    private const val OTA_FLAG_VERSION_UNKNOWN = 0x02
+
     fun parse(data: ByteArray): SystemInfo? {
         if (data.size < HEADER_SIZE) return null
         val buf = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN)
@@ -156,7 +160,16 @@ object SystemInfoParser {
         val runningMajor = block.u8()
         val runningMinor = block.u8()
         val runningPatch = block.u8()
-        val pendingVerify = block.u8() != 0
+        // A bitfield, not a boolean. Bit 0 is the original pending-verify flag
+        // and keeps its exact meaning; bit 1 says the version triplet above is a
+        // zero *placeholder* the device could not read from a real descriptor,
+        // rather than a claim it really is running 0.0.0. Reading the whole byte
+        // as `!= 0` conflated the two, so a device that could not describe itself
+        // would have looked like one whose image is on probation. Every other bit
+        // is reserved and currently zero.
+        val flags = block.u8()
+        val pendingVerify = flags and OTA_FLAG_PENDING_VERIFY != 0
+        val runningVersionUnknown = flags and OTA_FLAG_VERSION_UNKNOWN != 0
         val otherValid = block.u8() != 0
         val otherMajor = block.u8()
         val otherMinor = block.u8()
@@ -165,7 +178,8 @@ object SystemInfoParser {
         return OtaInfo(
             running = FirmwareVersion(runningMajor, runningMinor, runningPatch),
             pendingVerify = pendingVerify,
-            other = if (otherValid) FirmwareVersion(otherMajor, otherMinor, otherPatch) else null
+            other = if (otherValid) FirmwareVersion(otherMajor, otherMinor, otherPatch) else null,
+            runningVersionUnknown = runningVersionUnknown
         )
     }
 

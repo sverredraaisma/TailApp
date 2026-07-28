@@ -19,11 +19,32 @@ class ImageRenderer : LedEffectRenderer() {
     private var width = 0
     private var height = 0
 
-    /** Loads a flat RGB byte array (`r,g,b,r,g,b,...`). Mirrors `ImageEffect::set_image`. */
-    fun setImage(rgb: ByteArray, width: Int, height: Int) {
+    /**
+     * Loads a flat RGB byte array (`r,g,b,r,g,b,...`). Mirrors
+     * `ImageEffect::set_image`.
+     *
+     * An image whose `width * height * 3` exceeds [srcLen] is **refused**, not
+     * truncated: the firmware clears the image and renders black rather than
+     * copying past the end of the source buffer, and a preview that instead
+     * drew the in-range prefix would show a picture the device never displays.
+     *
+     * The dimensions are `uint8_t` on the wire, so they are masked here too - a
+     * 256-wide image is width 0 on the device (and therefore blank), and the
+     * preview has to agree.
+     */
+    fun setImage(rgb: ByteArray, width: Int, height: Int, srcLen: Int = rgb.size) {
+        val w = width and 0xFF
+        val h = height and 0xFF
+        val size = w * h * 3
+        if (size == 0 || size > srcLen) {
+            this.imageData = null
+            this.width = 0
+            this.height = 0
+            return
+        }
         this.imageData = rgb
-        this.width = width
-        this.height = height
+        this.width = w
+        this.height = h
     }
 
     /** Nearest-neighbor sample at normalized coordinates. Mirrors `ImageEffect::sample`. */

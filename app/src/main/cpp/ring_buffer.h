@@ -14,9 +14,12 @@
  * more than complete audio.
  *
  * Each index is written by exactly one thread — the producer owns `write_index_`
- * and the consumer owns `read_index_` and `overruns_`. Overrun is therefore
- * detected and accounted on the *read* side; a consumer that never reads sees
- * `overruns()` stay at zero until it does.
+ * and the consumer owns `read_index_`. Overrun is normally detected and accounted
+ * on the *read* side; a consumer that never reads sees `overruns()` stay at zero
+ * until it does. The one exception is a single burst larger than the whole
+ * buffer, whose oldest samples are dropped before they are ever stored: only the
+ * producer can see those, so it counts them (as the Kotlin mirror does), and
+ * `overruns_` is an atomic for exactly that case.
  *
  * The backing array is twice `capacity()`: dropping the oldest samples means the
  * producer could otherwise overwrite a region the consumer is mid-copy and hand
@@ -33,6 +36,8 @@ public:
         : size_(next_pow2(requested_capacity * 2)),
           mask_(static_cast<int64_t>(size_) - 1),
           max_lag_(size_ / 2 > 0 ? size_ / 2 : 1),
+          max_burst_(size_ / 4 > 0 ? size_ / 4 : 1),
+          safe_lag_(size_ - max_burst_ > 1 ? size_ - max_burst_ : 1),
           buffer_(static_cast<size_t>(size_), 0.0f) {}
 
     /** Producer side. Called from the audio callback — allocation-free. */
@@ -47,6 +52,10 @@ public:
         for (int32_t i = 0; i < stored; i++) {
             buffer_[static_cast<size_t>((w + i) & mask_)] = src[skipped + i];
         }
+        // These never reach the buffer at all, so the consumer cannot account for
+        // them later. Counting them here is what keeps `overruns()` equal to the
+        // Kotlin mirror's, where `FloatRingBuffer.write` does the same.
+        if (skipped > 0) overruns_.fetch_add(skipped, std::memory_order_relaxed);
         // Release: publish the samples before the cursor that exposes them.
         write_index_.store(w + stored, std::memory_order_release);
     }
@@ -85,7 +94,13 @@ public:
             // not happened yet. Rare — the runway above usually prevents it — but
             // a consumer descheduled mid-copy is exactly when it matters.
             std::atomic_thread_fence(std::memory_order_seq_cst);
-            if (write_index_.load(std::memory_order_acquire) - r <= size_) {
+            // `size_` would be the bound if the producer published each slot as it
+            // filled it — it does not. It fills a whole burst and *then* stores the
+            // cursor, so at the instant of this load it may already have clobbered
+            // up to `max_burst_` slots past what it has published. The safe bound
+            // is therefore `size_ - max_burst_`; using `size_` validated copies
+            // whose oldest samples had just been overwritten.
+            if (write_index_.load(std::memory_order_acquire) - r <= safe_lag_) {
                 read_index_.store(r + n, std::memory_order_release);
                 if (lost > 0) overruns_.fetch_add(lost, std::memory_order_relaxed);
                 return n;
@@ -132,9 +147,16 @@ private:
     const int32_t size_;
     const int64_t mask_;
     const int64_t max_lag_;
+    /** Slots the producer may have clobbered but not yet published. See `read`. */
+    const int64_t max_burst_;
+    const int64_t safe_lag_;
     std::vector<float> buffer_;
 
-    std::atomic<int64_t> write_index_{0};
-    std::atomic<int64_t> read_index_{0};
+    // Producer and consumer cursors on separate cache lines. Sharing one line
+    // makes every callback's release-store invalidate the line the analysis
+    // thread is spinning on, and vice versa — pure false sharing between two
+    // threads that never actually touch the same variable.
+    alignas(64) std::atomic<int64_t> write_index_{0};
+    alignas(64) std::atomic<int64_t> read_index_{0};
     std::atomic<int64_t> overruns_{0};
 };

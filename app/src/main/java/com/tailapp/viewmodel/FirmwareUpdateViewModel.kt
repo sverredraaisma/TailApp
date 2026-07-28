@@ -1,5 +1,8 @@
 package com.tailapp.viewmodel
 
+import android.content.Context
+import android.net.Uri
+import android.provider.OpenableColumns
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.tailapp.ble.ConnectionState
@@ -11,7 +14,9 @@ import com.tailapp.model.FirmwareVersion
 import com.tailapp.model.OtaInfo
 import com.tailapp.repository.DeviceRepository
 import com.tailapp.repository.FirmwareUpdateResult
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -115,10 +120,44 @@ class FirmwareUpdateViewModel(
     private var startedAtMs: Long = 0L
 
     /**
+     * Reads a picked document and evaluates it.
+     *
+     * The read is on [Dispatchers.IO], not in the picker's result callback: that
+     * callback is the main thread, the image is around a megabyte, and a
+     * document from a network-backed provider downloads the whole file inside
+     * `openInputStream`. Doing it inline is an ANR waiting for a slow link.
+     */
+    fun onImageUriPicked(context: Context, uri: Uri) {
+        viewModelScope.launch {
+            val picked = withContext(Dispatchers.IO) {
+                val bytes = runCatching {
+                    context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                }.getOrNull()
+                bytes?.let { displayName(context, uri) to it }
+            }
+            if (picked == null) {
+                _pickError.value = "Could not read that file."
+            } else {
+                onImagePicked(picked.first, picked.second)
+            }
+        }
+    }
+
+    private val _pickError = MutableStateFlow<String?>(null)
+
+    /** Why the last pick could not even be read. Distinct from a file that read but is wrong. */
+    val pickError: StateFlow<String?> = _pickError.asStateFlow()
+
+    fun clearPickError() {
+        _pickError.value = null
+    }
+
+    /**
      * Reads a picked firmware file and checks it against the device's own header
      * rules, clearing any previous verdict so the screen shows the new file.
      */
     fun onImagePicked(fileName: String, bytes: ByteArray) {
+        _pickError.value = null
         imageBytes = bytes
         _selection.value = evaluate(fileName, bytes, otaInfo.value?.running)
         if (_transfer.value is FirmwareTransfer.Finished) _transfer.value = FirmwareTransfer.Idle
@@ -240,6 +279,16 @@ class FirmwareUpdateViewModel(
         fun estimateRemainingMs(accepted: Int, total: Int, elapsedMs: Long): Long? {
             if (accepted <= 0 || elapsedMs <= 0L || accepted >= total) return null
             return elapsedMs * (total - accepted).toLong() / accepted
+        }
+
+        /** The document's display name, falling back to the last path segment. */
+        private fun displayName(context: Context, uri: Uri): String {
+            val fromProvider = runCatching {
+                context.contentResolver
+                    .query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+                    ?.use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
+            }.getOrNull()
+            return fromProvider ?: uri.lastPathSegment ?: "firmware.bin"
         }
     }
 }

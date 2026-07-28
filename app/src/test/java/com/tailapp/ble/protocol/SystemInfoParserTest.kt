@@ -2,6 +2,7 @@ package com.tailapp.ble.protocol
 
 import com.tailapp.model.BlendMode
 import com.tailapp.model.Capabilities
+import com.tailapp.model.FirmwareVersion
 import com.tailapp.model.LedEffect
 import com.tailapp.model.MotionPattern
 import com.tailapp.testutil.FirmwarePayloads
@@ -568,6 +569,71 @@ class SystemInfoParserTest {
         )
         requireNotNull(info)
         assertEquals("2.3.4", info.runningFirmwareVersion.toString())
+    }
+
+    @Test
+    fun `the OTA flags byte is read as a bitfield, not a boolean`() {
+        // Bit 0 is pending-verify; bit 1 says the version triplet is a zero
+        // placeholder the device could not read from a real descriptor. Reading
+        // the whole byte as `!= 0` conflated them, so a device that could not
+        // describe itself looked like one whose image was on probation.
+        val placeholder = requireNotNull(
+            SystemInfoParser.parse(
+                FirmwarePayloads.systemInfo(
+                    deviceName = "Tail",
+                    ota = FirmwarePayloads.OtaBlock(
+                        running = Triple(0, 0, 0),
+                        pendingVerify = false,
+                        runningVersionUnknown = true
+                    )
+                )
+            )
+        )
+        val ota = requireNotNull(placeholder.ota)
+        assertFalse(ota.pendingVerify)
+        assertTrue(ota.runningVersionUnknown)
+        // The placeholder must not be offered as a version to compare against.
+        assertNull(ota.knownRunning)
+        assertEquals("0.0.0", ota.running.toString())
+    }
+
+    @Test
+    fun `both OTA flag bits can be set at once`() {
+        val info = requireNotNull(
+            SystemInfoParser.parse(
+                FirmwarePayloads.systemInfo(
+                    deviceName = "Tail",
+                    ota = FirmwarePayloads.OtaBlock(
+                        pendingVerify = true,
+                        runningVersionUnknown = true
+                    )
+                )
+            )
+        )
+        val ota = requireNotNull(info.ota)
+        assertTrue(ota.pendingVerify)
+        assertTrue(ota.runningVersionUnknown)
+    }
+
+    @Test
+    fun `a plain pending-verify flag still reads exactly as it always did`() {
+        // The firmware kept bit 0's meaning and position precisely so this stays
+        // true; the reserved bits are zero, so the byte is still 0x01.
+        val info = requireNotNull(
+            SystemInfoParser.parse(
+                FirmwarePayloads.systemInfo(
+                    deviceName = "Tail",
+                    ota = FirmwarePayloads.OtaBlock(
+                        running = Triple(2, 3, 4),
+                        pendingVerify = true
+                    )
+                )
+            )
+        )
+        val ota = requireNotNull(info.ota)
+        assertTrue(ota.pendingVerify)
+        assertFalse(ota.runningVersionUnknown)
+        assertEquals(FirmwareVersion(2, 3, 4), ota.knownRunning)
     }
 
     @Test

@@ -69,7 +69,6 @@ class RollingStatsTest {
         val stats = RollingStats(10)
         (1..10).forEach { stats.add(it.toFloat()) }
 
-        assertEquals(10f, stats.latest, 0f)
         assertEquals(9.5f, stats.recentMean(2), 1e-4f)
         assertEquals(8f, stats.recentMean(5), 1e-4f)
         // Three samples ending two samples back: 6, 7, 8.
@@ -95,7 +94,7 @@ class RollingStatsTest {
         assertEquals(0, stats.count)
         assertEquals(0f, stats.mean, 0f)
         assertEquals(0f, stats.standardDeviation, 0f)
-        assertEquals(0f, stats.latest, 0f)
+        assertEquals(0f, stats.recentMean(1), 0f)
     }
 
     /**

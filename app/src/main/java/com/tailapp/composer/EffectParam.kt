@@ -80,6 +80,16 @@ sealed class EffectParam(val key: String, val label: String, val default: Float)
  * default. Typed accessors interpret the stored float according to the declared
  * [EffectParam] kind. Effects read these once per frame into locals rather than
  * per pixel.
+ *
+ * **Every stored value is forced into its declared domain on the way in** — see
+ * [sanitize]. Parameters arrive from a saved (or *imported*) file, which is
+ * arbitrary user-supplied JSON: nothing upstream guarantees that a `Choice`
+ * index names one of its options or that a `Scalar` is inside `[min, max]`. An
+ * effect indexing a parallel array with a raw index would throw out of the
+ * render coroutine, killing the render loop while the analysis loop lives on —
+ * a session that looks like it is running with a tail frozen mid-frame. Clamping
+ * once, here, protects every effect rather than every effect having to
+ * remember.
  */
 class ParamBag(schema: List<EffectParam>) {
     private val byKey: Map<String, EffectParam> = schema.associateBy { it.key }
@@ -90,12 +100,35 @@ class ParamBag(schema: List<EffectParam>) {
 
     /** Overwrites any keys present in [map] that this bag knows about. */
     fun setAll(map: Map<String, Float>) {
-        for ((k, v) in map) if (byKey.containsKey(k)) values[k] = v
+        for ((k, v) in map) {
+            val param = byKey[k] ?: continue
+            values[k] = sanitize(param, v)
+        }
     }
 
     /** Sets one known key; unknown keys are ignored. */
     fun set(key: String, value: Float) {
-        if (byKey.containsKey(key)) values[key] = value
+        val param = byKey[key] ?: return
+        values[key] = sanitize(param, value)
+    }
+
+    /**
+     * Forces [value] into the domain [param] declares.
+     *
+     * A non-finite value (a `NaN` brightness, an infinite rate) has no sensible
+     * clamp — every comparison against it is false, so `coerceIn` would pass it
+     * straight through — and falls back to the schema default instead.
+     */
+    private fun sanitize(param: EffectParam, value: Float): Float {
+        if (!value.isFinite()) return param.default
+        return when (param) {
+            is EffectParam.Scalar -> value.coerceIn(param.min, param.max)
+            // Truncated then clamped, so the index a Choice hands out is always
+            // a valid position in its own options list.
+            is EffectParam.Choice -> value.toInt().coerceIn(0, param.options.size - 1).toFloat()
+            is EffectParam.Color -> (value.toInt() and 0xFFFFFF).toFloat()
+            is EffectParam.Toggle -> if (value != 0f) 1f else 0f
+        }
     }
 
     /** Raw stored value, or the schema default, or `0`. */
@@ -106,7 +139,16 @@ class ParamBag(schema: List<EffectParam>) {
     /** Packed `0xRRGGBB`. */
     fun color(key: String): Int = raw(key).toInt() and 0xFFFFFF
 
-    fun enumIndex(key: String): Int = raw(key).toInt()
+    /**
+     * The selected option index, always a valid position in the [EffectParam.Choice]'s
+     * own options list — the clamp is repeated here so a caller cannot be handed
+     * an index that would subscript a parallel array out of bounds.
+     */
+    fun enumIndex(key: String): Int {
+        val index = raw(key).toInt()
+        val choice = byKey[key] as? EffectParam.Choice ?: return index
+        return index.coerceIn(0, choice.options.size - 1)
+    }
 
     fun bool(key: String): Boolean = raw(key) != 0f
 

@@ -12,7 +12,7 @@ import kotlin.math.ln
  * @param rms mean broadband RMS over the interval.
  * @param bass mean low-band energy.
  * @param centroidHz mean spectral centroid.
- * @param rmsZ / [bassZ] / [centroidZ] z-scores against the trailing window.
+ * @param rmsZ / [bassZ] z-scores against the trailing window.
  * @param onsetDensity onsets per second over the recent window.
  * @param onsetDensityZ z-score of that rate.
  * @param bassRise short-term bass level over its preceding reference level; 1
@@ -26,7 +26,6 @@ data class TransientSnapshot(
     val centroidHz: Float,
     val rmsZ: Float,
     val bassZ: Float,
-    val centroidZ: Float,
     val onsetDensity: Float,
     val onsetDensityZ: Float,
     val bassRise: Float,
@@ -73,7 +72,6 @@ class TransientDetector(
 
     private val rmsStats = RollingStats(config.historySamples)
     private val bassStats = RollingStats(config.historySamples)
-    private val centroidStats = RollingStats(config.historySamples)
     private val onsetRateStats = RollingStats(config.historySamples)
 
     /** Flux is judged at frame rate, so onsets keep their timing resolution. */
@@ -91,6 +89,9 @@ class TransientDetector(
 
     private var lastDropNanos = Long.MIN_VALUE
 
+    /** Mirrors [TransientSnapshot.warm]; read at frame rate, so cached. */
+    private var isWarm = false
+
     var snapshot: TransientSnapshot = EMPTY_SNAPSHOT
         private set
 
@@ -104,7 +105,16 @@ class TransientDetector(
     fun process(frame: FeatureFrame): TransientSample? {
         // Onsets are counted at frame rate: a flux spike well above its recent
         // mean is a note attack, and their rate is what rises through a build-up.
-        if (fluxStats.isWarm(MIN_FLUX_SAMPLES) && fluxStats.zScore(frame.flux) >= config.onsetFluxZ) {
+        //
+        // Gated on the *tier's* warm-up, not merely on the flux window holding
+        // half a second. It used to start counting 7.5 s before the rest of the
+        // tier trusted itself, against flux statistics that were still settling —
+        // and since the onset-rate window is 45 s long, that unrepresentative
+        // opening biased every onsetDensityZ for the following 45 s, which is
+        // most of a track.
+        if (isWarm && fluxStats.isWarm(MIN_FLUX_SAMPLES) &&
+            fluxStats.zScore(frame.flux) >= config.onsetFluxZ
+        ) {
             onsetsInSample++
         }
         fluxStats.add(frame.flux)
@@ -121,9 +131,9 @@ class TransientDetector(
     fun reset() {
         rmsStats.reset()
         bassStats.reset()
-        centroidStats.reset()
         onsetRateStats.reset()
         fluxStats.reset()
+        isWarm = false
         onsetCounts.fill(0)
         onsetCountIndex = 0
         onsetsInSample = 0
@@ -154,9 +164,9 @@ class TransientDetector(
         // Score against history *before* folding this sample in, so a sample is
         // never compared against a window that already contains it.
         val warm = rmsStats.isWarm(config.warmupSamples)
+        isWarm = warm
         val rmsZ = rmsStats.zScore(rms)
         val bassZ = bassStats.zScore(bass)
-        val centroidZ = centroidStats.zScore(centroid)
         val onsetDensityZ = onsetRateStats.zScore(onsetDensity)
 
         // A step is a change that happens *fast*. Comparing against the last few
@@ -168,8 +178,10 @@ class TransientDetector(
 
         rmsStats.add(rms)
         bassStats.add(bass)
-        centroidStats.add(centroid)
-        onsetRateStats.add(onsetDensity)
+        // The onset rate is only meaningful once onsets are being counted at all;
+        // feeding the pre-warm-up zeros in would put the same bias back by another
+        // route.
+        if (warm) onsetRateStats.add(onsetDensity)
 
         snapshot = TransientSnapshot(
             timestampNanos = timestampNanos,
@@ -178,7 +190,6 @@ class TransientDetector(
             centroidHz = centroid,
             rmsZ = rmsZ,
             bassZ = bassZ,
-            centroidZ = centroidZ,
             onsetDensity = onsetDensity,
             onsetDensityZ = onsetDensityZ,
             bassRise = bassRise,
@@ -245,7 +256,7 @@ class TransientDetector(
         val EMPTY_SNAPSHOT = TransientSnapshot(
             timestampNanos = 0L,
             rms = 0f, bass = 0f, centroidHz = 0f,
-            rmsZ = 0f, bassZ = 0f, centroidZ = 0f,
+            rmsZ = 0f, bassZ = 0f,
             onsetDensity = 0f, onsetDensityZ = 0f, bassRise = 1f,
             warm = false
         )

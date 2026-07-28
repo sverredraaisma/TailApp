@@ -269,6 +269,27 @@ class DeviceRepositoryTest {
     }
 
     @Test
+    fun `a config-changed refresh does not stall the notification collector`() = runTest {
+        // The refresh is four mutex-serialised reads — up to 20 s of timeouts on a
+        // bad link. Run inline on the collector it would stop FF02 (20 Hz) and
+        // FF09 being read at all, and the transport's 64-slot buffer overflows in
+        // about three seconds, taking unrelated command acknowledgements with it.
+        val transport = FakeBleTransport()
+        val repository = connected(transport)
+        transport.readDelayMs = 5_000
+
+        transport.notify(CharacteristicUuids.SYSTEM_EVENTS, byteArrayOf(0x03))
+        transport.notify(
+            CharacteristicUuids.MOTION_STATE,
+            FirmwarePayloads.motionState(xLimits = 0f to 60f)
+        )
+        advanceTimeBy(10)
+
+        // Well inside the first read: the notification still landed.
+        assertEquals(0f, requireNotNull(repository.deviceState.value.motionState).xAxisMin, 0f)
+    }
+
+    @Test
     fun `malformed notifications are ignored`() = runTest {
         val transport = FakeBleTransport()
         val repository = connected(transport)
@@ -291,8 +312,13 @@ class DeviceRepositoryTest {
         val repository = connected(transport)
         transport.clearTraffic()
 
+        // No advanceUntilIdle: the command suspends until it is acknowledged, so
+        // the write and the optimistic update have both landed by the time it
+        // returns. Advancing further would run the scheduled FF06 reconcile,
+        // which replays the fake's canned block over the value under test — a
+        // fixture artifact, since a real device would report back what it was
+        // just told. The reconcile has its own test.
         repository.setServoConfig(servoId = 1, axis = 1, half = 0, invert = 1, muxChannel = 6)
-        advanceUntilIdle()
 
         assertArrayEquals(
             byteArrayOf(0x03, 0x01, 0x01, 0x00, 0x01, 0x06),
@@ -352,8 +378,9 @@ class DeviceRepositoryTest {
         val transport = FakeBleTransport()
         val repository = connected(transport)
 
+        // See `setServoConfig sends the mux channel…` for why this does not
+        // advance past the acknowledgement.
         repository.setImuTap(imuId = 1, enabled = true)
-        advanceUntilIdle()
 
         assertTrue(requireNotNull(repository.deviceState.value.systemInfo).imus[1].tapEnabled)
     }
@@ -778,13 +805,28 @@ class DeviceRepositoryTest {
         advanceUntilIdle()
 
         repository.setMotorsEnabled(true)
-        advanceUntilIdle()
 
         val write = transport.writes.last { it.uuid == CharacteristicUuids.MOTION_CMD }
         assertArrayEquals(byteArrayOf(0x09, 0x01), write.data)
-        // Optimistic: the banner has to go away when the user acts on it, not a
-        // second later when the device gets around to saying so.
+        // Optimistic once the device has said yes: the banner has to go away when
+        // the user acts on it, not a second later at the reconcile.
         assertFalse(requireNotNull(repository.deviceState.value.systemInfo).motorsStalled)
+    }
+
+    @Test
+    fun `a refused re-enable leaves the stall showing`() = runTest {
+        // The FF06 block has no notify to correct this later. Clearing the banner
+        // on a command the device refused would leave the user looking at a
+        // healthy tail that cannot move.
+        val transport = FakeBleTransport().apply { ackResults.add(0x05) } // BAD_STATE
+        val repository = connected(transport)
+
+        transport.notify(CharacteristicUuids.SYSTEM_EVENTS, byteArrayOf(SystemEvent.STALL.code))
+        advanceUntilIdle()
+
+        repository.setMotorsEnabled(true)
+
+        assertTrue(requireNotNull(repository.deviceState.value.systemInfo).motorsStalled)
     }
 
     @Test
@@ -793,7 +835,6 @@ class DeviceRepositoryTest {
         val repository = connected(transport)
 
         repository.setMotionLimits(1, 480f, 2400f, 24000f, 75)
-        advanceUntilIdle()
 
         val write = transport.writes.last { it.uuid == CharacteristicUuids.MOTION_CMD }
         assertEquals(0x08.toByte(), write.data[0])
@@ -804,6 +845,28 @@ class DeviceRepositoryTest {
         assertEquals(75, limits[1].stallThreshold)
         // Only the addressed motor moves.
         assertEquals(720f, limits[0].maxVelocity, 0f)
+    }
+
+    @Test
+    fun `an accepted FF06-backed command re-reads the block it changed`() = runTest {
+        // FF06 neither notifies nor is polled, so the optimistic update above is
+        // the only thing standing between the write and the next connection. The
+        // scheduled re-read is what eventually replaces the guess with the
+        // device's own answer.
+        val transport = FakeBleTransport()
+        val repository = connected(transport)
+        transport.clearTraffic()
+
+        repository.setMotionLimits(1, 480f, 2400f, 24000f, 75)
+        assertEquals(0, transport.readCountFor(CharacteristicUuids.SYSTEM_CONFIG))
+
+        advanceUntilIdle()
+
+        assertEquals(1, transport.readCountFor(CharacteristicUuids.SYSTEM_CONFIG))
+        // Reconciled: the device still reports its own limits, so the optimistic
+        // value is gone rather than outliving a command that did not take.
+        val limits = requireNotNull(repository.deviceState.value.systemInfo?.motion).limits
+        assertEquals(720f, limits[1].maxVelocity, 0f)
     }
 
     @Test

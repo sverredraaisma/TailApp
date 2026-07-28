@@ -33,7 +33,10 @@ class TwinkleRenderer : LedEffectRenderer() {
         val local = slotTime - tick.toFloat()
 
         val d = density.coerceIn(0.0f, 1.0f)
-        val palette = (if (paletteId < 0.0f) 0.0f else paletteId).toInt()
+        // `static_cast<uint8_t>` on the device: an id above 255 wraps rather
+        // than being rejected, so 260 selects palette 4 there. Masking here too
+        // keeps the preview from blanking where the tail shows a palette.
+        val palette = (if (paletteId < 0.0f) 0.0f else paletteId).toInt() and 0xFF
 
         for (i in coords.indices) {
             // The same (index, tick) hash decides both whether this pixel

@@ -2,9 +2,12 @@ package com.tailapp.viewmodel
 
 import com.tailapp.ble.ConnectionState
 import com.tailapp.ble.protocol.CharacteristicUuids
+import com.tailapp.ble.protocol.CommandResult
 import com.tailapp.ble.protocol.Protocol
 import com.tailapp.repository.DeviceRepository
 import com.tailapp.testutil.FakeBleTransport
+import com.tailapp.testutil.FirmwarePayloads
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -53,17 +56,19 @@ class DeviceOverviewViewModelTest {
         Dispatchers.resetMain()
     }
 
-    private fun TestScope.connectedViewModel(
-        transport: FakeBleTransport
-    ): DeviceOverviewViewModel {
+    private fun TestScope.connectedRepository(transport: FakeBleTransport): DeviceRepository {
         val scope = CoroutineScope(StandardTestDispatcher(testScheduler))
         repositoryScope = scope
         val repository = DeviceRepository(transport, scope)
         advanceUntilIdle()
         transport.setConnectionState(ConnectionState.CONNECTED)
         advanceUntilIdle()
-        return DeviceOverviewViewModel(repository)
+        return repository
     }
+
+    private fun TestScope.connectedViewModel(
+        transport: FakeBleTransport
+    ): DeviceOverviewViewModel = DeviceOverviewViewModel(connectedRepository(transport))
 
     @Test
     fun `an over-long name is refused here rather than sent to be rejected`() = runTest {
@@ -154,5 +159,76 @@ class DeviceOverviewViewModelTest {
 
         viewModel.clearAdminStatus()
         assertNull(viewModel.adminStatus.value)
+    }
+
+    /**
+     * The reason the screen must not observe `lastCommandResult`: the same
+     * command rejected twice is the same sticky value twice, so the second
+     * rejection would show nothing and the user would take silence for success.
+     */
+    @Test
+    fun `two identical rejections are two failures, not one`() = runTest {
+        val transport = FakeBleTransport()
+        val repository = connectedRepository(transport)
+        val viewModel = DeviceOverviewViewModel(repository)
+
+        val seen = mutableListOf<CommandResult>()
+        requireNotNull(repositoryScope).launch { viewModel.commandFailures.collect { seen.add(it) } }
+        advanceUntilIdle()
+
+        repeat(2) {
+            transport.notify(
+                CharacteristicUuids.CMD_RESULT,
+                FirmwarePayloads.commandResult(0x03, 0x01, 0x03) // FF03 set-layer, UNKNOWN_ID
+            )
+            advanceUntilIdle()
+        }
+
+        assertEquals(2, seen.size)
+        // The sticky state cannot tell them apart — that is the whole point.
+        assertEquals(seen[0], repository.deviceState.value.lastCommandResult)
+    }
+
+    @Test
+    fun `an accepted command is not reported as a failure`() = runTest {
+        val transport = FakeBleTransport()
+        val repository = connectedRepository(transport)
+        val viewModel = DeviceOverviewViewModel(repository)
+
+        val seen = mutableListOf<CommandResult>()
+        requireNotNull(repositoryScope).launch { viewModel.commandFailures.collect { seen.add(it) } }
+        advanceUntilIdle()
+
+        transport.notify(
+            CharacteristicUuids.CMD_RESULT,
+            FirmwarePayloads.commandResult(0x03, 0x01, 0x00) // OK
+        )
+        advanceUntilIdle()
+
+        assertTrue(seen.isEmpty())
+    }
+
+    @Test
+    fun `connect targets the address the route named, not whatever was last connected`() = runTest {
+        val transport = FakeBleTransport()
+        val repository = connectedRepository(transport)
+        val viewModel = DeviceOverviewViewModel(repository, routeAddress = "AA:BB:CC:DD:EE:FF")
+
+        viewModel.connect()
+        advanceUntilIdle()
+
+        assertEquals("AA:BB:CC:DD:EE:FF", transport.connectedAddress)
+    }
+
+    @Test
+    fun `isConnected follows the transport`() = runTest {
+        val transport = FakeBleTransport()
+        val viewModel = connectedViewModel(transport)
+        advanceUntilIdle()
+        assertTrue(viewModel.isConnected.value)
+
+        transport.setConnectionState(ConnectionState.DISCONNECTED)
+        advanceUntilIdle()
+        assertFalse(viewModel.isConnected.value)
     }
 }

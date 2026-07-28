@@ -54,6 +54,49 @@ class ImageRendererTest {
     }
 
     @Test
+    fun `an image longer than its source buffer is refused, not truncated`() {
+        // 4x4x3 = 48 bytes claimed against a 12-byte buffer. The firmware's
+        // set_image clears the image outright rather than copying past the end,
+        // so every LED must read black - not the in-range prefix.
+        val r = ImageRenderer().apply { setImage(image, width = 4, height = 4) }
+        val out = PixelBuffer(2)
+        r.render(out, listOf(LedCoord(0f, 0f), LedCoord(1f, 1f)), dt = 0f)
+        assertEquals(0x000000, out.packed(0))
+        assertEquals(0x000000, out.packed(1))
+    }
+
+    @Test
+    fun `an explicit srcLen shorter than the array is what bounds the image`() {
+        // The bytes are there, but the caller says only 6 of them are valid, so
+        // a 2x2 (18-byte) image is refused all the same.
+        val r = ImageRenderer().apply { setImage(image, width = 2, height = 2, srcLen = 6) }
+        val out = PixelBuffer(1)
+        r.render(out, listOf(LedCoord(0f, 0f)), dt = 0f)
+        assertEquals(0x000000, out.packed(0))
+    }
+
+    @Test
+    fun `dimensions are masked to uint8, so a 256-wide image is blank`() {
+        // width 256 is 0 on the wire, and a zero-size image renders black on
+        // the device. Feed a buffer big enough that only the mask can blank it.
+        val big = ByteArray(256 * 3) { 0x7F }
+        val r = ImageRenderer().apply { setImage(big, width = 256, height = 1) }
+        val out = PixelBuffer(1)
+        r.render(out, listOf(LedCoord(0.5f, 0.5f)), dt = 0f)
+        assertEquals(0x000000, out.packed(0))
+    }
+
+    @Test
+    fun `a refused image clears a previously accepted one`() {
+        val r = ImageRenderer()
+        r.setImage(image, width = 2, height = 2)
+        r.setImage(image, width = 4, height = 4) // refused
+        val out = PixelBuffer(1)
+        r.render(out, listOf(LedCoord(0f, 0f)), dt = 0f)
+        assertEquals(0x000000, out.packed(0))
+    }
+
+    @Test
     fun `no image data samples black instead of crashing`() {
         val r = ImageRenderer()
         val out = PixelBuffer(1)

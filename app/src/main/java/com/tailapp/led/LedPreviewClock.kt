@@ -37,6 +37,19 @@ class LedPreviewClock(
 
     private var lastFrameNanos: Long = NO_FRAME_YET
 
+    /**
+     * The output stage [LedStackRenderer] applies to every frame - master
+     * brightness, current limiter, gamma - tracking the device's reported
+     * config. Exposed so a caller can read [LedOutputStage.lastPowerScale] or
+     * drive the preview without a connected device
+     * ([LedStackRenderer.setOutputConfig]).
+     */
+    val outputStage: LedOutputStage get() = renderer.outputStage
+
+    /** See [LedStackRenderer.setOutputConfig]. */
+    fun setOutputConfig(brightness: Int, gammaEnabled: Boolean, currentLimitMa: Int) =
+        renderer.setOutputConfig(brightness, gammaEnabled, currentLimitMa)
+
     /** Forwards to [LedStackRenderer.setState] - see its KDoc for what does and doesn't reset running effect state. */
     fun setState(state: LedState) {
         renderer.setState(state)

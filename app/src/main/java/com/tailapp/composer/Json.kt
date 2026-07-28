@@ -29,6 +29,26 @@ internal object Json {
      */
     private val FORM_FEED = 12.toChar()
 
+    /** `U+FFFD`, substituted for text that is already not valid UTF-16. */
+    private val REPLACEMENT = 0xFFFD.toChar()
+
+    /**
+     * How deeply [parse] will nest before giving up.
+     *
+     * Both readers recurse, so nesting depth is stack depth: a document of ten
+     * thousand `[`s overflows the stack. A `StackOverflowError` is an `Error`,
+     * not an `Exception` — it escapes every `catch (e: JsonException)` this
+     * file's documentation promises is enough, and today it is survivable only
+     * because [CompositionSerializer] happens to use `runCatching`, which catches
+     * `Throwable`. A depth no real composition approaches (the editor's own trees
+     * are a handful of folders deep) turns that into the ordinary parse failure
+     * every other malformed document produces.
+     */
+    private const val MAX_DEPTH = 64
+
+    private val HIGH_SURROGATES = 0xD800..0xDBFF
+    private val LOW_SURROGATES = 0xDC00..0xDFFF
+
     // --- writing ---
 
     fun write(value: Any?): String = StringBuilder().also { writeInto(it, value) }.toString()
@@ -68,18 +88,31 @@ internal object Json {
     /**
      * Numbers are written without an exponent and without a trailing `.0` for
      * whole values, so a saved file stays readable and diffable by hand.
+     *
+     * `NaN` and the infinities have no JSON spelling at all. Writing them as `0`
+     * is the worst available option: a `NaN` brightness would save as *black* and
+     * reload as a stack the user never built, with nothing anywhere saying so.
+     * They are a bug at the source, so they are reported as one.
      */
     private fun formatNumber(value: Number): String {
         val d = value.toDouble()
-        if (!d.isFinite()) return "0"
+        if (!d.isFinite()) throw JsonException("cannot write a non-finite number ($d)")
         if (d == d.toLong().toDouble()) return d.toLong().toString()
         return d.toString()
     }
 
+    /**
+     * Surrogates are written as the pairs they are, never singly: a lone
+     * surrogate is not valid UTF-16 and emitting one produces a document that no
+     * reader — including this one — can take back. An unpaired half is replaced
+     * with `U+FFFD`, which is what every other encoder in the platform does with
+     * text that is already broken.
+     */
     private fun writeString(sb: StringBuilder, value: String) {
         sb.append('"')
-        for (c in value) {
-            when (c) {
+        var i = 0
+        while (i < value.length) {
+            when (val c = value[i]) {
                 '"' -> sb.append("\\\"")
                 '\\' -> sb.append("\\\\")
                 '\n' -> sb.append("\\n")
@@ -87,10 +120,22 @@ internal object Json {
                 '\t' -> sb.append("\\t")
                 '\b' -> sb.append("\\b")
                 FORM_FEED -> sb.append("\\f")
-                else ->
-                    if (c < ' ') sb.append("\\u").append("%04x".format(c.code))
-                    else sb.append(c)
+                else -> when {
+                    c.isHighSurrogate() -> {
+                        val low = value.getOrNull(i + 1)
+                        if (low != null && low.isLowSurrogate()) {
+                            sb.append(c).append(low)
+                            i++
+                        } else {
+                            sb.append(REPLACEMENT)
+                        }
+                    }
+                    c.isLowSurrogate() -> sb.append(REPLACEMENT)
+                    c < ' ' -> sb.append("\\u").append("%04x".format(c.code))
+                    else -> sb.append(c)
+                }
             }
+            i++
         }
         sb.append('"')
     }
@@ -131,11 +176,25 @@ internal object Json {
             while (offset < text.length && text[offset].isWhitespace()) offset++
         }
 
+        /** Nesting currently open; see [MAX_DEPTH]. */
+        private var depth = 0
+
+        private inline fun <T> nested(body: () -> T): T {
+            if (++depth > MAX_DEPTH) {
+                throw JsonException("nested deeper than $MAX_DEPTH at offset $offset")
+            }
+            try {
+                return body()
+            } finally {
+                depth--
+            }
+        }
+
         fun readValue(): Any? {
             if (atEnd) throw JsonException("unexpected end of input")
             return when (val c = text[offset]) {
-                '{' -> readObject()
-                '[' -> readArray()
+                '{' -> nested { readObject() }
+                '[' -> nested { readArray() }
                 '"' -> readString()
                 't' -> readLiteral("true", true)
                 'f' -> readLiteral("false", false)
@@ -214,11 +273,7 @@ internal object Json {
                             't' -> sb.append('\t')
                             'b' -> sb.append('\b')
                             'f' -> sb.append(FORM_FEED)
-                            'u' -> {
-                                if (offset + 4 > text.length) throw JsonException("truncated \\u escape")
-                                sb.append(text.substring(offset, offset + 4).toInt(16).toChar())
-                                offset += 4
-                            }
+                            'u' -> readUnicodeEscape(sb)
                             else -> throw JsonException("bad escape '\\$e'")
                         }
                     }
@@ -227,12 +282,104 @@ internal object Json {
             }
         }
 
+        /**
+         * Reads the four hex digits after a `\u`, and the second half of a
+         * surrogate pair when the first half calls for one.
+         *
+         * `substring(...).toInt(16)` was neither: it throws
+         * `NumberFormatException` (not a [JsonException]) on `\uZZZZ`, and it
+         * *accepts a sign*, so `\u-12F` silently decoded to `U+FED1` — a
+         * malformed document quietly becoming a different character. And a lone
+         * `\uD800` produced an unpaired surrogate that the writer then re-emitted
+         * raw, so a round trip turned a bad document into invalid UTF-16.
+         */
+        private fun readUnicodeEscape(sb: StringBuilder) {
+            val code = readHex4()
+            when {
+                code in HIGH_SURROGATES -> {
+                    if (!text.startsWith("\\u", offset)) {
+                        throw JsonException("unpaired high surrogate at offset $offset")
+                    }
+                    offset += 2
+                    val low = readHex4()
+                    if (low !in LOW_SURROGATES) {
+                        throw JsonException("high surrogate not followed by a low one at offset $offset")
+                    }
+                    sb.append(code.toChar()).append(low.toChar())
+                }
+
+                code in LOW_SURROGATES ->
+                    throw JsonException("unpaired low surrogate at offset $offset")
+
+                else -> sb.append(code.toChar())
+            }
+        }
+
+        private fun readHex4(): Int {
+            if (offset + 4 > text.length) throw JsonException("truncated \\u escape")
+            var value = 0
+            for (i in 0 until 4) {
+                val c = text[offset + i]
+                val digit = when (c) {
+                    in '0'..'9' -> c - '0'
+                    in 'a'..'f' -> c - 'a' + 10
+                    in 'A'..'F' -> c - 'A' + 10
+                    else -> throw JsonException("bad \\u escape at offset $offset")
+                }
+                value = value * 16 + digit
+            }
+            offset += 4
+            return value
+        }
+
+        /**
+         * JSON's own number grammar: an optional `-`, then either `0` or a
+         * non-zero digit run, then an optional fraction with at least one digit,
+         * then an optional exponent with at least one digit.
+         *
+         * Scanning "digits and anything in `.eE+-`" and handing the slice to
+         * `toDoubleOrNull` accepted things JSON does not — `00123`, `1.`, `1e`,
+         * `--1` — which is how a corrupt file reads as valid data. Nothing this
+         * writer emits is affected: whole values go out as a `Long` and the rest
+         * through `Double.toString`, neither of which can produce a leading zero
+         * or a bare trailing point.
+         */
         private fun readNumber(): Double {
             val start = offset
-            if (peek() == '-') offset++
-            while (!atEnd && (text[offset].isDigit() || text[offset] in ".eE+-")) offset++
+            if (!atEnd && text[offset] == '-') offset++
+
+            when {
+                atEnd -> throw JsonException("unexpected end of input in a number")
+                text[offset] == '0' -> offset++
+                text[offset] in '1'..'9' -> skipDigits()
+                else -> throw JsonException("bad number at offset $offset")
+            }
+
+            if (!atEnd && text[offset] == '.') {
+                offset++
+                requireDigit()
+                skipDigits()
+            }
+
+            if (!atEnd && (text[offset] == 'e' || text[offset] == 'E')) {
+                offset++
+                if (!atEnd && (text[offset] == '+' || text[offset] == '-')) offset++
+                requireDigit()
+                skipDigits()
+            }
+
             val slice = text.substring(start, offset)
             return slice.toDoubleOrNull() ?: throw JsonException("bad number '$slice'")
+        }
+
+        private fun skipDigits() {
+            while (!atEnd && text[offset] in '0'..'9') offset++
+        }
+
+        private fun requireDigit() {
+            if (atEnd || text[offset] !in '0'..'9') {
+                throw JsonException("expected a digit at offset $offset")
+            }
         }
 
         private fun <T> readLiteral(literal: String, value: T): T {

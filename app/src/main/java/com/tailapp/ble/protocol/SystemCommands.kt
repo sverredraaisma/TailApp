@@ -1,5 +1,7 @@
 package com.tailapp.ble.protocol
 
+import com.tailapp.model.ParamDescriptorKind
+
 object SystemCommands {
 
     /**
@@ -66,6 +68,32 @@ object SystemCommands {
 
     /** `0x06` Explicit bond-list refresh request (appended to the FF06 read). */
     fun listBonds(): ByteArray = byteArrayOf(0x06)
+
+    /**
+     * `0x07` Point FF0D at one pattern or effect: `[kind][id]`.
+     *
+     * Unlike the no-payload triggers above, this one carries state — FF0D can
+     * only publish one entity at a time — so the device remembers the selection
+     * and republishes on it. The descriptors then arrive on
+     * [CharacteristicUuids.PARAM_DESC], by read or notify, and are read by
+     * [ParamDescriptorParser].
+     *
+     * An id the device does not know is answered `UNKNOWN_ID` on FF09, but the
+     * selection is still stored: the FF0D payload then reports
+     * [com.tailapp.model.ParamDescriptorStatus.UNKNOWN_ID] for that id rather
+     * than leaving the previous entity's descriptors in place, where an app
+     * watching only FF0D would take them for the ones it asked about.
+     *
+     * [ParamDescriptorKind.NONE] is the device's own "nothing selected" sentinel
+     * and is not selectable — the firmware answers `OUT_OF_RANGE` — so it is
+     * refused here.
+     */
+    fun selectDescriptors(kind: ParamDescriptorKind, entityId: Byte): ByteArray {
+        require(kind != ParamDescriptorKind.NONE) {
+            "ParamDescriptorKind.NONE is the device's 'nothing selected' sentinel, not a selection"
+        }
+        return byteArrayOf(0x07, kind.code.toByte(), entityId)
+    }
 }
 
 /** What is wrong with a proposed device name, in the device's own terms. */

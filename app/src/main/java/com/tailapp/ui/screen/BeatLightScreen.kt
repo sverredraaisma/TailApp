@@ -1,8 +1,5 @@
 package com.tailapp.ui.screen
 
-import android.Manifest
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -17,7 +14,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -38,6 +34,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -48,14 +45,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.tailapp.beat.BeatEvent
 import com.tailapp.beat.OctaveBias
 import com.tailapp.ble.ConnectionState
 import com.tailapp.effects.BeatDecoderKind
-import com.tailapp.effects.BeatLightState
 import com.tailapp.composer.Composition
 import com.tailapp.composer.EffectLayer
 import com.tailapp.composer.GroupLayer
@@ -63,9 +60,9 @@ import com.tailapp.composer.LayerNode
 import com.tailapp.composer.MotionChoreography
 import com.tailapp.composer.TailTelemetry
 import com.tailapp.genre.GenreState
-import com.tailapp.led.PixelBuffer
 import com.tailapp.ui.components.LedPreviewPlaceholder
 import com.tailapp.ui.components.LedStrip
+import com.tailapp.ui.components.rememberMicPermissionRequester
 import com.tailapp.viewmodel.BeatLightViewModel
 
 /**
@@ -84,10 +81,13 @@ fun BeatLightScreen(
     onEditStack: () -> Unit,
     onBack: () -> Unit
 ) {
-    val state by viewModel.state.collectAsStateWithLifecycle()
+    // `state` and `frame` are deliberately NOT collected here. Both change at
+    // preview frame rate, and reading them at the top of the screen invalidated
+    // the entire Column ~60 times a second — every card, every slider, every
+    // radio row. They are read inside MonitorSection, which is the only thing
+    // that actually shows them.
     val isActive by viewModel.isActive.collectAsStateWithLifecycle()
     val error by viewModel.error.collectAsStateWithLifecycle()
-    val frame by viewModel.frame.collectAsStateWithLifecycle()
     val deviceState by viewModel.deviceState.collectAsStateWithLifecycle()
     val triggerOffsetMillis by viewModel.triggerOffsetMillis.collectAsStateWithLifecycle()
     val compositions by viewModel.compositions.collectAsStateWithLifecycle()
@@ -100,11 +100,16 @@ fun BeatLightScreen(
 
     val snackbarHostState = remember { SnackbarHostState() }
 
-    val audioPermissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        if (granted) viewModel.start()
-    }
+    // RECORD_AUDIO plus (API 33+) POST_NOTIFICATIONS: the session runs in a
+    // foreground service, and without the notification grant the tail keeps
+    // listening with nothing on screen to stop it. Denial is recoverable —
+    // rationale, then a snackbar into app settings — instead of a Start button
+    // that is silently inert forever.
+    val micPermission = rememberMicPermissionRequester(
+        snackbarHostState = snackbarHostState,
+        purpose = "drive the lights from the music",
+        onGranted = viewModel::start
+    )
 
     LaunchedEffect(error) {
         error?.let {
@@ -167,11 +172,7 @@ fun BeatLightScreen(
                         )
                     }
                     Button(onClick = {
-                        if (!isActive) {
-                            audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                        } else {
-                            viewModel.stop()
-                        }
+                        if (!isActive) micPermission.request() else viewModel.stop()
                     }) {
                         Text(if (isActive) "Stop" else "Start")
                     }
@@ -179,7 +180,10 @@ fun BeatLightScreen(
             }
 
             Spacer(Modifier.height(16.dp))
-            MonitorSection(state = state, frame = frame, ledsPerRing = deviceState.ledState?.ledsPerRing.orEmpty())
+            MonitorSection(
+                viewModel = viewModel,
+                ledsPerRing = deviceState.ledState?.ledsPerRing.orEmpty()
+            )
 
             Spacer(Modifier.height(16.dp))
             CalibrationSection(
@@ -203,8 +207,17 @@ fun BeatLightScreen(
             )
 
             Spacer(Modifier.height(16.dp))
+            // summary() walks the whole layer tree. Hoisted into a remember so it
+            // runs when the library changes, not on every recomposition — and
+            // wrapped in an @Immutable holder so the section can skip at all
+            // (a bare List is unstable to the Compose compiler).
+            val rows = remember(compositions) {
+                CompositionRows(
+                    compositions.map { CompositionRow(it.id, it.name, it.summary()) }
+                )
+            }
             CompositionsSection(
-                compositions = compositions,
+                rows = rows,
                 activeId = activeCompositionId,
                 onSelect = viewModel::setActiveComposition,
                 onEditStack = onEditStack
@@ -213,12 +226,22 @@ fun BeatLightScreen(
     }
 }
 
+/**
+ * The live half of the screen, and the only part that recomposes at frame rate.
+ *
+ * It collects `state` and `frame` itself rather than taking them as parameters:
+ * doing that at the screen's top level made every card on the page a dependency
+ * of a 60 Hz flow. Everything below the monitor now only recomposes when its own
+ * inputs change.
+ */
 @Composable
 private fun MonitorSection(
-    state: BeatLightState,
-    frame: PixelBuffer?,
+    viewModel: BeatLightViewModel,
     ledsPerRing: List<Int>
 ) {
+    val state by viewModel.state.collectAsStateWithLifecycle()
+    val frame by viewModel.frame.collectAsStateWithLifecycle()
+
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
             Text("Monitor", style = MaterialTheme.typography.titleMedium)
@@ -287,7 +310,12 @@ private fun MonitorSection(
 
             Spacer(Modifier.height(16.dp))
             if (ledsPerRing.isNotEmpty()) {
-                LedStrip(pixels = frame, ledsPerRing = ledsPerRing, modifier = Modifier.fillMaxWidth())
+                LedStrip(
+                    pixels = frame,
+                    ledsPerRing = ledsPerRing,
+                    modifier = Modifier.fillMaxWidth(),
+                    contentDescription = "Live preview of the frame being sent to the tail"
+                )
             } else {
                 LedPreviewPlaceholder(modifier = Modifier.fillMaxWidth())
             }
@@ -343,6 +371,14 @@ private fun BeatPulse(lastBeat: BeatEvent?, modifier: Modifier = Modifier) {
     Box(
         modifier = modifier
             .size(40.dp)
+            // The flash is pure animation and says nothing on its own; the BPM
+            // readout beside it is the meaningful number, so this announces what
+            // the dot is rather than pulsing silently.
+            .semantics {
+                contentDescription =
+                    if (lastBeat == null) "Beat indicator, no beat detected"
+                    else "Beat indicator, flashing on each detected beat"
+            }
             .scale(1f + pulse * 0.35f)
             .clip(CircleShape)
             .background(color.copy(alpha = 0.25f + pulse * 0.75f))
@@ -475,9 +511,17 @@ private fun CalibrationSection(
     }
 }
 
+/** One picker row, precomputed. [summary] costs a tree walk, so it is not derived here. */
+@Immutable
+private data class CompositionRow(val id: String, val name: String, val summary: String)
+
+/** Stable wrapper: `List` itself is always unstable to the Compose compiler. */
+@Immutable
+private data class CompositionRows(val rows: List<CompositionRow>)
+
 @Composable
 private fun CompositionsSection(
-    compositions: List<Composition>,
+    rows: CompositionRows,
     activeId: String,
     onSelect: (String) -> Unit,
     onEditStack: () -> Unit
@@ -500,7 +544,7 @@ private fun CompositionsSection(
             )
             Spacer(Modifier.height(8.dp))
 
-            compositions.forEach { composition ->
+            rows.rows.forEach { row ->
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -508,13 +552,13 @@ private fun CompositionsSection(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     RadioButton(
-                        selected = composition.id == activeId,
-                        onClick = { onSelect(composition.id) }
+                        selected = row.id == activeId,
+                        onClick = { onSelect(row.id) }
                     )
                     Column(modifier = Modifier.weight(1f)) {
-                        Text(composition.name, style = MaterialTheme.typography.bodyMedium)
+                        Text(row.name, style = MaterialTheme.typography.bodyMedium)
                         Text(
-                            composition.summary(),
+                            row.summary,
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )

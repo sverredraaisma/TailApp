@@ -36,6 +36,17 @@ object CharacteristicUuids {
     val DIAGNOSTICS: UUID     = UUID.fromString("0000FF0C-0000-1000-8000-00805F9B34FB")
 
     /**
+     * Parameter descriptors, read + notify — one pattern or effect at a time.
+     *
+     * Its own characteristic rather than more bytes on [SYSTEM_CONFIG] because
+     * the full set is several kilobytes, past both the FF06 buffer and any single
+     * MTU. Which entity it publishes is chosen by writing
+     * [SystemCommands.selectDescriptors] to FF06; that keeps every read here a
+     * fixed, single-packet payload. Parsed by [ParamDescriptorParser].
+     */
+    val PARAM_DESC: UUID      = UUID.fromString("0000FF0D-0000-1000-8000-00805F9B34FB")
+
+    /**
      * OTA firmware image in, offset echo out (SYS-2).
      *
      * Both directions on one characteristic: write-without-response for the

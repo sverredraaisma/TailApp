@@ -87,9 +87,31 @@ data class OtaInfo(
      * restart to apply" is shown without the app having to remember that it just
      * uploaded something.
      */
-    val other: FirmwareVersion?
+    val other: FirmwareVersion?,
+
+    /**
+     * True when bit 1 of the block's flags byte is set: the device could not read
+     * [running] from a real app descriptor, so the 0.0.0 it published is a
+     * *placeholder*, not a claim about what is installed.
+     *
+     * It has to be distinguishable, because the two look identical on the wire
+     * and lead opposite ways. A genuine 0.0.0 makes any offered image an upgrade;
+     * an unreadable one means the app knows nothing and should say so rather than
+     * comparing against a number the device never derived. In practice this is
+     * never seen for a running image — a device always knows its own build's
+     * version string — which is exactly why a placeholder rendered as a version
+     * would be believed.
+     */
+    val runningVersionUnknown: Boolean = false
 ) {
     val otherValid: Boolean get() = other != null
+
+    /**
+     * The running version, or null when the device flagged it as a placeholder.
+     * What a version comparison should use — [running] is what to show only once
+     * it is known to be real.
+     */
+    val knownRunning: FirmwareVersion? get() = running.takeUnless { runningVersionUnknown }
 }
 
 /** Transfer state, the fifth byte of the FF0E status echo. */

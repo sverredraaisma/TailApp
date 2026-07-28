@@ -19,7 +19,16 @@ class PixelBuffer(val ledCount: Int) {
     fun green(index: Int): Int = bytes[index * 3 + 1].toInt() and 0xFF
     fun blue(index: Int): Int = bytes[index * 3 + 2].toInt() and 0xFF
 
-    /** Channels are clamped to `0..255`, matching the firmware's `uint8_t` casts. */
+    /**
+     * Channels are clamped to `0..255`. This is deliberately **not** what C++
+     * does - the firmware's `uint8_t` conversions truncate mod 256, so 382
+     * would land at 126 there and at 255 here. Clamping is the safer of the two
+     * (a too-bright pixel reads as white rather than as a random darker
+     * colour), and no effect can currently reach an out-of-range value anyway:
+     * every renderer bounds its channels before writing, which is what makes
+     * the difference unobservable rather than merely unlikely. Keep it that way
+     * - an effect that relies on the wrap is relying on C++ UB.
+     */
     fun set(index: Int, r: Int, g: Int, b: Int) {
         if (index < 0 || index >= ledCount) return
         val o = index * 3

@@ -27,7 +27,8 @@ class MotionChoreographyTest {
         level: Float = 1f,
         timeSeconds: Float = 0f,
         secondsSinceDrop: Float = ReactiveContext.NO_EVENT_SECONDS,
-        beatCount: Int = 0
+        beatCount: Int = 0,
+        dropNanos: Long = 0L
     ) = testContext(
         bpm = bpm,
         barPhase = barPhase,
@@ -36,7 +37,7 @@ class MotionChoreographyTest {
         beatCount = beatCount,
         lastDrop = if (secondsSinceDrop < ReactiveContext.NO_EVENT_SECONDS) {
             DropEvent(
-                timestampNanos = 0L,
+                timestampNanos = dropNanos,
                 intensity = 1f,
                 broadbandZ = 4f,
                 bassZ = 4f,
@@ -119,11 +120,60 @@ class MotionChoreographyTest {
             MotionChoreography.Config(mode = MotionChoreography.Mode.DROP_ONLY)
         )
         // Two drops always throwing the same way would walk the tail to one side
-        // rather than reading as a reaction.
-        val first = choreo.targetsFor(contextAt(secondsSinceDrop = 0f, beatCount = 0))[0]
-        val second = choreo.targetsFor(contextAt(secondsSinceDrop = 0f, beatCount = 1))[0]
+        // rather than reading as a reaction. Drops are told apart by their own
+        // timestamps, not by anything that moves between them.
+        val first = choreo.targetsFor(contextAt(secondsSinceDrop = 0f, dropNanos = 1_000L))[0]
+        val second = choreo.targetsFor(contextAt(secondsSinceDrop = 0f, dropNanos = 2_000L))[0]
 
         assertTrue(first * second < 0f)
+    }
+
+    /**
+     * The one bug in this file that can damage hardware.
+     *
+     * The direction is latched when the drop lands and must hold for the whole
+     * flick. Deriving it per frame from the beat count — which advances two or
+     * three times inside the 1.2 s window at 120 BPM — throws the tail to +25°
+     * and then commands -25° half a beat later, at full amplitude: a hard
+     * reversal of a physical linkage, issued at render rate.
+     */
+    @Test
+    fun `the flick direction never reverses inside one drop's window`() {
+        val choreo = MotionChoreography(
+            MotionChoreography.Config(mode = MotionChoreography.Mode.DROP_ONLY)
+        )
+
+        // 120 BPM: a beat every half second, so the beat count moves twice inside
+        // the window even though the drop has not changed.
+        val signs = (0..24).map { step ->
+            val elapsed = step * 0.05f
+            choreo.targetsFor(
+                contextAt(
+                    secondsSinceDrop = elapsed,
+                    beatCount = (elapsed / 0.5f).toInt(),
+                    dropNanos = 7_000L
+                )
+            )[0]
+        }.filter { it != 0f }.map { it > 0f }
+
+        assertTrue("the window produced no deflection at all", signs.isNotEmpty())
+        assertEquals(
+            "the tail was commanded to the opposite extreme mid-flick",
+            1,
+            signs.distinct().size
+        )
+    }
+
+    @Test
+    fun `each call hands back an array the caller owns`() {
+        val choreo = MotionChoreography()
+
+        val first = choreo.targetsFor(contextAt(barPhase = 0.25f))
+        val second = choreo.targetsFor(contextAt(barPhase = 0.75f))
+
+        // A shared internal buffer would have rewritten `first` in place, so a
+        // caller holding one frame's targets would silently be holding the next.
+        assertTrue("the two frames alias one buffer", first[0] != second[0])
     }
 
     @Test

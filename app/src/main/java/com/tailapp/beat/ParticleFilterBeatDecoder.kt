@@ -361,6 +361,14 @@ class ParticleFilterBeatDecoder(
         if (quietFrames <= silenceHoldFrames) {
             correct(activation.beat)
             resampleIfDepleted()
+        } else {
+            // The observation update is suspended, but [predict] still multiplies
+            // by the octave-bias weight at every beat crossing — and that is the
+            // only place weights are normalised. Left alone, a hold long enough
+            // to span a few beat crossings drifts the cloud's total weight away
+            // from 1, which silently rescales the effective sample size the
+            // resampler reads the moment the audio comes back.
+            normaliseWeights()
         }
 
         summarisePosterior()
@@ -531,6 +539,19 @@ class ParticleFilterBeatDecoder(
     private fun overlap(low: Float, high: Float): Float {
         val end = if (high < BEAT_WINDOW) high else BEAT_WINDOW
         return if (end > low) end - low else 0f
+    }
+
+    /** Rescales the cloud to sum to 1, falling back to the prior if it cannot. */
+    private fun normaliseWeights() {
+        val n = beatParticleCount
+        var sum = 0.0
+        for (i in 0 until n) sum += weight[i]
+        if (sum <= 0.0 || !sum.isFinite()) {
+            weight.fill(1f / n)
+            return
+        }
+        val scale = (1.0 / sum).toFloat()
+        for (i in 0 until n) weight[i] *= scale
     }
 
     private fun resampleIfDepleted() {
@@ -955,9 +976,12 @@ class ParticleFilterBeatDecoder(
          * makes 128 BPM's double (256) unrepresentable. The dangerous octave
          * errors are the ones that stay inside the range, which is why the
          * observation model has to be right rather than merely bounded.
+         *
+         * Shared with [TempoEstimator] and [OctaveBias] through [TempoRange];
+         * these aliases exist because the KDoc above and the tests refer to them.
          */
-        const val MIN_BPM = 55f
-        const val MAX_BPM = 215f
+        const val MIN_BPM = TempoRange.MIN_BPM
+        const val MAX_BPM = TempoRange.MAX_BPM
 
         /**
          * `λ_o` — the beat window is the first `1/λ_o` of each beat interval.

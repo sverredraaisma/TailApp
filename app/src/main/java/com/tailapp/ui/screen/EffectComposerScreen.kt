@@ -1,5 +1,7 @@
 package com.tailapp.ui.screen
 
+import android.content.Intent
+import android.net.Uri
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -43,6 +45,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -55,6 +58,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -73,6 +79,7 @@ import com.tailapp.model.BlendMode
 import com.tailapp.model.ProfileSlot
 import com.tailapp.ui.components.LedPreviewPlaceholder
 import com.tailapp.ui.components.LedStrip
+import com.tailapp.ui.components.safeRange
 import com.tailapp.viewmodel.EffectComposerViewModel
 
 /**
@@ -109,23 +116,28 @@ fun EffectComposerScreen(
     var showRenameDialog by remember { mutableStateOf(false) }
     var showMenu by remember { mutableStateOf(false) }
     var showInstallDialog by remember { mutableStateOf(false) }
-    var importError by remember { mutableStateOf<String?>(null) }
+
+    val importError by viewModel.importError.collectAsStateWithLifecycle()
+    val shareRequest by viewModel.shareRequest.collectAsStateWithLifecycle()
 
     val context = LocalContext.current
 
-    // Reads whatever the user picked and hands the text to the view model,
-    // which is where the decision to accept or reject it belongs.
+    // Only the Uri is handled here. The result callback runs on the main thread,
+    // and a document from a network-backed provider downloads inside
+    // openInputStream — so the read itself belongs on the view model's IO
+    // dispatcher, which is also where the accept/reject decision already lives.
     val importLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument()
     ) { uri ->
-        if (uri == null) return@rememberLauncherForActivityResult
-        val text = runCatching {
-            context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
-        }.getOrNull()
-        importError = if (text == null) {
-            "Could not read that file."
-        } else {
-            viewModel.importJson(text)
+        if (uri != null) viewModel.importFromUri(context, uri)
+    }
+
+    // Same reasoning for the export: the cache file is written off the main
+    // thread, and the share sheet is launched once its Uri arrives.
+    LaunchedEffect(shareRequest) {
+        shareRequest?.let { uri ->
+            context.startActivity(shareIntent(uri))
+            viewModel.clearShareRequest()
         }
     }
 
@@ -169,14 +181,7 @@ fun EffectComposerScreen(
                             )
                             DropdownMenuItem(
                                 text = { Text("Share stack…") },
-                                onClick = {
-                                    showMenu = false
-                                    shareComposition(
-                                        context,
-                                        viewModel.exportFileName(),
-                                        viewModel.exportJson()
-                                    )
-                                }
+                                onClick = { showMenu = false; viewModel.prepareShare(context) }
                             )
                             DropdownMenuItem(
                                 text = { Text("Import stack…") },
@@ -302,10 +307,12 @@ fun EffectComposerScreen(
 
     importError?.let { message ->
         AlertDialog(
-            onDismissRequest = { importError = null },
+            onDismissRequest = viewModel::clearImportError,
             title = { Text("Import failed") },
             text = { Text(message) },
-            confirmButton = { TextButton(onClick = { importError = null }) { Text("OK") } }
+            confirmButton = {
+                TextButton(onClick = viewModel::clearImportError) { Text("OK") }
+            }
         )
     }
 
@@ -399,7 +406,12 @@ private fun PreviewCard(
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
             if (frame != null && ledsPerRing.isNotEmpty()) {
-                LedStrip(pixels = frame, ledsPerRing = ledsPerRing, modifier = Modifier.fillMaxWidth())
+                LedStrip(
+                    pixels = frame,
+                    ledsPerRing = ledsPerRing,
+                    modifier = Modifier.fillMaxWidth(),
+                    contentDescription = "Live preview of the effect stack being edited"
+                )
             } else {
                 LedPreviewPlaceholder(modifier = Modifier.fillMaxWidth())
                 Spacer(Modifier.height(8.dp))
@@ -674,27 +686,47 @@ private fun LabelledSlider(
     unit: String = "",
     onChange: (Float) -> Unit
 ) {
+    // A schema whose min equals its max (or that reports them inverted) gives a
+    // zero-width range, and the thumb fraction is then 0/0 — a NaN position.
+    val range = remember(min, max, value) { safeRange(min..max, value) }
+    val readout = formatValue(value, step) + unit
+
     Column(modifier = Modifier.fillMaxWidth()) {
         Row {
             Text(label, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
             Text(
-                formatValue(value, step) + unit,
+                readout,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
         Slider(
-            value = value.coerceIn(min, max),
-            onValueChange = { onChange(if (step > 0f) snap(it, min, step) else it) },
-            valueRange = min..max,
+            value = value.coerceIn(range.start, range.endInclusive),
+            onValueChange = { onChange(if (step > 0f) snap(it, range.start, step) else it) },
+            valueRange = range,
             // `steps` counts the divisions *between* endpoints, hence the -1.
-            steps = if (step > 0f) (((max - min) / step).toInt() - 1).coerceAtLeast(0) else 0
+            // Too many tick marks read as a smear, so past TICK_LIMIT the scale
+            // is dropped rather than drawn as noise.
+            steps = tickCount(range, step),
+            modifier = Modifier.semantics {
+                contentDescription = label
+                stateDescription = readout
+            }
         )
     }
 }
 
 private fun snap(value: Float, min: Float, step: Float): Float =
     min + Math.round((value - min) / step) * step
+
+/** Divisions between the endpoints, or none when there would be too many to read. */
+private fun tickCount(range: ClosedFloatingPointRange<Float>, step: Float): Int {
+    if (step <= 0f) return 0
+    val divisions = ((range.endInclusive - range.start) / step).toInt() - 1
+    return if (divisions in 1..TICK_LIMIT) divisions else 0
+}
+
+private const val TICK_LIMIT = 20
 
 private fun formatValue(value: Float, step: Float): String =
     if (step >= 1f) value.toInt().toString() else "%.2f".format(value)
@@ -915,26 +947,16 @@ private val SWATCHES = listOf(
 )
 
 /**
- * Hands the stack to the system share sheet as a JSON document.
+ * The share sheet for an already-written document.
  *
- * Written to the cache directory and shared by content URI rather than as an
- * extra string: a stack of any size exceeds what an Intent extra can safely
- * carry, and a file is what the receiving app almost always wants anyway.
+ * The file itself is written by the view model on an IO dispatcher — see
+ * `EffectComposerViewModel.prepareShare`; all that is left here is the Intent.
  */
-private fun shareComposition(context: android.content.Context, fileName: String, json: String) {
-    val dir = java.io.File(context.cacheDir, "shared").apply { mkdirs() }
-    val file = java.io.File(dir, fileName)
-    file.writeText(json)
-
-    val uri = androidx.core.content.FileProvider.getUriForFile(
-        context,
-        "${context.packageName}.fileprovider",
-        file
-    )
-    val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+private fun shareIntent(uri: Uri): Intent {
+    val send = Intent(Intent.ACTION_SEND).apply {
         type = "application/json"
-        putExtra(android.content.Intent.EXTRA_STREAM, uri)
-        addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        putExtra(Intent.EXTRA_STREAM, uri)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
     }
-    context.startActivity(android.content.Intent.createChooser(intent, "Share effect stack"))
+    return Intent.createChooser(send, "Share effect stack")
 }

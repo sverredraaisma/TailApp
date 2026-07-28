@@ -15,8 +15,10 @@ internal object GenrePrediction {
      * multi-label head, the 400 scores do not sum to 1, and several sibling
      * styles ("Techno", "Minimal Techno", "Deep Techno") legitimately fire
      * together. [GenreState.confidence] is therefore the winner's raw sigmoid
-     * activation — the calibrated "how sure is it", which is what
-     * `EffectControllerConfig.minGenreConfidence` is comparing against.
+     * activation — the calibrated "how sure is it", which is the number any
+     * downstream threshold should compare against. (It named
+     * `EffectControllerConfig.minGenreConfidence` here until that type was
+     * removed; see [OnnxGenreClassifier]'s `minConfidence`, which defaults to 0.)
      * Renormalising to sum 1 would divide by a number that grows with how many
      * styles fired, i.e. push confidence *down* exactly when the model is most
      * certain.

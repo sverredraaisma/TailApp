@@ -43,7 +43,7 @@ com.tailapp/
 │       ├── LedCommands               # Command builders for FF03
 │       ├── SystemCommands            # Command builders for FF06
 │       ├── ProfileCommands           # Command builders for FF08
-│       ├── MotionStateParser         # Decodes FF02 (77 bytes) into MotionState
+│       ├── MotionStateParser         # Decodes FF02 (97 bytes) into MotionState
 │       ├── LedStateParser            # Decodes FF04 (header + layers) into LedState
 │       └── SystemInfoParser          # Decodes FF06 read into SystemInfo
 ├── audio/
@@ -259,7 +259,9 @@ Phase 12 (Polish) ← all above
 
 6. **State parsers**
 
-   `MotionStateParser` — decodes FF02 (77 bytes):
+   `MotionStateParser` — decodes FF02, as planned at the time (77 bytes; the
+   payload is now 97, with the behavior and logical-position blocks appended —
+   `Protocol.MOTION_STATE_SIZE` and its two siblings are the current truth):
    ```
    MotionState(
        activePatternId, params[0..7], encoderPositions[0..3],

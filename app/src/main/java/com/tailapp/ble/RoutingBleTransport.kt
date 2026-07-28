@@ -2,10 +2,12 @@ package com.tailapp.ble
 
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.shareIn
 import kotlinx.coroutines.flow.stateIn
@@ -37,8 +39,14 @@ class RoutingBleTransport(
         active.flatMapLatest { it.connectionState }
             .stateIn(scope, SharingStarted.Eagerly, ConnectionState.DISCONNECTED)
 
+    // The buffer is not optional. shareIn with replay = 0 gives the relay no
+    // extra capacity and SUSPEND semantics, so a busy collector back-pressures
+    // all the way into BleConnectionManager's tryEmit — which does not wait, it
+    // drops. Buffering here is what makes that 64-slot backing store mean
+    // anything; dropping the oldest is right for a 20 Hz state stream.
     override val characteristicUpdate: SharedFlow<CharacteristicUpdate> =
         active.flatMapLatest { it.characteristicUpdate }
+            .buffer(64, BufferOverflow.DROP_OLDEST)
             .shareIn(scope, SharingStarted.Eagerly, replay = 0)
 
     override val negotiatedMtu: StateFlow<Int> =
@@ -47,6 +55,11 @@ class RoutingBleTransport(
 
     override fun connect(address: String) {
         val transport = if (VirtualTailTransport.isVirtualAddress(address)) virtual else real
+        // Switching backends without this strands the one being left: nothing
+        // downstream observes it any more, so a real BluetoothGatt would stay
+        // open for the life of the process once the virtual tail took over.
+        val previous = active.value
+        if (previous !== transport) previous.disconnect()
         active.value = transport
         transport.connect(address)
     }

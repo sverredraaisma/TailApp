@@ -45,10 +45,6 @@ class RollingStats(val windowSize: Int) {
             return if (variance <= 0.0) 0f else sqrt(variance).toFloat()
         }
 
-    /** The most recently added sample, or 0 when empty. */
-    val latest: Float
-        get() = if (filled == 0) 0f else values[(writeIndex - 1 + windowSize) % windowSize]
-
     fun add(value: Float) {
         if (filled == windowSize) {
             val evicted = values[writeIndex]

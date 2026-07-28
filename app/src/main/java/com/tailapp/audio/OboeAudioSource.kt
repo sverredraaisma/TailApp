@@ -23,6 +23,12 @@ class OboeAudioSource(
     private val ringCapacitySamples: Int = 1 shl 15
 ) : AudioSource {
 
+    /**
+     * Raw native pointer. `@Volatile` and snapshotted into a local before every
+     * use: a torn read here is a use-after-free in native code, not an
+     * exception, and [stop] can run on a different thread from [read].
+     */
+    @Volatile
     private var handle: Long = 0L
 
     @Volatile
@@ -36,10 +42,10 @@ class OboeAudioSource(
     override val isRunning: Boolean get() = running
 
     override val overrunCount: Long
-        get() = if (handle != 0L) nativeOverruns(handle) else 0L
+        get() = handle.let { if (it != 0L) nativeOverruns(it) else 0L }
 
     override val latencyMillis: Float
-        get() = if (handle != 0L) nativeLatencyMillis(handle) else 0f
+        get() = handle.let { if (it != 0L) nativeLatencyMillis(it) else 0f }
 
     /**
      * True once since the last call if the stream was torn down underneath us —
@@ -47,37 +53,45 @@ class OboeAudioSource(
      * stream. Callers poll this and [restart] to recover.
      */
     fun consumeDisconnected(): Boolean =
-        handle != 0L && nativeConsumeDisconnected(handle)
+        handle.let { it != 0L && nativeConsumeDisconnected(it) }
 
     override fun start() {
         if (running) return
         check(isAvailable) { "libtailapp_audio.so is not loaded" }
 
-        if (handle == 0L) {
-            handle = nativeCreate(requestedSampleRate, ringCapacitySamples)
-            check(handle != 0L) { "could not allocate the native capture engine" }
+        var h = handle
+        if (h == 0L) {
+            h = nativeCreate(requestedSampleRate, ringCapacitySamples)
+            check(h != 0L) { "could not allocate the native capture engine" }
+            handle = h
         }
 
-        val result = nativeStart(handle)
+        val result = nativeStart(h)
         if (result != 0) {
             // Oboe returns negative result codes; the common one is ErrorInvalidState
             // when RECORD_AUDIO was revoked or another app holds the mic exclusively.
-            nativeDestroy(handle)
+            // Clear the field *before* freeing, so no concurrent reader can pick up
+            // a pointer that is about to be dangling.
             handle = 0L
+            nativeDestroy(h)
             throw IllegalStateException("Oboe failed to open the input stream (code $result)")
         }
 
-        actualSampleRate = nativeSampleRate(handle)
+        actualSampleRate = nativeSampleRate(h)
         running = true
         Log.i(TAG, "capture started at ${actualSampleRate}Hz, latency ${latencyMillis}ms")
     }
 
     override fun stop() {
-        if (handle == 0L) return
         running = false
-        nativeStop(handle)
-        nativeDestroy(handle)
+        // Publish the null first: `read` snapshots the field and bails on 0, so
+        // ordering it ahead of the free is what keeps teardown from racing a
+        // read into freed memory.
+        val h = handle
+        if (h == 0L) return
         handle = 0L
+        nativeStop(h)
+        nativeDestroy(h)
     }
 
     /** Closes and reopens the stream, e.g. after [consumeDisconnected] reported a route change. */
@@ -87,10 +101,19 @@ class OboeAudioSource(
     }
 
     override fun read(out: FloatArray, count: Int): Int {
-        if (!running || handle == 0L) return 0
+        val h = handle
+        if (!running || h == 0L) return 0
         val n = count.coerceAtMost(out.size)
         if (n <= 0) return 0
-        return nativeRead(handle, out, n)
+        val read = nativeRead(h, out, n)
+        // Sanitise once, at the boundary every sample crosses. One NaN otherwise
+        // poisons the bands, the flux and the adaptive drop statistics for the
+        // whole session, and `if (v > max)` is false for NaN, so the FF05 bars
+        // would go silently dead rather than fail loudly.
+        for (i in 0 until read) {
+            if (!out[i].isFinite()) out[i] = 0f
+        }
+        return read
     }
 
     private external fun nativeCreate(sampleRate: Int, ringCapacity: Int): Long

@@ -27,7 +27,7 @@ import kotlin.math.exp
 class DropFlashEffect : ReactiveEffect(SPEC) {
 
     override fun render(out: PixelBuffer, coords: List<LedCoord>, ctx: ReactiveContext) {
-        val window = p.float("window")
+        val window = p.float("window").coerceAtLeast(1e-3f)
         val level = ctx.dropEnvelope(window)
         if (level <= 0f) return
 
@@ -40,9 +40,12 @@ class DropFlashEffect : ReactiveEffect(SPEC) {
             return
         }
 
-        // The front leaves the base at the moment of the drop and reaches the
-        // tip as the envelope expires.
-        val front = 1f - level
+        // The front leaves the base at the moment of the drop and reaches the tip
+        // as the window expires — so it is elapsed *time*, not the envelope.
+        // `level` carries the detector's intensity (see `dropEnvelope`), so
+        // deriving the position from it would start a marginal drop's burst
+        // halfway up the tail and let it travel only part of the way.
+        val front = (ctx.secondsSinceDrop / window).coerceIn(0f, 1f)
         val width = p.float("width").coerceAtLeast(1e-3f)
 
         for (i in coords.indices) {

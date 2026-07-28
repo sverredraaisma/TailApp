@@ -31,7 +31,14 @@ class BeatPulseRenderer(private val audio: AudioLevelSource) : LedEffectRenderer
         if (audio.hasBeatInfo) {
             val downbeat = audio.takeDownbeat()
             if (audio.takeBeat() || downbeat) {
-                brightness = if (downbeat) downbeatBoost else 1.0f
+                // `downbeat_boost` is unclamped in setParam on both sides, so a
+                // boost above 1 asks for more than full white. The firmware's
+                // `static_cast<uint8_t>` of e.g. 382 wraps to 126 - a *dark*
+                // downbeat - but out-of-range float-to-integer conversion is UB
+                // in C++, so that is an artefact of the compiler, not a look
+                // anyone designed. Clamped here: a downbeat is at most full
+                // white, never darker than the beat it accents.
+                brightness = (if (downbeat) downbeatBoost else 1.0f).coerceAtMost(1.0f)
             }
         }
 
@@ -58,7 +65,10 @@ class BeatPulseRenderer(private val audio: AudioLevelSource) : LedEffectRenderer
                 level *= shape
             }
 
-            // Truncated, matching the firmware's static_cast<uint8_t>.
+            // Truncated toward zero, matching the firmware's float-to-integer
+            // conversion. `level` is 0..1 and the channels are clamped to
+            // 0..255 above, so the product is always in range - there is
+            // nothing here for PixelBuffer.set's clamp to catch.
             out.set(i, (r * level).toInt(), (g * level).toInt(), (b * level).toInt())
         }
     }

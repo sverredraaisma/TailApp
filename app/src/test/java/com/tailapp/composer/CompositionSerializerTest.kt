@@ -145,6 +145,45 @@ class CompositionSerializerTest {
         assertEquals(0, CompositionSerializer.fromJson(json)!!.layers.size)
     }
 
+    /**
+     * The renderer keys its live effect instances by layer id, so two nodes
+     * sharing one id collapse onto a single effect: parameters applied twice with
+     * the last one winning for both, rendered twice per frame, and every
+     * `dtSeconds`-integrating envelope advancing at double rate. The editor can
+     * never produce that — it mints a UUID per node — but an imported file
+     * carries whatever ids its author wrote.
+     */
+    @Test
+    fun `duplicate layer ids in an imported document are re-minted`() {
+        val json = """
+            {"layers":[
+              {"type":"effect","id":"same","name":"One","effect":"solid"},
+              {"type":"group","id":"same","name":"Folder","children":[
+                {"type":"effect","id":"same","name":"Two","effect":"beat_flash"},
+                {"type":"effect","id":"","name":"Three","effect":"strobe"}
+              ]}
+            ]}
+        """.trimIndent()
+
+        val restored = requireNotNull(CompositionSerializer.fromJson(json))
+
+        val ids = mutableListOf<String>()
+        fun walk(nodes: List<LayerNode>) {
+            for (n in nodes) {
+                ids += n.id
+                if (n is GroupLayer) walk(n.children)
+            }
+        }
+        walk(restored.layers)
+
+        assertEquals(4, ids.size)
+        assertEquals("every layer must own its id", ids.size, ids.distinct().size)
+        assertTrue("no layer may be left with a blank id", ids.none { it.isBlank() })
+        // The first occurrence keeps the id, so the layer someone actually meant
+        // keeps its identity (and therefore its running state).
+        assertEquals("same", ids.first())
+    }
+
     @Test
     fun `malformed json yields null rather than throwing`() {
         assertNull(CompositionSerializer.fromJson("not json at all"))

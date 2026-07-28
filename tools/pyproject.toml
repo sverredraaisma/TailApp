@@ -33,5 +33,27 @@ dependencies = [
     "tensorflow-io-gcs-filesystem==0.31.0 ; sys_platform == 'win32'",
 ]
 
+[project.optional-dependencies]
+# BeatNet work only — `uv sync --extra beatnet`. Two of the six scripts
+# (export_beatnet.py, dump_beat_reference.py) fail at import without it; the
+# other four, and the whole genre-model pipeline, do not need any of this.
+#
+# It is an extra rather than a base dependency because torch is ~2 GB of wheels
+# and every checkout would pay for it to run a one-off export.
+#
+# Note what is *not* here: madmom and BeatNet themselves. Neither is
+# pip-installed — `download_beatnet.py` unpacks BeatNet's wheel and madmom's
+# sdist into <repo>/models/ and the scripts put those on sys.path. madmom 0.16.1
+# ships only an sdist that Cythonises three .pyx files, so `pip install madmom`
+# needs a toolchain and an ancient Cython on 3.11; the modules actually used are
+# its pure-Python feature path, which needs nothing but numpy and scipy.
+beatnet = [
+    # export_beatnet.py loads BeatNet's .pt checkpoints and runs torch.onnx.export.
+    "torch==2.2.2",
+    # madmom's pure-Python feature modules (audio.signal/stft/filters/spectrogram)
+    # import scipy; nothing else in this project pulls it in.
+    "scipy==1.11.4",
+]
+
 [tool.uv]
 package = false

@@ -27,9 +27,15 @@ package com.tailapp.drop
  *   a very steady window the z-score saturates immediately and every drop would
  *   report intensity 1.
  * @param onsetFluxZ spectral-flux z-score that counts a frame as an onset.
- * @param onsetDensityWindowSeconds window the onset rate is measured over.
- * @param buildupRiseRatio energy rise over [buildupRampSeconds] that reads as a
- *   build-up.
+ * @param onsetDensityWindowSeconds window the onset rate is measured over. Must
+ *   be positive: at zero the onset rate is a division by zero, which poisons the
+ *   rate window with NaN for the rest of the session and makes
+ *   [SectionState.BUILDUP] unreachable with nothing logged.
+ * @param buildupRiseRatio how much broadband energy must have climbed, measured
+ *   against its own recent past, before a busy passage reads as a build-up
+ *   rather than as a busy bar. A ratio, not a z-score: over a rise the trailing
+ *   mean climbs with the signal, so the z-score of a steady climb flattens out
+ *   exactly where the criterion needs to bite.
  * @param buildupRampSeconds how long a typical build-up runs; also the scale for
  *   [SectionStateUpdate.ramp].
  * @param breakdownRmsZ RMS z-score below which the track reads as broken down.
@@ -67,6 +73,20 @@ data class TransientConfig(
         require(warmupSeconds > 0f) { "warmupSeconds must be positive" }
         require(dropIntensityRatio > 1f) { "dropIntensityRatio must be greater than 1" }
         require(buildupRampSeconds > 0f) { "buildupRampSeconds must be positive" }
+        // Every one of these divides or bounds something. A zero here used to be
+        // accepted and then surface as a NaN or a permanently unreachable state
+        // several tiers away, which is the worst place to find a configuration
+        // mistake; a calibration slider that can produce one has to be rejected
+        // where the value is set.
+        require(onsetDensityWindowSeconds > 0f) { "onsetDensityWindowSeconds must be positive" }
+        require(dropBassRiseRatio > 1f) { "dropBassRiseRatio must be greater than 1" }
+        require(buildupRiseRatio > 1f) { "buildupRiseRatio must be greater than 1" }
+        require(dropRefractorySeconds >= 0f) { "dropRefractorySeconds must not be negative" }
+        require(dropHoldSeconds > 0f) { "dropHoldSeconds must be positive" }
+        require(sectionDebounceSeconds >= 0f) { "sectionDebounceSeconds must not be negative" }
+        require(outroSeconds > 0f) { "outroSeconds must be positive" }
+        require(introSeconds > 0f) { "introSeconds must be positive" }
+        require(breakdownRmsZ < 0f) { "breakdownRmsZ must be below the trailing mean" }
     }
 
     /** Stats-rate samples held in the trailing window. */

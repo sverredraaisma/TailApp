@@ -2,6 +2,7 @@ package com.tailapp.effects
 
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
@@ -11,6 +12,7 @@ import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
+import com.tailapp.MainActivity
 import com.tailapp.R
 import com.tailapp.TailApp
 
@@ -45,10 +47,19 @@ class BeatLightService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // The notification's Stop action comes back in here. Stopping the service
+        // is enough: onDestroy stops the session and releases the wake lock.
+        if (intent?.action == ACTION_STOP) {
+            stopSelf()
+            return START_NOT_STICKY
+        }
+
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("BeatLight")
             .setContentText("Driving the tail from the microphone")
             .setSmallIcon(R.drawable.ic_notification_audio)
+            .setContentIntent(contentIntent())
+            .addAction(0, "Stop", stopIntent())
             .setOngoing(true)
             .build()
 
@@ -71,6 +82,32 @@ class BeatLightService : Service() {
         return START_NOT_STICKY
     }
 
+    /** Taps on the notification body reopen the app rather than doing nothing. */
+    private fun contentIntent(): PendingIntent {
+        val intent = Intent(this, MainActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        return PendingIntent.getActivity(
+            this,
+            REQUEST_CONTENT,
+            intent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+    }
+
+    /**
+     * Without this the only way to release the mic and the (up to 4 hour) wake
+     * lock is to navigate back to the BeatLight screen.
+     */
+    private fun stopIntent(): PendingIntent {
+        val intent = Intent(this, BeatLightService::class.java).setAction(ACTION_STOP)
+        return PendingIntent.getService(
+            this,
+            REQUEST_STOP,
+            intent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+    }
+
     override fun onDestroy() {
         val session = (application as TailApp).container.beatLightSession
         if (session.isActive.value) session.stop()
@@ -83,6 +120,9 @@ class BeatLightService : Service() {
     companion object {
         const val CHANNEL_ID = "beatlight_channel"
         const val NOTIFICATION_ID = 1002
+        const val ACTION_STOP = "com.tailapp.effects.action.STOP"
+        private const val REQUEST_CONTENT = 0
+        private const val REQUEST_STOP = 1
         private const val TAG = "BeatLightService"
         private const val WAKE_LOCK_TIMEOUT_MS = 4 * 60 * 60 * 1000L // 4 hours
     }

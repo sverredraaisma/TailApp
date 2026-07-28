@@ -1,7 +1,9 @@
 package com.tailapp.ble.protocol
 
+import com.tailapp.model.ParamDescriptorKind
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
@@ -308,5 +310,249 @@ class CommandBuilderTest {
         assertEquals(200.toByte(), frame[0])
         assertEquals(64, frame[1].toInt())
         assertArrayEquals(bins, frame.copyOfRange(2, frame.size))
+    }
+
+    // ── FF01 motion tuning (0x0A, 0x0B, 0x14, 0x15, 0x16) ──────────
+
+    @Test
+    fun `setMotorScale is command, servo and one float`() {
+        // config_manager.cpp requires len >= 6: [cmd][servo_id][f32].
+        val cmd = MotionCommands.setMotorScale(servoId = 2, unitsPerDegPerSec = 1.5f)
+        assertEquals(6, cmd.size)
+        assertEquals(0x0A.toByte(), cmd[0])
+        assertEquals(0x02.toByte(), cmd[1])
+        assertEquals(1.5f, cmd.f32At(2), 0f)
+    }
+
+    @Test
+    fun `setMotorScale refuses what the device would reject, NaN included`() {
+        // The firmware's `!(x >= min)` form rejects NaN too; a plain `x < min`
+        // would wave it through into every velocity command.
+        assertThrows(IllegalArgumentException::class.java) {
+            MotionCommands.setMotorScale(0, 0f)
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            MotionCommands.setMotorScale(0, Float.NaN)
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            MotionCommands.setMotorScale(0, Protocol.MOTOR_SCALE_MAX + 1f)
+        }
+        assertNull(MotionCommands.motorScaleError(Protocol.MOTOR_SCALE_MIN))
+        assertNull(MotionCommands.motorScaleError(Protocol.MOTOR_SCALE_MAX))
+    }
+
+    @Test
+    fun `setGentleScale is command and one float`() {
+        val cmd = MotionCommands.setGentleScale(0.5f)
+        assertEquals(5, cmd.size)
+        assertEquals(0x0B.toByte(), cmd[0])
+        assertEquals(0.5f, cmd.f32At(1), 0f)
+    }
+
+    @Test
+    fun `setGentleScale bounds match the firmware's, including the 1_0 ceiling`() {
+        assertNull(MotionCommands.gentleScaleError(Protocol.GENTLE_SCALE_MIN))
+        assertNull(MotionCommands.gentleScaleError(1.0f))
+        // Above 1.0 would raise limits past what the app configured per motor,
+        // which is not what "gentle" means.
+        assertThrows(IllegalArgumentException::class.java) {
+            MotionCommands.setGentleScale(1.01f)
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            MotionCommands.setGentleScale(0.04f)
+        }
+    }
+
+    @Test
+    fun `setTapConfig is six bytes with a little-endian quiet time`() {
+        // [cmd][imu_id][threshold][sensitivity][quiet_time u16 LE], len >= 6.
+        val cmd = MotionCommands.setTapConfig(
+            imuId = 1, threshold = 40, sensitivity = 5, quietTimeMs = 300
+        )
+        assertEquals(6, cmd.size)
+        assertEquals(0x14.toByte(), cmd[0])
+        assertEquals(0x01.toByte(), cmd[1])
+        assertEquals(40.toByte(), cmd[2])
+        assertEquals(5.toByte(), cmd[3])
+        assertEquals(300, cmd.u16At(4))
+    }
+
+    @Test
+    fun `setTapConfig treats zero as keep-the-default, not as out of range`() {
+        // 0 is the one value below the quiet-time floor that is not a mistake:
+        // an app changing only the threshold leaves the other at 0.
+        assertNull(MotionCommands.tapConfigError(0, 0, 0))
+        val cmd = MotionCommands.setTapConfig(0, threshold = 0, sensitivity = 0, quietTimeMs = 0)
+        assertEquals(0, cmd.u16At(4))
+
+        assertThrows(IllegalArgumentException::class.java) {
+            MotionCommands.setTapConfig(0, 40, 5, Protocol.TAP_QUIET_TIME_MIN_MS - 1)
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            MotionCommands.setTapConfig(0, 40, 5, Protocol.TAP_QUIET_TIME_MAX_MS + 1)
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            MotionCommands.setTapConfig(0, 40, Protocol.TAP_SENSITIVITY_MAX + 1, 200)
+        }
+    }
+
+    @Test
+    fun `setAxisMix is three floats then two flags`() {
+        // [cmd][rotation f32][gain_x f32][gain_y f32][invert_x][invert_y], len >= 15.
+        val cmd = MotionCommands.setAxisMix(
+            rotationDeg = 45f, gainX = 1.5f, gainY = 0.5f, invertX = true, invertY = false
+        )
+        assertEquals(15, cmd.size)
+        assertEquals(0x15.toByte(), cmd[0])
+        assertEquals(45f, cmd.f32At(1), 0f)
+        assertEquals(1.5f, cmd.f32At(5), 0f)
+        assertEquals(0.5f, cmd.f32At(9), 0f)
+        assertEquals(1.toByte(), cmd[13])
+        assertEquals(0.toByte(), cmd[14])
+    }
+
+    @Test
+    fun `setAxisMix rejects a gain of zero, which would make the mix non-invertible`() {
+        // A zero gain collapses a logical axis onto nothing, and FF02 could then
+        // no longer report a logical position at all — AxisMixer::is_valid.
+        assertThrows(IllegalArgumentException::class.java) {
+            MotionCommands.setAxisMix(0f, gainX = 0f, gainY = 1f, invertX = false, invertY = false)
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            MotionCommands.setAxisMix(0f, gainX = 1f, gainY = 0f, invertX = false, invertY = false)
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            MotionCommands.setAxisMix(181f, 1f, 1f, invertX = false, invertY = false)
+        }
+        // ±180° inclusive is accepted, as is a negative rotation.
+        assertNull(MotionCommands.axisMixError(-180f, 1f, 1f))
+        assertNull(MotionCommands.axisMixError(180f, 1f, 1f))
+    }
+
+    @Test
+    fun `setEncoderConfig is a flag then two floats`() {
+        // [cmd][enabled][rate f32][rehome f32], len >= 10.
+        val cmd = MotionCommands.setEncoderConfig(
+            enabled = true, correctionRate = 0.25f, rehomeThresholdDeg = 15f
+        )
+        assertEquals(10, cmd.size)
+        assertEquals(0x16.toByte(), cmd[0])
+        assertEquals(1.toByte(), cmd[1])
+        assertEquals(0.25f, cmd.f32At(2), 0f)
+        assertEquals(15f, cmd.f32At(6), 0f)
+    }
+
+    @Test
+    fun `setEncoderConfig holds the firmware's rate and rehome bounds`() {
+        assertNull(
+            MotionCommands.encoderConfigError(Protocol.ENCODER_RATE_MAX, Protocol.ENCODER_REHOME_MAX_DEG)
+        )
+        assertThrows(IllegalArgumentException::class.java) {
+            MotionCommands.setEncoderConfig(true, correctionRate = 1.5f, rehomeThresholdDeg = 15f)
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            MotionCommands.setEncoderConfig(true, correctionRate = 0.25f, rehomeThresholdDeg = 0.5f)
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            MotionCommands.setEncoderConfig(true, correctionRate = Float.NaN, rehomeThresholdDeg = 15f)
+        }
+    }
+
+    // ── FF03 frame rate and animation upload (0x0C-0x0F) ───────────
+
+    @Test
+    fun `setFrameRate is two bytes`() {
+        assertArrayEquals(byteArrayOf(0x0C, 30), LedCommands.setFrameRate(30))
+    }
+
+    @Test
+    fun `setFrameRate refuses out-of-range rather than clamping`() {
+        // The device rejects with OUT_OF_RANGE rather than clamping precisely so
+        // an app that asked for 120 fps is told it did not get it; clamping here
+        // would recreate the confusion the firmware avoided.
+        assertThrows(IllegalArgumentException::class.java) { LedCommands.setFrameRate(120) }
+        assertThrows(IllegalArgumentException::class.java) { LedCommands.setFrameRate(4) }
+        assertNull(LedCommands.frameRateError(Protocol.LED_FRAME_RATE_MIN))
+        assertNull(LedCommands.frameRateError(Protocol.LED_FRAME_RATE_MAX))
+    }
+
+    @Test
+    fun `beginAnimation carries slot, geometry, length and crc`() {
+        // [cmd][slot][w][h][frames][total_len u16][crc32 u32], len >= 11.
+        val length = AnimationCodec.blobSize(8, 8, 4)
+        val cmd = LedCommands.beginAnimation(
+            slot = 1, width = 8, height = 8, frames = 4,
+            totalLength = length, crc32 = 0x12345678
+        )
+        assertEquals(11, cmd.size)
+        assertEquals(0x0D.toByte(), cmd[0])
+        assertEquals(1.toByte(), cmd[1])
+        assertEquals(8.toByte(), cmd[2])
+        assertEquals(8.toByte(), cmd[3])
+        assertEquals(4.toByte(), cmd[4])
+        assertEquals(length, cmd.u16At(5))
+        assertEquals(0x12345678, cmd.i32At(7))
+        // The device recomputes this; a header the app got wrong is refused at
+        // BEGIN rather than after thirty packets.
+        assertEquals(16 + 8 * 8 * 3 * 4, length)
+    }
+
+    @Test
+    fun `beginAnimation refuses a length that disagrees with the geometry`() {
+        assertThrows(IllegalArgumentException::class.java) {
+            LedCommands.beginAnimation(0, 8, 8, 4, totalLength = 100, crc32 = 0)
+        }
+    }
+
+    @Test
+    fun `beginAnimation holds the device's geometry and staging limits`() {
+        assertThrows(IllegalArgumentException::class.java) {
+            LedCommands.beginAnimation(0, 33, 8, 1, AnimationCodec.blobSize(33, 8, 1), 0)
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            LedCommands.beginAnimation(0, 8, 8, 0, AnimationCodec.blobSize(8, 8, 0), 0)
+        }
+        // 6 frames of 32x32 is 18448 bytes — past the 16 KB the device can stage.
+        assertNotNull(LedCommands.animationError(32, 32, 6))
+        assertNull(LedCommands.animationError(32, 32, 5))
+    }
+
+    @Test
+    fun `uploadAnimationChunk is command, u16 offset then payload`() {
+        val data = ByteArray(16) { (it + 1).toByte() }
+        val cmd = LedCommands.uploadAnimationChunk(offset = 512, data = data)
+        assertEquals(19, cmd.size)
+        assertEquals(0x0E.toByte(), cmd[0])
+        assertEquals(512, cmd.u16At(1))
+        assertArrayEquals(data, cmd.copyOfRange(3, cmd.size))
+    }
+
+    @Test
+    fun `finalizeAnimation is command and slot`() {
+        assertArrayEquals(byteArrayOf(0x0F, 0x02), LedCommands.finalizeAnimation(2))
+    }
+
+    // ── FF06 descriptor selection (0x07) ───────────────────────────
+
+    @Test
+    fun `selectDescriptors is command, kind and id`() {
+        assertArrayEquals(
+            byteArrayOf(0x07, 0x00, 0x03),
+            SystemCommands.selectDescriptors(ParamDescriptorKind.PATTERN, 0x03)
+        )
+        assertArrayEquals(
+            byteArrayOf(0x07, 0x01, 0x06),
+            SystemCommands.selectDescriptors(ParamDescriptorKind.EFFECT, 0x06)
+        )
+    }
+
+    @Test
+    fun `selectDescriptors refuses the device's own nothing-selected sentinel`() {
+        // PARAM_DESC_KIND_NONE is what the device reports before anything has
+        // been selected, not something an app can ask for — the firmware answers
+        // OUT_OF_RANGE.
+        assertThrows(IllegalArgumentException::class.java) {
+            SystemCommands.selectDescriptors(ParamDescriptorKind.NONE, 0x00)
+        }
     }
 }

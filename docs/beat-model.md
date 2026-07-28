@@ -7,9 +7,24 @@ BeatNet's CRNN (`CrnnActivationSource`), exported to ONNX and run **entirely on
 the phone**. No audio, no features and no activations leave the device, ever —
 the same hard requirement the genre tier has, for the same reason.
 
-**The CRNN is switched on.** It runs whenever its model is installed on the
-device; with no model — the state of every fresh install — the DSP activation
-runs and nothing else changes. What made that possible was building the
+**The CRNN is compiled out.** `AppContainer.USE_CRNN_BEAT_ACTIVATION` is `false`,
+which nulls the `BeatModelStore` handed to `LightingEngine`, so neither the CRNN
+source nor its extractor is constructed even where a model *is* installed. The
+DSP spectral-flux activation runs everywhere, on every install.
+
+That is a measurement, not an oversight, and the reasoning is in
+`AppContainer`'s own KDoc: on a real phone microphone the CRNN's activation is
+weak and **temporally smeared** — beats only about twice the baseline and spread
+across many frames — so neither decoder locks cleanly and the tempo drifts. No
+amount of amplitude normalisation sharpens a signal that is not sharp in time.
+Spectral flux is z-scored onset detection, robust to a low noisy level, and gives
+a stable, correct BPM on exactly this input. The flag exists because the CRNN is
+worth having on a cleaner source — line-in, or a mic-trained model — and
+everything below stays true of it: it is exported, verified, wired and tested.
+Flip the flag there.
+
+The rest of this document describes what that work established, since it is the
+basis for turning the CRNN back on. What made it possible at all was building the
 front-end BeatNet was actually trained on, as a *second* extractor
 (`BeatNetFeatureExtractor`) rather than by moving the shared one. That front-end
 now matches madmom's own output to **1.1e-6** over 81 328 values, where the
@@ -396,7 +411,11 @@ build output, not a licence restriction.
 
 ### The model-not-installed state
 
-A fresh install has no model. That is the normal case, not an error:
+A fresh install has no model. That is the normal case, not an error — and with
+`USE_CRNN_BEAT_ACTIVATION = false` it is also the *only* case today, because
+`AppContainer` passes `LightingEngine` a null `BeatModelStore` and the gate below
+is never reached. It is described as written because it is what the flag re-arms.
+When a store *is* passed and no model is present:
 
 - `BeatModelStore.isInstalled` is false and `.missing` names what is absent.
 - `CrnnActivationSource.create` returns null, so `LightingEngine` never
@@ -410,8 +429,8 @@ A fresh install has no model. That is the normal case, not an error:
 extractors are fed the same samples), a different hop (their frame streams would
 run at different rates, so no fixed pairing exists), or a shared window shorter
 than BeatNet's first frame (706 samples — the paired activation would arrive
-late). On the shipped defaults all three hold, so **the CRNN runs whenever its
-model is installed.** Note that `create` no longer looks at the band count or the
+late). On the shipped defaults all three hold, so **once the flag is on, the CRNN
+runs whenever its model is installed.** Note that `create` no longer looks at the band count or the
 window length: the model brings its own front-end now, and checking the shared
 one against BeatNet's geometry would be checking the wrong thing.
 

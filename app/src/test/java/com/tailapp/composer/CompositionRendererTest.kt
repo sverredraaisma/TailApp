@@ -102,6 +102,55 @@ class CompositionRendererTest {
         assertEquals(0x402010, frame.packed(0))
     }
 
+    /**
+     * Opacity must be `rgb_normal`'s integer alpha blend, not a float cross-fade
+     * of the renderer's own.
+     *
+     * A cross-fade truncates the per-channel *difference* toward zero, so it
+     * rounds the other way from the firmware: half-fading white toward black
+     * gives 128 where `ColorMath.normal(255, 0, 128)` gives 127.
+     */
+    @Test
+    fun `opacity rounds the way the firmware's alpha blend does`() {
+        val frame = render(
+            composition(
+                solidLayer("base", 0xFFFFFF, BlendMode.OVERWRITE),
+                solidLayer("dark", 0x000000, BlendMode.NORMAL, opacity = 0.5f)
+            )
+        )
+
+        // ColorMath.normal(0xFFFFFF, 0x000000, 128): (0*128 + 255*127) / 255 = 127.
+        assertEquals(0x7F7F7F, frame.packed(0))
+    }
+
+    @Test
+    fun `a difference smaller than the opacity step still reaches the frame`() {
+        val frame = render(
+            composition(
+                solidLayer("base", 0x000009, BlendMode.OVERWRITE),
+                solidLayer("dark", 0x000000, BlendMode.NORMAL, opacity = 0.1f)
+            )
+        )
+
+        // (0*26 + 9*229) / 255 = 8. A float cross-fade truncates 9 * -0.1 to 0
+        // and the layer contributes literally nothing.
+        assertEquals(0x000008, frame.packed(0))
+    }
+
+    /**
+     * Master brightness is the firmware's `rgb_scale` — integer `c * factor / 255`
+     * — not a float multiply. The output stage on the device scales this way, and
+     * a preview that rounded differently would show colours the strip cannot
+     * produce.
+     */
+    @Test
+    fun `master brightness is the firmware's integer scale`() {
+        val frame = render(composition(solidLayer("a", 0x0A0B0C), brightness = 0.5f))
+
+        // factor 128: 10*128/255 = 5, 11*128/255 = 5, 12*128/255 = 6.
+        assertEquals(0x050506, frame.packed(0))
+    }
+
     @Test
     fun `a layer naming an unknown effect renders nothing but does not break the stack`() {
         val frame = render(

@@ -1,0 +1,65 @@
+name: CI
+
+# The JVM suite is the whole safety net here — there are no instrumented tests,
+# and it needs no device, no emulator and no NDK (nothing under test touches the
+# native library). So it costs a couple of minutes and there is no reason for it
+# to only ever run on one laptop.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A new push to the same branch makes the in-flight run pointless.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Unit tests + lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # gradle/gradle-daemon-jvm.properties asks for a JetBrains 21 runtime, so
+      # Gradle provisions that itself via foojay on first run; the JDK above is
+      # what the wrapper launches with. Both are cached by setup-gradle.
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # Android lint resolves the SDK; the runner image ships it, this just makes
+      # the location explicit rather than relying on a local.properties that is
+      # (correctly) not committed.
+      - name: Export ANDROID_HOME
+        run: echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
+
+      - name: Unit tests
+        run: ./gradlew --no-daemon testDebugUnitTest
+
+      # abortOnError defaults to true, so a lint error fails this step.
+      - name: Android lint
+        run: ./gradlew --no-daemon lintDebug
+
+      # Only useful when something above failed, hence always().
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports
+          path: |
+            app/build/reports/tests/**
+            app/build/reports/lint-results-*.html
+            app/build/reports/lint-results-*.xml
+          if-no-files-found: ignore
+          retention-days: 14

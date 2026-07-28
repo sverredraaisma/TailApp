@@ -85,7 +85,13 @@ class AudioRecordAudioSource(
             while (running) {
                 val read = recorder.read(chunk, 0, chunk.size)
                 if (read > 0) {
-                    for (i in 0 until read) floats[i] = chunk[i] / 32768f
+                    // 16-bit PCM cannot produce a non-finite value, but the
+                    // sanitising happens at the one boundary every sample crosses
+                    // so no downstream stage has to defend itself: a single NaN
+                    // poisons the bands, the flux and the adaptive drop statistics
+                    // for the rest of the session, and `if (v > max)` is false for
+                    // NaN, so the FF05 bars would just go quietly dead.
+                    for (i in 0 until read) floats[i] = sanitize(chunk[i] / 32768f)
                     ring.write(floats, 0, read)
                 } else if (read < 0) {
                     Log.w(TAG, "AudioRecord.read returned $read, stopping capture")
@@ -99,12 +105,24 @@ class AudioRecordAudioSource(
     }
 
     override fun stop() {
-        if (!running) return
+        if (!running && readerThread == null) return
         running = false
-        // The reader thread owns stop()/release() so it never touches a released
-        // recorder mid-read; just cut it loose and forget our reference.
+        // The reader thread still owns stop()/release(), so it never touches a
+        // released recorder mid-read — but we have to wait for it. Cutting it
+        // loose let a fast restart open a second recorder and call ring.clear()
+        // while the old thread was still writing, which breaks the buffer's
+        // single-producer contract outright.
+        val thread = readerThread
         readerThread = null
         record = null
+        if (thread != null && thread !== Thread.currentThread()) {
+            runCatching { thread.join(JOIN_TIMEOUT_MS) }
+            if (thread.isAlive) {
+                // A read blocks for at most one chunk; still alive past that
+                // means the driver is wedged. It releases itself when it returns.
+                Log.w(TAG, "reader thread did not finish within ${JOIN_TIMEOUT_MS}ms")
+            }
+        }
     }
 
     override fun read(out: FloatArray, count: Int): Int =
@@ -135,16 +153,18 @@ class AudioRecordAudioSource(
         return recorder
     }
 
-    private fun preferredSource(): Int =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            // UNPROCESSED skips AGC/noise suppression, which otherwise flattens
-            // exactly the dynamics the beat and drop detectors key off.
-            MediaRecorder.AudioSource.UNPROCESSED
-        } else {
-            MediaRecorder.AudioSource.MIC
-        }
+    // UNPROCESSED skips AGC/noise suppression, which otherwise flattens exactly
+    // the dynamics the beat and drop detectors key off. It is API 24+, below
+    // this module's minSdk of 26, so no version guard is needed.
+    private fun preferredSource(): Int = MediaRecorder.AudioSource.UNPROCESSED
 
     private companion object {
         const val TAG = "AudioRecordSource"
+
+        /** Generous next to one blocking read, short enough not to stall a UI stop. */
+        const val JOIN_TIMEOUT_MS = 500L
+
+        /** Non-finite samples never reach the ring; see the call site. */
+        fun sanitize(v: Float): Float = if (v.isFinite()) v else 0f
     }
 }

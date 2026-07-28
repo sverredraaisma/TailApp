@@ -48,9 +48,12 @@ import java.nio.FloatBuffer
  * @param windowSeconds seconds of audio per call. Must be long enough for one
  *   128-frame patch (2.048 s of 16 kHz audio) or every window is rejected.
  * @param minConfidence winner sigmoid below which the window is reported as
- *   "nothing useful to say". Left at 0 by default: `GenreDebouncer` already
- *   gates on `EffectControllerConfig.minGenreConfidence`, and gating twice at
- *   two different thresholds is how a value ends up impossible to tune.
+ *   "nothing useful to say". Left at 0 by default, and no caller passes anything
+ *   else, so today nothing is gated here. This once deferred to a `GenreDebouncer`
+ *   / `EffectControllerConfig.minGenreConfidence` pair that no longer exists —
+ *   the rolling majority now lives in the composer's own state. If a threshold is
+ *   ever wanted again, this is the one place for it: gating twice at two
+ *   different values is how one ends up impossible to tune.
  */
 class OnnxGenreClassifier internal constructor(
     private val store: GenreModelStore,
@@ -93,6 +96,16 @@ class OnnxGenreClassifier internal constructor(
     /** False once loading has been tried and failed; there is no retry. */
     val isAvailable: Boolean get() = !failed
 
+    /**
+     * Classifies one window.
+     *
+     * `@Synchronized` against [close]: the engine runs this on its own dispatcher
+     * so a 50-150 ms forward pass cannot stall the render loop, which means a
+     * session teardown can now land *during* an inference. Closing the sessions
+     * out from under a running `OrtSession.run` is a native crash, not an
+     * exception, so the two are mutually exclusive and `close` waits.
+     */
+    @Synchronized
     override fun classify(samples: FloatArray, timestampNanos: Long): GenreState? {
         if (failed) return null
         if (!ensureLoaded()) return null
@@ -127,6 +140,13 @@ class OnnxGenreClassifier internal constructor(
         }
     }
 
+    /**
+     * Releases both ONNX sessions — including EffNet's arena, which is the large
+     * one — and leaves the classifier reloadable: a later [classify] rebuilds
+     * them. Called from the engine's teardown, so a session that ends does not
+     * hold tens of megabytes for the rest of the process's life.
+     */
+    @Synchronized
     override fun close() {
         runCatching { embeddingSession?.close() }
         runCatching { headSession?.close() }
@@ -165,7 +185,17 @@ class OnnxGenreClassifier internal constructor(
         OnnxTensor.createTensor(env, FloatBuffer.wrap(embeddings), shape).use { input ->
             session.run(mapOf(headInput to input)).use { result ->
                 val tensor = result.get(headOutput).get() as OnnxTensor
-                val out = FloatArray(patches * labels.size)
+                // The head's real class count, not the label list's. Reading
+                // `patches * labels.size` floats out of a `[patches, 400]` buffer
+                // is silently valid when the labels are truncated, and yields the
+                // argmax of a *prefix* of patch 0 for every patch — a confident
+                // wrong genre with nothing logged.
+                val classes = tensor.info.shape.last().toInt()
+                check(classes == labels.size) {
+                    "the genre head predicts $classes classes but ${labels.size} labels are " +
+                        "installed; the labels file does not belong to these weights"
+                }
+                val out = FloatArray(patches * classes)
                 tensor.floatBuffer.get(out)
                 return out
             }
@@ -238,6 +268,9 @@ class OnnxGenreClassifier internal constructor(
     companion object {
         private const val TAG = "OnnxGenreClassifier"
 
+        /** Headroom so linear resampling landing a sample short cannot cost the patch. */
+        private const val WINDOW_SLACK = 1.015f
+
         /** Width of Discogs-EffNet's penultimate layer, and the head's input. */
         const val EMBEDDING_SIZE = 1280
 
@@ -253,11 +286,18 @@ class OnnxGenreClassifier internal constructor(
         private const val RESAMPLE_SLACK = 4
 
         /**
-         * Three seconds at the analysis rate. Long enough for one 2.048 s patch
-         * with room for the resampler to land short, short enough that
-         * `GenreDebouncer`'s 12 s window still sees four predictions.
+         * One whole patch, plus 1.5% for the resampler to land short.
+         *
+         * It used to be three seconds, which is 187 mel frames of which the
+         * single 128-frame patch consumed 128: a third of the mel work thrown
+         * away, and — worse — the last 0.94 s of every window never classified at
+         * all, because the windows are contiguous rather than overlapping. Sizing
+         * the window to the patch grid instead means ~98% of the stream reaches
+         * the model and nothing is computed to be discarded. Whatever smooths
+         * these predictions downstream sees more of them than before, not fewer.
          */
-        const val DEFAULT_WINDOW_SECONDS = 3f
+        val DEFAULT_WINDOW_SECONDS =
+            EffnetMelSpectrogram.secondsForPatches(1) * WINDOW_SLACK
 
         /**
          * Builds a classifier, or returns null when the models are not installed
@@ -282,6 +322,19 @@ class OnnxGenreClassifier internal constructor(
                 GenreLabels.parse(store.labels.readText())
             } catch (e: Exception) {
                 Log.e(TAG, "could not read genre labels from ${store.labels}", e)
+                return null
+            }
+            // The head is `genre_discogs400`: exactly 400 outputs. A shorter list
+            // is a truncated or mismatched download, and it does not fail at
+            // inference — it quietly mislabels every window from a prefix of the
+            // real score vector. Refuse it here, where the cause is still visible.
+            if (labels.size != GenreLabels.EXPECTED_COUNT) {
+                Log.e(
+                    TAG,
+                    "${store.labels} holds ${labels.size} labels, expected " +
+                        "${GenreLabels.EXPECTED_COUNT}; the metadata does not match the weights. " +
+                        "Re-run tools/download_models.py."
+                )
                 return null
             }
             return OnnxGenreClassifier(

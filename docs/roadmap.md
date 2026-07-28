@@ -13,14 +13,24 @@
 > | M3 — One mic, one beat | **done** |
 > | M4 — Looks that survive the phone leaving | **done** — LED-1/2/3/4/7, the app parity mirror + native export (A3-1..3) |
 > | M5 — Motion that dances | **done** — MOT-0 mixer, MOT-1 encoder assist, MOT-5 catalogue, MOT-6 behavior engine, MOT-7 crossfade, MOT-8 keyframes, MOT-9 fusion, MOT-11 streaming; app A4-1..4 |
-> | M6 — A shippable device | **done** — SYS-1 battery, SYS-2 OTA, SYS-3 diagnostics, SYS-6 DIS/name/bonds, SYS-9 descriptors, MOT-3 driver health; app A5-1..3 |
+> | M6 — A shippable device | **done** — SYS-1 battery, SYS-2 OTA, SYS-3 diagnostics, SYS-6 DIS/name/bonds, MOT-3 driver health; app A5-1..3. **SYS-9 descriptors: firmware-complete, app-side protocol only** — see below |
 >
 > The device is no longer dependent on a paired phone for anything beyond a
-> rainbow: it has eighteen LED effects and ten motion patterns of its own, a mood
+> rainbow: it has eighteen LED effects (`0x00`-`0x11`) and eleven motion patterns
+> (`0x00`-`0x0A`, ending in `PATTERN_KEYFRAME`) of its own, a mood
 > state machine, and three tail-reactive effects that light it from its own
 > movement. What the phone still uniquely provides is the microphone — hence the
 > FF05 beat trailer, which lets the device's own audio wag and animations lock to
 > a beat it cannot hear.
+>
+> **SYS-9 is the one item this table overstates.** The firmware publishes
+> parameter descriptors on FF0D and the app parses them —
+> `ParamDescriptorParser`, `model/ParamModels`, `SystemCommands.selectDescriptors`
+> and `CharacteristicUuids.PARAM_DESC`, covered by `ParamDescriptorParserTest`.
+> Nothing in `repository/`, `viewmodel/` or `ui/` consumes them, so the point of
+> the item — a pattern this build was not written for still getting usable
+> controls — is not delivered. The remaining work is a repository flow and a
+> fallback in the parameter editors; no wire work is left.
 >
 > **The protocol reached v6 in three announced steps.** v4/v5 were bundled into
 > one version (nothing shipped between them). **v6 (SYS-8 / A5-3)** is the one
@@ -89,8 +99,10 @@ renderer. The app has meanwhile built an entire second half:
 
 - **BeatLight** — on-phone beat/downbeat/tempo tracking (DSP default, optional BeatNet
   CRNN), drop and build-up detection, section state, genre classification
-  (Discogs-EffNet, optional install). None of this is computable on the ESP32-C3.
-- **The composer** — a layered, folder-nested effect graph of **20 reactive effects**,
+  (Discogs-EffNet, optional install). None of this is computable on either of the
+  firmware's targets — an ONNX EfficientNet and a CRNN are out of reach on a
+  160 MHz RISC-V C3, and the S3 the firmware also builds for does not change that.
+- **The composer** — a layered, folder-nested effect graph of **25 reactive effects**,
   all reading one per-frame `ReactiveContext`, rendered on the phone and streamed to
   the tail over **FF0A direct drive**. Includes per-layer opacity — a blend capability
   the firmware compositor doesn't have (its plan calls it LED-2).
@@ -189,8 +201,8 @@ missed events, MOT-10 upgrades tap detection to hardware).
 
 | ID | Item | Effort |
 |----|------|--------|
-| A1-1 | Tap events into the render pipeline: repository tap flow → `BeatLightSession` → a thread-safe inbox on `LightingEngine` (same `@Volatile` hand-off discipline as `setComposition`) → `ReactiveContext` gains `lastTapEnd` (BASE/TIP/none), `secondsSinceTap`, `tapCount`. `ComposerTestSupport` defaults to "never tapped". | M |
-| A1-2 | Tap effects: `tap_ripple` (one-shot ripple from the tapped end — base spawns at y=0, tip at y=1), `tap_spark`; modulator `tap_gate` (opens on tap, decays). One class + one registry row each; `ReactiveEffectsTest` covers them for free. | S each |
+| A1-1 | Tap events into the render pipeline: repository tap flow → `BeatLightSession` → a thread-safe inbox on `LightingEngine` (same hand-off discipline as `setComposition` — an `AtomicReference` drained with `getAndSet` at frame start, since a `@Volatile` read-then-null loses an edit landing mid-frame) → `ReactiveContext` gains `lastTapEnd` (BASE/TIP/none), `secondsSinceTap`, `tapCount`. `ComposerTestSupport` defaults to "never tapped". | M |
+| A1-2 | Tap effects: `tap_ripple` (one-shot ripple from the tapped end — base spawns at y=0, tip at y=1) and the modulator `tap_gate` (opens on tap, decays). One class + one registry row each; `ReactiveEffectsTest` covers them for free. *(This item also listed a `tap_spark`; it was never built and is not in `ReactiveEffects.ALL` — `sparkle` on a tap-gated folder covers it without a second effect.)* | S each |
 | A1-3 | Motion telemetry into `ReactiveContext`: gravity vector and the four motor positions from FF02 (~20 Hz, latest-snapshot into the render thread), smoothed; derived `tailDeflection` (x, y) and `wagSpeed`. Defaults: at rest, gravity straight down. | M |
 | A1-4 | Tail-reactive effects — the app-side render of the firmware catalog's "reactive to the tail itself" group: `motion_glow` (brightness from `wagSpeed`), `wag_trail` (comet driven by live X deflection), `gravity_level` (the downhill side of each ring lights up). | S each |
 | A1-5 | BeatLight monitor additions: tap indicator, live deflection widget. | S |
@@ -283,7 +295,7 @@ runs before/alongside M2 and must be complete before M4.
 | **M3 — One mic, one beat** | BeatLight and the firmware's own effects run at once, and the device knows the beat | A2-1, A2-2 | LED-8, M2-fix (loudness wiring) | **done** |
 | **M4 — Looks that survive the phone leaving** | A composer look (or its honest approximation) installs to a profile and works standalone | A3-1..3 | HARD-2/3, LED-1, LED-2, LED-3, LED-4, LED-7 | **done** — the ten-effect catalogue, the palettes, the app's parity mirror, and eight effects now exporting natively instead of degrading |
 | **M5 — Motion that dances** | The tail moves to the same analysis as the lights: streamed targets, keyframes, behavior engine | A4-1..4 | MOT-0, MOT-7, MOT-11, MOT-8, MOT-6 | **done** — mixer, encoder assist, catalogue, behavior engine, crossfade, keyframes, fusion and streaming; app visualizer, manual pad, keyframe editor and behavior UI |
-| **M6 — A shippable device** | OTA, battery, diagnostics, and one clean protocol break | A5-1..3 | SYS-1, SYS-2, SYS-3, SYS-6, SYS-8, SYS-9 | **done** — battery, OTA, diagnostics, DIS/name/bonds, descriptors and driver health; protocol v6 (SYS-8/A5-3) is the one announced break, released on both repos together |
+| **M6 — A shippable device** | OTA, battery, diagnostics, and one clean protocol break | A5-1..3 | SYS-1, SYS-2, SYS-3, SYS-6, SYS-8, SYS-9 | **done** — battery, OTA, diagnostics, DIS/name/bonds and driver health; protocol v6 (SYS-8/A5-3) is the one announced break, released on both repos together. SYS-9 descriptors are parsed but not yet consumed — see the delivery-status note |
 
 ### What M4 delivered, and what it did not
 

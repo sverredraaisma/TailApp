@@ -41,6 +41,15 @@ class FloatRingBuffer(requestedCapacity: Int) {
     /** How far the consumer may fall behind before samples are dropped. */
     private val maxLag: Long = (size / 2).coerceAtLeast(1).toLong()
 
+    /**
+     * Slots the producer may already have clobbered but not yet published — it
+     * fills a whole burst before storing its cursor. See the validation in [read].
+     */
+    private val maxBurst: Long = (size / 4).coerceAtLeast(1).toLong()
+
+    /** The largest lag at which a completed copy is provably intact. */
+    private val safeLag: Long = (size - maxBurst).coerceAtLeast(1)
+
     /** Total samples ever written, including those later overwritten. */
     private val writeIndex = AtomicLong(0)
 
@@ -133,7 +142,13 @@ class FloatRingBuffer(requestedCapacity: Int) {
             // `get()` and the check would validate a copy that had not happened
             // yet. The half-buffer runway makes this path rare; a descheduled
             // consumer on a loaded machine is what makes it necessary.
-            if (writeIndex.getAndAdd(0) - r <= size) {
+            // (`VarHandle.fullFence()` would say this more directly and cost
+            // nothing, but `java.lang.invoke.VarHandle` is API 33 and minSdk is 26.)
+            //
+            // `safeLag`, not `size`: the producer clobbers a whole burst before it
+            // publishes the cursor this reads, so a lag of exactly `size` may
+            // already have lost its oldest samples. Mirrored in ring_buffer.h.
+            if (writeIndex.getAndAdd(0) - r <= safeLag) {
                 readIndex.set(r + n)
                 if (lost > 0) overruns.addAndGet(lost)
                 return n

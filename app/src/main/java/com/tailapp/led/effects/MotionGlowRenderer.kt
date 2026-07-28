@@ -37,7 +37,10 @@ class MotionGlowRenderer(private val motion: MotionStateSource) : LedEffectRende
         var t = (deflect + SPAN_DEG * 0.5f) / SPAN_DEG
         t -= floor(t)
 
-        val palette = (if (paletteId < 0.0f) 0.0f else paletteId).toInt()
+        // `static_cast<uint8_t>` on the device: an id above 255 wraps rather
+        // than being rejected, so 260 selects palette 4 there. Masking here too
+        // keeps the preview from blanking where the tail shows a palette.
+        val palette = (if (paletteId < 0.0f) 0.0f else paletteId).toInt() and 0xFF
         val base = Palettes.sample(palette, (t * 255.0f).toInt())
 
         val r = (((base shr 16) and 0xFF) * level).toInt()

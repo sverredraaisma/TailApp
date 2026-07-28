@@ -11,6 +11,8 @@ import android.bluetooth.BluetoothProfile
 import android.bluetooth.BluetoothStatusCodes
 import android.content.Context
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import com.tailapp.ble.protocol.CharacteristicUuids
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -24,6 +26,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
 
 @SuppressLint("MissingPermission")
@@ -33,6 +36,29 @@ class BleConnectionManager(private val context: Context) : BleTransport {
         private const val TAG = "BleConnMgr"
         private const val GATT_TIMEOUT_MS = 5000L
         private const val DEFAULT_MTU = 23
+        /** How long a graceful disconnect may take before the client is force-closed. */
+        private const val DISCONNECT_TIMEOUT_MS = 3000L
+    }
+
+    /**
+     * A GATT operation waiting for its callback, tagged with the characteristic
+     * it belongs to.
+     *
+     * The tag is load-bearing: a timed-out operation releases the mutex while the
+     * stack still owes a response, so without it the *next* operation's
+     * continuation would be resumed by the *previous* characteristic's callback —
+     * an FF06 read that timed out handing its bytes to the profile parser.
+     *
+     * A null [uuid] is a connection-scoped operation (MTU, discovery) that has
+     * no characteristic to key on and only wants the one-shot guarantee.
+     */
+    private class Pending<T>(val uuid: UUID?, private val resume: (T) -> Unit) {
+        private val done = AtomicBoolean(false)
+
+        /** One-shot: a stale callback and the failure path can both fire. */
+        fun complete(value: T) {
+            if (done.compareAndSet(false, true)) resume(value)
+        }
     }
 
     private val bluetoothManager =
@@ -41,6 +67,15 @@ class BleConnectionManager(private val context: Context) : BleTransport {
 
     private var gatt: BluetoothGatt? = null
     private val mutex = Mutex()
+    private val handler = Handler(Looper.getMainLooper())
+    private var forceClose: Runnable? = null
+
+    /**
+     * True once the active client has discovered its services. CONNECTED is not
+     * published before that — [findCharacteristic] returns null until then, so a
+     * UI that trusted the state would show "Connected" over an unusable link.
+     */
+    @Volatile private var servicesReady = false
 
     private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
     override val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
@@ -53,11 +88,11 @@ class BleConnectionManager(private val context: Context) : BleTransport {
     private val _negotiatedMtu = MutableStateFlow(DEFAULT_MTU)
     override val negotiatedMtu: StateFlow<Int> = _negotiatedMtu.asStateFlow()
 
-    @Volatile private var writeCompletion: ((Boolean) -> Unit)? = null
-    @Volatile private var readCompletion: ((ByteArray?) -> Unit)? = null
-    @Volatile private var descriptorWriteCompletion: ((Boolean) -> Unit)? = null
-    @Volatile private var mtuCompletion: ((Int) -> Unit)? = null
-    @Volatile private var servicesDiscoveredCompletion: ((Boolean) -> Unit)? = null
+    @Volatile private var writeCompletion: Pending<Boolean>? = null
+    @Volatile private var readCompletion: Pending<ByteArray?>? = null
+    @Volatile private var descriptorWriteCompletion: Pending<Boolean>? = null
+    @Volatile private var mtuCompletion: Pending<Int>? = null
+    @Volatile private var servicesDiscoveredCompletion: Pending<Boolean>? = null
 
     private val gattCallback = object : BluetoothGattCallback() {
 
@@ -72,9 +107,15 @@ class BleConnectionManager(private val context: Context) : BleTransport {
             }
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> {
-                    // Set gatt BEFORE emitting CONNECTED so it's available when onConnected() runs
+                    // Set gatt BEFORE anything else so it's available when onConnected() runs.
                     this@BleConnectionManager.gatt = gatt
-                    _connectionState.value = ConnectionState.CONNECTED
+                    servicesReady = false
+                    // CONNECTED waits for discovery: until the service table is
+                    // populated every findCharacteristic returns null.
+                    if (!gatt.discoverServices()) {
+                        Log.e(TAG, "onConnectionStateChange: discoverServices() refused to start")
+                        teardown(gatt)
+                    }
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> teardown(gatt)
             }
@@ -82,9 +123,23 @@ class BleConnectionManager(private val context: Context) : BleTransport {
 
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
             Log.d(TAG, "onServicesDiscovered: status=$status")
+            val ok = status == BluetoothGatt.GATT_SUCCESS
             val completion = servicesDiscoveredCompletion
             servicesDiscoveredCompletion = null
-            completion?.invoke(status == BluetoothGatt.GATT_SUCCESS)
+            if (completion != null) {
+                servicesReady = ok
+                completion.complete(ok)
+                return
+            }
+            // No waiter: this is the discovery kicked off by the connection itself.
+            if (this@BleConnectionManager.gatt !== gatt) return
+            servicesReady = ok
+            if (ok) {
+                _connectionState.value = ConnectionState.CONNECTED
+            } else {
+                Log.e(TAG, "onServicesDiscovered: discovery failed, tearing down")
+                teardown(gatt)
+            }
         }
 
         override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
@@ -92,7 +147,7 @@ class BleConnectionManager(private val context: Context) : BleTransport {
             if (status == BluetoothGatt.GATT_SUCCESS) _negotiatedMtu.value = mtu
             val completion = mtuCompletion
             mtuCompletion = null
-            completion?.invoke(_negotiatedMtu.value)
+            completion?.complete(_negotiatedMtu.value)
         }
 
         @Deprecated("Deprecated in API 33")
@@ -105,9 +160,7 @@ class BleConnectionManager(private val context: Context) : BleTransport {
             @Suppress("DEPRECATION")
             val value = characteristic.value
             Log.d(TAG, "onCharacteristicRead(deprecated): uuid=${characteristic.uuid} status=$status len=${value?.size}")
-            val completion = readCompletion
-            readCompletion = null
-            completion?.invoke(if (status == BluetoothGatt.GATT_SUCCESS) value?.copyOf() else null)
+            completeRead(characteristic.uuid, if (status == BluetoothGatt.GATT_SUCCESS) value?.copyOf() else null)
         }
 
         override fun onCharacteristicRead(
@@ -117,9 +170,7 @@ class BleConnectionManager(private val context: Context) : BleTransport {
             status: Int
         ) {
             Log.d(TAG, "onCharacteristicRead: uuid=${characteristic.uuid} status=$status len=${value.size}")
-            val completion = readCompletion
-            readCompletion = null
-            completion?.invoke(if (status == BluetoothGatt.GATT_SUCCESS) value.copyOf() else null)
+            completeRead(characteristic.uuid, if (status == BluetoothGatt.GATT_SUCCESS) value.copyOf() else null)
         }
 
         override fun onCharacteristicWrite(
@@ -128,9 +179,13 @@ class BleConnectionManager(private val context: Context) : BleTransport {
             status: Int
         ) {
             Log.d(TAG, "onCharacteristicWrite: uuid=${characteristic.uuid} status=$status")
-            val completion = writeCompletion
+            val pending = writeCompletion
+            if (pending == null || pending.uuid != characteristic.uuid) {
+                Log.w(TAG, "onCharacteristicWrite: stale response for ${characteristic.uuid}, ignoring")
+                return
+            }
             writeCompletion = null
-            completion?.invoke(status == BluetoothGatt.GATT_SUCCESS)
+            pending.complete(status == BluetoothGatt.GATT_SUCCESS)
         }
 
         override fun onDescriptorWrite(
@@ -139,9 +194,13 @@ class BleConnectionManager(private val context: Context) : BleTransport {
             status: Int
         ) {
             Log.d(TAG, "onDescriptorWrite: uuid=${descriptor.characteristic.uuid} status=$status")
-            val completion = descriptorWriteCompletion
+            val pending = descriptorWriteCompletion
+            if (pending == null || pending.uuid != descriptor.characteristic.uuid) {
+                Log.w(TAG, "onDescriptorWrite: stale response for ${descriptor.characteristic.uuid}, ignoring")
+                return
+            }
             descriptorWriteCompletion = null
-            completion?.invoke(status == BluetoothGatt.GATT_SUCCESS)
+            pending.complete(status == BluetoothGatt.GATT_SUCCESS)
         }
 
         @Deprecated("Deprecated in API 33")
@@ -164,6 +223,30 @@ class BleConnectionManager(private val context: Context) : BleTransport {
         }
     }
 
+    /** Hands a read response to its waiter, or drops it if it belongs to a timed-out read. */
+    private fun completeRead(uuid: UUID, value: ByteArray?) {
+        val pending = readCompletion
+        if (pending == null || pending.uuid != uuid) {
+            Log.w(TAG, "onCharacteristicRead: stale response for $uuid, ignoring")
+            return
+        }
+        readCompletion = null
+        pending.complete(value)
+    }
+
+    /** Clears a pending slot only when it is still the one this operation installed. */
+    private fun clearRead(uuid: UUID) {
+        if (readCompletion?.uuid == uuid) readCompletion = null
+    }
+
+    private fun clearWrite(uuid: UUID) {
+        if (writeCompletion?.uuid == uuid) writeCompletion = null
+    }
+
+    private fun clearDescriptorWrite(uuid: UUID) {
+        if (descriptorWriteCompletion?.uuid == uuid) descriptorWriteCompletion = null
+    }
+
     private fun emitUpdate(uuid: UUID, value: ByteArray) {
         if (!_characteristicUpdate.tryEmit(CharacteristicUpdate(uuid, value))) {
             Log.w(TAG, "emitUpdate: dropped notification for $uuid (buffer full)")
@@ -176,22 +259,39 @@ class BleConnectionManager(private val context: Context) : BleTransport {
      * after the link drops.
      */
     private fun teardown(gatt: BluetoothGatt) {
-        _connectionState.value = ConnectionState.DISCONNECTED
+        // A superseded client still reports STATE_DISCONNECTED. Closing it is
+        // always right, but publishing DISCONNECTED and failing pending
+        // operations is not: those belong to whatever client is current, and
+        // doing it here would kill a *newer* connection's setup mid-flight.
+        val isCurrent = this.gatt === gatt
+        cancelForceClose()
         gatt.close()
-        if (this.gatt === gatt) this.gatt = null
+        if (!isCurrent) return
+        this.gatt = null
+        servicesReady = false
+        _connectionState.value = ConnectionState.DISCONNECTED
         _negotiatedMtu.value = DEFAULT_MTU
         failPendingOperations()
     }
 
     private fun failPendingOperations() {
-        readCompletion?.also { readCompletion = null }?.invoke(null)
-        writeCompletion?.also { writeCompletion = null }?.invoke(false)
-        descriptorWriteCompletion?.also { descriptorWriteCompletion = null }?.invoke(false)
-        servicesDiscoveredCompletion?.also { servicesDiscoveredCompletion = null }?.invoke(false)
-        mtuCompletion?.also { mtuCompletion = null }?.invoke(_negotiatedMtu.value)
+        readCompletion?.also { readCompletion = null }?.complete(null)
+        writeCompletion?.also { writeCompletion = null }?.complete(false)
+        descriptorWriteCompletion?.also { descriptorWriteCompletion = null }?.complete(false)
+        servicesDiscoveredCompletion?.also { servicesDiscoveredCompletion = null }?.complete(false)
+        mtuCompletion?.also { mtuCompletion = null }?.complete(_negotiatedMtu.value)
+    }
+
+    private fun cancelForceClose() {
+        forceClose?.let { handler.removeCallbacks(it) }
+        forceClose = null
     }
 
     override fun connect(address: String) {
+        // Android registers a GATT client per connectGatt and only allows ~32 of
+        // them, after which connectGatt returns null; overwriting the handle
+        // without closing leaks one every reconnect.
+        closeCurrentClient()
         val adapter = bluetoothAdapter
         if (adapter == null) {
             Log.e(TAG, "connect: no Bluetooth adapter")
@@ -207,8 +307,32 @@ class BleConnectionManager(private val context: Context) : BleTransport {
             return
         }
         _connectionState.value = ConnectionState.CONNECTING
+        servicesReady = false
         // Keep the handle so disconnect() works while the link is still being set up.
-        gatt = device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
+        val client = device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
+        if (client == null) {
+            Log.e(TAG, "connect: connectGatt returned null (client registration exhausted?)")
+            _connectionState.value = ConnectionState.DISCONNECTED
+            return
+        }
+        gatt = client
+    }
+
+    /** Disconnects and closes the current client synchronously, without touching connection state. */
+    private fun closeCurrentClient() {
+        val current = gatt ?: return
+        Log.d(TAG, "closing previous GATT client")
+        gatt = null
+        servicesReady = false
+        cancelForceClose()
+        try {
+            current.disconnect()
+        } catch (e: SecurityException) {
+            Log.w(TAG, "closeCurrentClient: disconnect denied", e)
+        }
+        current.close()
+        _negotiatedMtu.value = DEFAULT_MTU
+        failPendingOperations()
     }
 
     override fun disconnect() {
@@ -224,17 +348,33 @@ class BleConnectionManager(private val context: Context) : BleTransport {
             return
         }
         current.disconnect()
+        // The callback is the only thing that closes the client, and it is not
+        // guaranteed to arrive (a wedged stack, an adapter switched off). Close
+        // it ourselves if it doesn't; teardown() cancels this on the happy path.
+        cancelForceClose()
+        val force = Runnable {
+            forceClose = null
+            if (gatt === current) {
+                Log.w(TAG, "disconnect: no STATE_DISCONNECTED in ${DISCONNECT_TIMEOUT_MS}ms, forcing close")
+                teardown(current)
+            }
+        }
+        forceClose = force
+        handler.postDelayed(force, DISCONNECT_TIMEOUT_MS)
     }
 
-    override suspend fun requestMtu(mtu: Int): Int {
-        return withTimeoutOrNull(GATT_TIMEOUT_MS) {
+    // Both of these are ordinary GATT requests: the stack allows exactly one in
+    // flight, so they queue behind reads and writes like everything else.
+    override suspend fun requestMtu(mtu: Int): Int = mutex.withLock {
+        withTimeoutOrNull(GATT_TIMEOUT_MS) {
             suspendCancellableCoroutine { cont ->
-                mtuCompletion = { cont.resume(it) }
+                val pending = Pending<Int>(null) { if (cont.isActive) cont.resume(it) }
+                mtuCompletion = pending
                 cont.invokeOnCancellation { mtuCompletion = null }
                 val started = gatt?.requestMtu(mtu) ?: false
                 if (!started) {
                     mtuCompletion = null
-                    cont.resume(_negotiatedMtu.value)
+                    pending.complete(_negotiatedMtu.value)
                 }
             }
         } ?: run {
@@ -244,15 +384,19 @@ class BleConnectionManager(private val context: Context) : BleTransport {
         }
     }
 
-    override suspend fun discoverServices(): Boolean {
-        return withTimeoutOrNull(GATT_TIMEOUT_MS) {
+    override suspend fun discoverServices(): Boolean = mutex.withLock {
+        // The connection already discovered before publishing CONNECTED; a second
+        // sweep would only cost a round trip and blank the service table meanwhile.
+        if (servicesReady) return@withLock true
+        withTimeoutOrNull(GATT_TIMEOUT_MS) {
             suspendCancellableCoroutine { cont ->
-                servicesDiscoveredCompletion = { cont.resume(it) }
+                val pending = Pending<Boolean>(null) { if (cont.isActive) cont.resume(it) }
+                servicesDiscoveredCompletion = pending
                 cont.invokeOnCancellation { servicesDiscoveredCompletion = null }
                 val started = gatt?.discoverServices() ?: false
                 if (!started) {
                     servicesDiscoveredCompletion = null
-                    cont.resume(false)
+                    pending.complete(false)
                 }
             }
         } ?: run {
@@ -271,18 +415,21 @@ class BleConnectionManager(private val context: Context) : BleTransport {
                     cont.resume(null)
                     return@suspendCancellableCoroutine
                 }
-                readCompletion = { cont.resume(it) }
-                cont.invokeOnCancellation { readCompletion = null }
+                // Installed before the request goes out, so a callback landing in
+                // that window must not be able to resume the continuation twice.
+                val pending = Pending<ByteArray?>(uuid) { if (cont.isActive) cont.resume(it) }
+                readCompletion = pending
+                cont.invokeOnCancellation { clearRead(uuid) }
                 val started = gatt?.readCharacteristic(characteristic) ?: false
                 if (!started) {
                     Log.w(TAG, "readCharacteristic: gatt.readCharacteristic returned false for $uuid")
-                    readCompletion = null
-                    cont.resume(null)
+                    clearRead(uuid)
+                    pending.complete(null)
                 }
             }
         } ?: run {
             Log.w(TAG, "readCharacteristic timed out for $uuid")
-            readCompletion = null
+            clearRead(uuid)
             null
         }
     }
@@ -296,8 +443,9 @@ class BleConnectionManager(private val context: Context) : BleTransport {
                     cont.resume(false)
                     return@suspendCancellableCoroutine
                 }
-                writeCompletion = { cont.resume(it) }
-                cont.invokeOnCancellation { writeCompletion = null }
+                val pending = Pending<Boolean>(uuid) { if (cont.isActive) cont.resume(it) }
+                writeCompletion = pending
+                cont.invokeOnCancellation { clearWrite(uuid) }
                 val started = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     gatt?.writeCharacteristic(
                         characteristic,
@@ -314,13 +462,13 @@ class BleConnectionManager(private val context: Context) : BleTransport {
                 }
                 if (!started) {
                     Log.w(TAG, "writeCharacteristic: gatt.writeCharacteristic returned false for $uuid")
-                    writeCompletion = null
-                    cont.resume(false)
+                    clearWrite(uuid)
+                    pending.complete(false)
                 }
             }
         } ?: run {
             Log.w(TAG, "writeCharacteristic timed out for $uuid")
-            writeCompletion = null
+            clearWrite(uuid)
             false
         }
     }
@@ -330,20 +478,48 @@ class BleConnectionManager(private val context: Context) : BleTransport {
      * Used for FFT streaming (FF05) at 30fps without blocking command writes.
      */
     override fun writeWithoutResponse(uuid: UUID, data: ByteArray) {
-        val characteristic = findCharacteristic(uuid) ?: return
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            gatt?.writeCharacteristic(
+        streamPacket(uuid, data)
+    }
+
+    /**
+     * The checked form of [writeWithoutResponse]: false means the packet never
+     * left the phone.
+     *
+     * Worth distinguishing, because the failures here are routine rather than
+     * exceptional — `ERROR_GATT_WRITE_REQUEST_BUSY` is what bursting a stream
+     * faster than the stack drains it looks like, and silently dropping those
+     * makes a stuttering stream indistinguishable from a healthy one.
+     */
+    fun streamPacket(uuid: UUID, data: ByteArray): Boolean {
+        val characteristic = findCharacteristic(uuid)
+        if (characteristic == null) {
+            Log.w(TAG, "writeWithoutResponse: characteristic $uuid not found")
+            return false
+        }
+        val connection = gatt
+        if (connection == null) {
+            Log.w(TAG, "writeWithoutResponse: no GATT client for $uuid")
+            return false
+        }
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val status = connection.writeCharacteristic(
                 characteristic,
                 data,
                 BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
             )
+            if (status != BluetoothStatusCodes.SUCCESS) {
+                Log.w(TAG, "writeWithoutResponse: $uuid rejected with status=$status")
+            }
+            status == BluetoothStatusCodes.SUCCESS
         } else {
             @Suppress("DEPRECATION")
             characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
             @Suppress("DEPRECATION")
             characteristic.value = data
             @Suppress("DEPRECATION")
-            gatt?.writeCharacteristic(characteristic)
+            val ok = connection.writeCharacteristic(characteristic)
+            if (!ok) Log.w(TAG, "writeWithoutResponse: $uuid refused by the stack")
+            ok
         }
     }
 
@@ -363,8 +539,9 @@ class BleConnectionManager(private val context: Context) : BleTransport {
 
         withTimeoutOrNull(GATT_TIMEOUT_MS) {
             suspendCancellableCoroutine { cont ->
-                descriptorWriteCompletion = { cont.resume(it) }
-                cont.invokeOnCancellation { descriptorWriteCompletion = null }
+                val pending = Pending<Boolean>(uuid) { if (cont.isActive) cont.resume(it) }
+                descriptorWriteCompletion = pending
+                cont.invokeOnCancellation { clearDescriptorWrite(uuid) }
                 val started = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     val result = gatt?.writeDescriptor(descriptor, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
                     result == BluetoothStatusCodes.SUCCESS
@@ -376,13 +553,13 @@ class BleConnectionManager(private val context: Context) : BleTransport {
                 }
                 if (!started) {
                     Log.w(TAG, "enableNotifications: writeDescriptor returned false for $uuid")
-                    descriptorWriteCompletion = null
-                    cont.resume(false)
+                    clearDescriptorWrite(uuid)
+                    pending.complete(false)
                 }
             }
         } ?: run {
             Log.w(TAG, "enableNotifications timed out for $uuid")
-            descriptorWriteCompletion = null
+            clearDescriptorWrite(uuid)
             false
         }
     }

@@ -113,6 +113,23 @@ public:
 
     int32_t read(float *dest, int32_t count) { return ring_.read(dest, count); }
 
+    /**
+     * Consumer-side scratch for the JNI hand-off, grown once and then reused.
+     * The analysis loop calls in at ~200 Hz with a constant count; a fresh
+     * `std::vector` per call was ~8 KB malloc'd *and* zero-filled every time,
+     * for a buffer whose contents are overwritten immediately.
+     *
+     * Single-consumer, like `read` itself.
+     */
+    int32_t readIntoScratch(int32_t count) {
+        if (static_cast<int32_t>(read_scratch_.size()) < count) {
+            read_scratch_.resize(static_cast<size_t>(count));
+        }
+        return ring_.read(read_scratch_.data(), count);
+    }
+
+    const float *scratchData() const { return read_scratch_.data(); }
+
     int64_t overruns() const { return ring_.overruns(); }
 
     bool consumeDisconnected() { return disconnected_.exchange(false, std::memory_order_acq_rel); }
@@ -134,6 +151,7 @@ public:
 private:
     const int32_t requested_sample_rate_;
     FloatRingBuffer ring_;
+    std::vector<float> read_scratch_;
 
     std::mutex stream_mutex_;
     std::shared_ptr<oboe::AudioStream> stream_;
@@ -178,12 +196,11 @@ Java_com_tailapp_audio_OboeAudioSource_nativeRead(JNIEnv *env, jobject, jlong ha
     if (count <= 0) return 0;
     auto *engine = engine_of(handle);
 
-    // Copy into a stack/heap scratch and hand it over in one SetFloatArrayRegion:
+    // Copy into a reusable scratch and hand it over in one SetFloatArrayRegion:
     // GetFloatArrayElements could pin or copy the whole array on every call.
-    std::vector<float> scratch(static_cast<size_t>(count));
-    const int32_t read = engine->read(scratch.data(), count);
+    const int32_t read = engine->readIntoScratch(count);
     if (read > 0) {
-        env->SetFloatArrayRegion(out, 0, read, scratch.data());
+        env->SetFloatArrayRegion(out, 0, read, engine->scratchData());
     }
     return read;
 }

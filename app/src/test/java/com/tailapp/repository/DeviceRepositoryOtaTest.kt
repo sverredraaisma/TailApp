@@ -189,6 +189,32 @@ class DeviceRepositoryOtaTest {
     }
 
     @Test
+    fun `a transfer cancelled by the disconnect that caused it skips the abort`() = runTest {
+        val transport = FakeBleTransport()
+        val repository = connected(transport, OtaTransferPolicy(windowBytes = 1024))
+        val image = ByteArray(3000) { it.toByte() }
+
+        val job = launch { repository.uploadFirmware(image, version) { _, _ -> } }
+        runCurrent()
+
+        transport.setConnectionState(ConnectionState.DISCONNECTED)
+        runCurrent()
+        job.cancel()
+        advanceUntilIdle()
+
+        // ABORT is uncancellable, and against a device that is gone it is a GATT
+        // timeout plus three acknowledgement waits spent for certain and answered
+        // by nobody. There is nothing to un-arm from this side either: the next
+        // connection reads FF0E and resumes or aborts from what it finds.
+        assertFalse(
+            "a disconnected transfer must not spend its abort budget",
+            transport.writesTo(CharacteristicUuids.SYSTEM_CONFIG).any {
+                it.contentEquals(byteArrayOf(0x0A))
+            }
+        )
+    }
+
+    @Test
     fun `a short finalize stays resumable`() = runTest {
         // FINALIZE answers BAD_STATE while the device stays in RECEIVING: fewer
         // bytes arrived than announced, every one still good, so it can resume.

@@ -121,6 +121,42 @@ class CompositionSceneTest {
         assertEquals(2f, scene.buildContext(3_000_000_000L, 0f).timeSeconds, 1e-6f)
     }
 
+    /**
+     * A `Float` that simply grew for the whole session would lose the resolution
+     * every time-driven effect depends on: at 24 hours its ulp is 7.8 ms, so a
+     * 25 Hz strobe (40 ms period) quantises to a handful of duty states and a
+     * plasma freezes for frames at a time. The origin is re-based instead.
+     */
+    @Test
+    fun `the session clock keeps millisecond resolution after a day`() {
+        scene.render(0L)
+        val aDay = 24L * 60 * 60 * 1_000_000_000L
+
+        val atDay = scene.buildContext(aDay, 0f).timeSeconds
+        val fiveMsLater = scene.buildContext(aDay + 5_000_000L, 0f).timeSeconds
+
+        assertTrue("the clock grew unbounded: $atDay", atDay < 4096f)
+        assertEquals("a 5 ms step must still be a 5 ms step", 0.005f, fiveMsLater - atDay, 1e-4f)
+    }
+
+    @Test
+    fun `re-basing steps by a whole period rather than restarting the clock`() {
+        scene.render(0L)
+        val aDay = 24L * 60 * 60 * 1_000_000_000L
+
+        // 86400 s is 21 whole 4096 s periods plus 384: the value carries its
+        // position within the period across the re-base rather than jumping to 0.
+        assertEquals(384f, scene.buildContext(aDay, 0f).timeSeconds, 1e-3f)
+    }
+
+    @Test
+    fun `the clock still advances normally within a period`() {
+        scene.render(1_000_000_000L)
+
+        assertEquals(0f, scene.buildContext(1_000_000_000L, 0f).timeSeconds, 1e-6f)
+        assertEquals(60f, scene.buildContext(61_000_000_000L, 0f).timeSeconds, 1e-6f)
+    }
+
     // --- audio normalisation ---
 
     @Test

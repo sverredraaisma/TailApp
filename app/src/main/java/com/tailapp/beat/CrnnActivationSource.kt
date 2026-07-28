@@ -97,6 +97,7 @@ class CrnnActivationSource internal constructor(
      *   not the one it was built for — so it disables the source rather than
      *   handing the model a mis-shaped tensor.
      */
+    @Synchronized
     fun activation(frame: BeatNetFrame): BeatActivation {
         if (failed) return SILENT
         if (frame.features.size != FEATURE_SIZE) {
@@ -132,6 +133,7 @@ class CrnnActivationSource internal constructor(
      * — lives in [BeatNetFeatureExtractor] and is cleared by resetting that.
      * `LightingEngine.reset` does both.
      */
+    @Synchronized
     fun reset() {
         hiddenState.fill(0f)
         cellState.fill(0f)
@@ -139,7 +141,17 @@ class CrnnActivationSource internal constructor(
         downbeatNormalizer.reset()
     }
 
-    /** Releases the ONNX session. The source is unusable afterwards unless reloaded. */
+    /**
+     * Releases the ONNX session. The source reloads it on the next [activation],
+     * unless it has already disabled itself.
+     *
+     * `@Synchronized` against [activation]: teardown runs on whatever thread
+     * stopped the session while the analysis loop may still be inside
+     * `OrtSession.run`, and closing a session under a running inference is a
+     * native crash rather than an exception. Called from `LightingEngine.stop`,
+     * which is what stops the graph being retained for the process's lifetime.
+     */
+    @Synchronized
     fun close() {
         runCatching { session?.close() }
         session = null

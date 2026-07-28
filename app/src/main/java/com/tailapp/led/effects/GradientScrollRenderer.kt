@@ -26,7 +26,10 @@ class GradientScrollRenderer : LedEffectRenderer() {
         // `static_cast<int>(axis_ + 0.5f)`, the same truncating round-half-up
         // RainbowRenderer's direction uses.
         val ax = (axis + 0.5f).toInt()
-        val palette = (if (paletteId < 0.0f) 0.0f else paletteId).toInt()
+        // `static_cast<uint8_t>` on the device: an id above 255 wraps rather
+        // than being rejected, so 260 selects palette 4 there. Masking here too
+        // keeps the preview from blanking where the tail shows a palette.
+        val palette = (if (paletteId < 0.0f) 0.0f else paletteId).toInt() and 0xFF
 
         for (i in coords.indices) {
             val c = transformCoord(coords[i])

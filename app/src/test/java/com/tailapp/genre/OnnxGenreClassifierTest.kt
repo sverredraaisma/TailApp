@@ -30,6 +30,10 @@ class OnnxGenreClassifierTest {
     private fun labelsJson(vararg names: String): String =
         """{"name":"test","classes":[${names.joinToString(",") { "\"$it\"" }}]}"""
 
+    /** A metadata file with the full complement the head actually predicts. */
+    private fun fullLabelsJson(): String =
+        labelsJson(*Array(GenreLabels.EXPECTED_COUNT) { "Genre---$it" })
+
     // --- the models-absent path -----------------------------------------------
 
     @Test
@@ -48,7 +52,7 @@ class OnnxGenreClassifierTest {
     fun `create returns null when only some artifacts are installed`() {
         val store = store()
         store.install(GenreModelStore.EMBEDDING_MODEL, ByteArrayInputStream(ByteArray(64) { 1 }))
-        store.install(GenreModelStore.LABELS, ByteArrayInputStream(labelsJson("A", "B").toByteArray()))
+        store.install(GenreModelStore.LABELS, ByteArrayInputStream(fullLabelsJson().toByteArray()))
 
         assertFalse(store.isInstalled)
         assertEquals(listOf(GenreModelStore.GENRE_HEAD), store.missing)
@@ -72,7 +76,7 @@ class OnnxGenreClassifierTest {
         val store = store()
         store.install(GenreModelStore.EMBEDDING_MODEL, ByteArrayInputStream(ByteArray(64) { 1 }))
         store.install(GenreModelStore.GENRE_HEAD, ByteArrayInputStream(ByteArray(64) { 2 }))
-        store.install(GenreModelStore.LABELS, ByteArrayInputStream(labelsJson("A", "B").toByteArray()))
+        store.install(GenreModelStore.LABELS, ByteArrayInputStream(fullLabelsJson().toByteArray()))
 
         val classifier = OnnxGenreClassifier.create(store, inputSampleRate = 22050)
         assertNotNull(classifier)
@@ -81,6 +85,33 @@ class OnnxGenreClassifierTest {
         assertTrue(classifier!!.isAvailable)
         assertEquals(22050, classifier.sampleRate)
         assertEquals(OnnxGenreClassifier.DEFAULT_WINDOW_SECONDS, classifier.windowSeconds, 0f)
+    }
+
+    @Test
+    fun `create rejects a truncated label list`() {
+        val store = store()
+        store.install(GenreModelStore.EMBEDDING_MODEL, ByteArrayInputStream(ByteArray(64) { 1 }))
+        store.install(GenreModelStore.GENRE_HEAD, ByteArrayInputStream(ByteArray(64) { 2 }))
+        // Well-formed JSON, right key, wrong length: the failure mode a capacity
+        // hint cannot catch. The head still returns its own 400 scores, so a short
+        // list produces a confident wrong genre rather than an error.
+        store.install(GenreModelStore.LABELS, ByteArrayInputStream(labelsJson("A", "B").toByteArray()))
+
+        assertTrue(store.isInstalled)
+        assertNull(OnnxGenreClassifier.create(store, inputSampleRate = 22050))
+    }
+
+    @Test
+    fun `the default window is exactly one patch, so no audio is analysed and dropped`() {
+        val samples =
+            (OnnxGenreClassifier.DEFAULT_WINDOW_SECONDS * EffnetMelSpectrogram.SAMPLE_RATE).toInt()
+        val frames = EffnetMelSpectrogram.frameCount(samples)
+
+        assertEquals("the window must fill exactly one patch", 1, EffnetMelSpectrogram.patchCount(frames))
+        // ...and barely more than one, so the un-classified tail is the resampler
+        // slack rather than a third of the window as it used to be.
+        val used = EffnetMelSpectrogram.framesForPatches(1)
+        assertTrue("$frames frames computed for $used used", frames - used <= 4)
     }
 
     // --- the store ------------------------------------------------------------

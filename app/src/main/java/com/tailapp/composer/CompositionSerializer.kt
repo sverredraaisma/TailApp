@@ -85,16 +85,59 @@ object CompositionSerializer {
     private fun decode(root: Map<String, Any?>): Composition = Composition(
         id = Json.str(root["id"]) ?: newCompositionId(),
         name = Json.str(root["name"]) ?: "Untitled",
-        layers = Json.arr(root["layers"]).orEmpty().mapNotNull(::decodeNode),
-        brightness = Json.float(root["brightness"], 1f).coerceIn(0f, 1f)
+        layers = withUniqueIds(
+            Json.arr(root["layers"]).orEmpty().mapNotNull(::decodeNode),
+            HashSet()
+        ),
+        brightness = unitInterval(root["brightness"])
     )
+
+    /**
+     * A `0..1` field from the document, defaulting to fully on.
+     *
+     * `coerceIn` cannot clamp a `NaN` — every comparison against it is false, so
+     * it passes straight through — and a `NaN` brightness would multiply the
+     * whole frame to nothing while looking, in the editor, like full brightness.
+     */
+    private fun unitInterval(raw: Any?): Float {
+        val value = Json.float(raw, 1f)
+        return if (value.isFinite()) value.coerceIn(0f, 1f) else 1f
+    }
+
+    /**
+     * Guarantees the tree-wide uniqueness [CompositionRenderer] depends on.
+     *
+     * The renderer keys its live effect instances by [LayerNode.id], so two nodes
+     * sharing one id collapse onto a single [ReactiveEffect]: its parameters are
+     * applied twice (the last one wins for *both* layers) and it is rendered
+     * twice per frame, so anything integrating `dtSeconds` advances at double
+     * rate. In-app editing cannot produce that — [CompositionEdits] mints a fresh
+     * UUID for every node it creates — but an imported document carries whatever
+     * ids its author wrote, including none at all and including duplicates.
+     *
+     * A collision keeps the *first* occurrence's id and re-mints the later one,
+     * so the common case (a hand-edited file with one copy-pasted layer) leaves
+     * the original layer's identity, and therefore its running state, alone.
+     */
+    private fun withUniqueIds(nodes: List<LayerNode>, seen: MutableSet<String>): List<LayerNode> =
+        nodes.map { node ->
+            val id = if (node.id.isNotBlank() && seen.add(node.id)) {
+                node.id
+            } else {
+                generateSequence(::newLayerId).first(seen::add)
+            }
+            when (node) {
+                is EffectLayer -> if (id == node.id) node else node.copy(id = id)
+                is GroupLayer -> node.copy(id = id, children = withUniqueIds(node.children, seen))
+            }
+        }
 
     private fun decodeNode(raw: Any?): LayerNode? {
         val map = Json.obj(raw) ?: return null
 
         val id = Json.str(map["id"]) ?: newLayerId()
         val blend = blendOf(Json.str(map["blend"]))
-        val opacity = Json.float(map["opacity"], 1f).coerceIn(0f, 1f)
+        val opacity = unitInterval(map["opacity"])
         val enabled = Json.bool(map["enabled"], true)
         val flipX = Json.bool(map["flipX"], false)
         val flipY = Json.bool(map["flipY"], false)
@@ -141,10 +184,23 @@ object CompositionSerializer {
         }
     }
 
+    /**
+     * Parameter values are carried through as written — the range check belongs
+     * to the effect's own schema, and [ParamBag.setAll] applies it when the layer
+     * is instantiated, so a key this build does not recognise keeps its value for
+     * a build that does.
+     *
+     * Non-finite values are the exception: they are dropped rather than stored,
+     * because there is no schema clamp that can rescue a `NaN` and nothing may
+     * write one back out.
+     */
     private fun decodeParams(raw: Any?): Map<String, Float> {
         val map = Json.obj(raw) ?: return emptyMap()
         val params = HashMap<String, Float>(map.size * 2)
-        for ((key, value) in map) (value as? Number)?.let { params[key] = it.toFloat() }
+        for ((key, value) in map) {
+            val number = (value as? Number)?.toFloat() ?: continue
+            if (number.isFinite()) params[key] = number
+        }
         return params
     }
 

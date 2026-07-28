@@ -2,7 +2,9 @@ package com.tailapp.ui.screen
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.drag
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -27,12 +29,17 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -41,6 +48,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.tailapp.model.MotionLimits
@@ -60,10 +70,22 @@ fun MotionConfigScreen(
     onBack: () -> Unit
 ) {
     val state by viewModel.deviceState.collectAsStateWithLifecycle()
+    val puppetError by viewModel.puppetError.collectAsStateWithLifecycle()
     val motionState = state.motionState
     val capabilities = state.capabilities
     // Offer only the patterns the connected firmware reports.
     val availablePatterns = capabilities.patterns.ifEmpty { MotionPattern.entries }
+
+    val snackbarHostState = remember { SnackbarHostState() }
+
+    // A drag that could not be turned into a target has to say so; silence there
+    // reads as a dead control.
+    LaunchedEffect(puppetError) {
+        puppetError?.let {
+            snackbarHostState.showSnackbar(it)
+            viewModel.clearPuppetError()
+        }
+    }
 
     Scaffold(
         topBar = {
@@ -75,7 +97,8 @@ fun MotionConfigScreen(
                     }
                 }
             )
-        }
+        },
+        snackbarHost = { SnackbarHost(snackbarHostState) }
     ) { padding ->
         Column(
             modifier = Modifier
@@ -190,6 +213,12 @@ fun MotionConfigScreen(
                             onRelease = viewModel::stopPuppet,
                             modifier = Modifier.fillMaxWidth()
                         )
+                        Spacer(Modifier.height(8.dp))
+                        PuppetAxisSliders(
+                            onDrag = viewModel::startPuppet,
+                            onRelease = viewModel::stopPuppet,
+                            modifier = Modifier.fillMaxWidth()
+                        )
                     }
                 }
 
@@ -199,22 +228,43 @@ fun MotionConfigScreen(
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Column(modifier = Modifier.padding(16.dp)) {
                         Text("Axis Limits", style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            "Both ends run over the whole travel, so a tail mounted off " +
+                                "centre can have its entire range on one side of zero.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                         Spacer(Modifier.height(8.dp))
+
+                        // The full mechanical span on both sliders rather than
+                        // -180..0 and 0..180: see MotionConfigViewModel.AXIS_TRAVEL_DEG.
+                        // Each end is clamped against the other on write, so the
+                        // pair can never be sent inverted.
+                        val travel = MotionConfigViewModel.AXIS_TRAVEL_DEG
+                        val fullTravel = -travel..travel
 
                         Text("X Axis", style = MaterialTheme.typography.bodyMedium)
                         DebouncedSlider(
-                            label = "Min",
+                            label = "X min",
                             value = motionState.xAxisMin,
-                            onValueChange = { viewModel.setAxisLimits(0, it, motionState.xAxisMax) },
-                            valueRange = -180f..0f,
+                            onValueChange = {
+                                viewModel.setAxisLimits(
+                                    0, it.coerceAtMost(motionState.xAxisMax), motionState.xAxisMax
+                                )
+                            },
+                            valueRange = fullTravel,
                             unit = "°",
                             valueFormat = "%.0f"
                         )
                         DebouncedSlider(
-                            label = "Max",
+                            label = "X max",
                             value = motionState.xAxisMax,
-                            onValueChange = { viewModel.setAxisLimits(0, motionState.xAxisMin, it) },
-                            valueRange = 0f..180f,
+                            onValueChange = {
+                                viewModel.setAxisLimits(
+                                    0, motionState.xAxisMin, it.coerceAtLeast(motionState.xAxisMin)
+                                )
+                            },
+                            valueRange = fullTravel,
                             unit = "°",
                             valueFormat = "%.0f"
                         )
@@ -223,18 +273,26 @@ fun MotionConfigScreen(
 
                         Text("Y Axis", style = MaterialTheme.typography.bodyMedium)
                         DebouncedSlider(
-                            label = "Min",
+                            label = "Y min",
                             value = motionState.yAxisMin,
-                            onValueChange = { viewModel.setAxisLimits(1, it, motionState.yAxisMax) },
-                            valueRange = -180f..0f,
+                            onValueChange = {
+                                viewModel.setAxisLimits(
+                                    1, it.coerceAtMost(motionState.yAxisMax), motionState.yAxisMax
+                                )
+                            },
+                            valueRange = fullTravel,
                             unit = "°",
                             valueFormat = "%.0f"
                         )
                         DebouncedSlider(
-                            label = "Max",
+                            label = "Y max",
                             value = motionState.yAxisMax,
-                            onValueChange = { viewModel.setAxisLimits(1, motionState.yAxisMin, it) },
-                            valueRange = 0f..180f,
+                            onValueChange = {
+                                viewModel.setAxisLimits(
+                                    1, motionState.yAxisMin, it.coerceAtLeast(motionState.yAxisMin)
+                                )
+                            },
+                            valueRange = fullTravel,
                             unit = "°",
                             valueFormat = "%.0f"
                         )
@@ -566,6 +624,16 @@ private fun ServoConfigRow(
  * Releasing stops streaming rather than sending a centre position: the device's
  * own timeout hands the tail back to its pattern, and letting go should return
  * whatever the pattern was doing, not park the tail at zero.
+ *
+ * The gesture is **claimed on touch-down**, not after touch slop. `detectDrag-`
+ * `Gestures` waits for slop before consuming, and the pad lives inside a
+ * vertically scrolling screen — so a mostly-vertical drag was won by the scroll
+ * and the tail never moved. Steering must beat scrolling everywhere inside the
+ * pad, so the very first `down` is consumed.
+ *
+ * A drag pad has no keyboard or switch equivalent, so [PuppetAxisSliders] beside
+ * it is the accessible route to the same FF0B stream; this canvas itself is
+ * marked up only as a described image.
  */
 @Composable
 private fun PuppetPad(
@@ -583,21 +651,34 @@ private fun PuppetPad(
     Canvas(
         modifier = modifier
             .height(200.dp)
+            .semantics {
+                contentDescription =
+                    "Steering pad. Drag to aim the tail. Use the X and Y sliders below " +
+                        "for the same control."
+            }
             .pointerInput(Unit) {
-                detectDragGestures(
-                    onDragStart = { position ->
-                        held = true
-                        knob = position
-                        emitPuppet(position, size.width, size.height, onDrag)
-                    },
-                    onDrag = { change, _ ->
+                awaitEachGesture {
+                    // requireUnconsumed = false and an immediate consume: this
+                    // pad owns the pointer from the first sample, so the parent
+                    // scroll never gets to claim it on slop.
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    down.consume()
+                    held = true
+                    knob = down.position
+                    emitPuppet(down.position, size.width, size.height, onDrag)
+
+                    val completed = drag(down.id) { change ->
                         change.consume()
                         knob = change.position
                         emitPuppet(change.position, size.width, size.height, onDrag)
-                    },
-                    onDragEnd = { held = false; onRelease() },
-                    onDragCancel = { held = false; onRelease() }
-                )
+                    }
+                    held = false
+                    // Both a clean lift and a cancelled gesture must release, or
+                    // the resend loop keeps holding the pose until the device
+                    // times it out.
+                    onRelease()
+                    if (!completed) knob = Offset.Zero
+                }
             }
     ) {
         val cx = size.width / 2f
@@ -611,6 +692,61 @@ private fun PuppetPad(
 
         val point = if (held) knob else Offset(cx, cy)
         drawCircle(accent, radius = 18f, center = point)
+    }
+}
+
+/**
+ * The pad's accessible equivalent: two ordinary sliders driving the same
+ * targets.
+ *
+ * A canvas drag is unreachable by TalkBack, a switch or a keyboard, and manual
+ * drive is a primary control on this screen — not a shortcut for something
+ * available elsewhere. Sliders are cheap here because aiming is now decoupled
+ * from writing: `startPuppet` only re-aims a resend loop that paces itself, so
+ * a slider dragged at pointer rate costs no more BLE traffic than the pad does.
+ */
+@Composable
+private fun PuppetAxisSliders(
+    onDrag: (Float, Float) -> Unit,
+    onRelease: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var x by remember { mutableFloatStateOf(0f) }
+    var y by remember { mutableFloatStateOf(0f) }
+
+    Column(modifier = modifier) {
+        Text(
+            "Left / right: ${"%+.0f".format(x * 100)}%",
+            style = MaterialTheme.typography.bodySmall
+        )
+        Slider(
+            value = x,
+            onValueChange = { x = it; onDrag(x, y) },
+            onValueChangeFinished = onRelease,
+            valueRange = -1f..1f,
+            modifier = Modifier
+                .fillMaxWidth()
+                .semantics {
+                    contentDescription = "Steer left or right"
+                    stateDescription = "${"%+.0f".format(x * 100)} percent of travel"
+                }
+        )
+        Text(
+            "Up / down: ${"%+.0f".format(y * 100)}%",
+            style = MaterialTheme.typography.bodySmall
+        )
+        Slider(
+            value = y,
+            onValueChange = { y = it; onDrag(x, y) },
+            onValueChangeFinished = onRelease,
+            valueRange = -1f..1f,
+            modifier = Modifier
+                .fillMaxWidth()
+                .semantics {
+                    contentDescription = "Steer up or down"
+                    stateDescription = "${"%+.0f".format(y * 100)} percent of travel"
+                }
+        )
     }
 }
 

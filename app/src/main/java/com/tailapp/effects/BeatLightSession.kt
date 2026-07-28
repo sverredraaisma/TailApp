@@ -66,9 +66,16 @@ class BeatLightSession(
 
     private var transitionJob: Job? = null
 
+    /**
+     * Starts a session.
+     *
+     * The active flag is claimed with a compare-and-set rather than a read
+     * followed by a write: `toggle()` off a rapid double tap, or a screen and the
+     * service asking at once, otherwise both saw `false` and both went on to
+     * start the engine and the foreground service.
+     */
     fun start() {
-        if (_isActive.value) return
-        _isActive.value = true
+        if (!_isActive.compareAndSet(expect = false, update = true)) return
         _error.value = null
 
         // The standalone FF05 capture is stopped, but the device does not lose
@@ -110,8 +117,7 @@ class BeatLightSession(
     }
 
     fun stop() {
-        if (!_isActive.value) return
-        _isActive.value = false
+        if (!_isActive.compareAndSet(expect = true, update = false)) return
 
         telemetryJob?.cancel()
         telemetryJob = null

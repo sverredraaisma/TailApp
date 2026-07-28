@@ -37,6 +37,11 @@ class BarSweepEffect : ReactiveEffect(SPEC) {
         val tipColour = p.color("tipColor")
         val brightness = p.float("brightness")
 
+        // Tint toward tipColour as the bar approaches full, so the last beat of
+        // the bar is visibly the last one. `height` is the same for every LED, so
+        // this is computed once rather than per pixel.
+        val colourAt = EffectColors.lerp(colour, tipColour, height)
+
         for (i in coords.indices) {
             val c = transformCoord(coords[i])
             val position = if (fromTip) 1f - c.y else c.y
@@ -51,9 +56,6 @@ class BarSweepEffect : ReactiveEffect(SPEC) {
             val edge = ((height - position) / softness + 1f).coerceIn(0f, 1f)
             if (edge <= 0f) continue
 
-            // Tint toward tipColour as the bar approaches full, so the last beat
-            // of the bar is visibly the last one.
-            val colourAt = EffectColors.lerp(colour, tipColour, height)
             out.setPacked(i, EffectColors.scale(colourAt, edge * brightness))
         }
     }

@@ -17,8 +17,10 @@ import kotlin.math.exp
  * hand-built context and a fake time.
  *
  * All timing is session-relative ([timeSeconds] counts from the first frame),
- * not absolute `nanoTime`, so a `Float` holds it precisely for any real session
- * — the same reason `ReactiveRenderer` used a session-relative clock.
+ * not absolute `nanoTime` — the same reason `ReactiveRenderer` used a
+ * session-relative clock. [CompositionScene] additionally re-bases that clock
+ * periodically, so a `Float` holds it precisely however long the session runs
+ * rather than losing millisecond resolution overnight.
  *
  * Consumers must not retain this object or its [bands] array past the [render]
  * call: both are reused between frames.

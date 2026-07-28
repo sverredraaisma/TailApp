@@ -1,7 +1,5 @@
 package com.tailapp.ui.screen
 
-import android.net.Uri
-import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Column
@@ -26,11 +24,16 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -61,19 +64,26 @@ fun FirmwareUpdateScreen(
     val selection by viewModel.selection.collectAsStateWithLifecycle()
     val transfer by viewModel.transfer.collectAsStateWithLifecycle()
 
-    val context = androidx.compose.ui.platform.LocalContext.current
+    val pickError by viewModel.pickError.collectAsStateWithLifecycle()
+
+    val context = LocalContext.current
     val connected = deviceState.connectionState == ConnectionState.CONNECTED
     val busy = transfer is FirmwareTransfer.Active
+    val snackbarHostState = remember { SnackbarHostState() }
 
-    // The image can be a megabyte, so it is read as raw bytes; the view model is
-    // where the accept/refuse decision belongs, so it just gets the bytes.
+    // Only the Uri is taken here. The image can be a megabyte and this callback
+    // is the main thread — reading it inline blocked the UI for the whole
+    // download when the document came from a network-backed provider. The view
+    // model reads it on an IO dispatcher, which is also where the accept/refuse
+    // decision already lives.
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri == null) return@rememberLauncherForActivityResult
-        val bytes = runCatching {
-            context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-        }.getOrNull()
-        if (bytes != null) {
-            viewModel.onImagePicked(displayName(context, uri), bytes)
+        if (uri != null) viewModel.onImageUriPicked(context, uri)
+    }
+
+    LaunchedEffect(pickError) {
+        pickError?.let {
+            snackbarHostState.showSnackbar(it)
+            viewModel.clearPickError()
         }
     }
 
@@ -87,7 +97,8 @@ fun FirmwareUpdateScreen(
                     }
                 }
             )
-        }
+        },
+        snackbarHost = { SnackbarHost(snackbarHostState) }
     ) { padding ->
         Column(
             modifier = Modifier
@@ -342,13 +353,3 @@ private fun formatDuration(millis: Long): String {
     return if (seconds < 90) "${seconds} s" else "${(seconds + 59) / 60} min"
 }
 
-/** The document's display name, falling back to the last path segment. */
-private fun displayName(context: android.content.Context, uri: Uri): String {
-    val fromProvider = runCatching {
-        context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
-            ?.use { cursor ->
-                if (cursor.moveToFirst()) cursor.getString(0) else null
-            }
-    }.getOrNull()
-    return fromProvider ?: uri.lastPathSegment ?: "firmware.bin"
-}

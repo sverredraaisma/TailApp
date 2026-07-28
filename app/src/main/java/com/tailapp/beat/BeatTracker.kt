@@ -40,6 +40,7 @@ class BeatTracker(
     private val framesPerSecond = config.framesPerSecond
     private val hopNanos: Long = (1_000_000_000.0 / framesPerSecond).toLong()
     private val lookaheadFrames = LOOKAHEAD_SECONDS * framesPerSecond
+    private val silenceFrames = (SILENCE_SECONDS * framesPerSecond).toInt().coerceAtLeast(1)
 
     private var frameIndex = 0L
     private var lastTimestampNanos = 0L
@@ -85,8 +86,26 @@ class BeatTracker(
 
     private class PendingBeat(val frame: Double, val position: Int)
 
-    /** Current tempo estimate in BPM, or 0 before the tracker has locked on. */
-    override val bpm: Float get() = tempo.bpm
+    /**
+     * Current tempo estimate in BPM, or 0 when the tracker is not locked on.
+     *
+     * Gated on the phase lock, not merely on the tempo estimator having *ever*
+     * produced a number: [BeatDecoder.bpm]'s contract is "0 when there is no
+     * lock", which [ParticleFilterBeatDecoder] honours, and reporting the last
+     * tempo of the last track forever through silence is how a monitor ends up
+     * showing 128 BPM in an empty room.
+     */
+    override val bpm: Float get() = if (!hasPhase) 0f else tempo.bpm
+
+    /**
+     * The tempo estimator's own reading, whether or not a phase has been
+     * acquired — a diagnostic, not part of [BeatDecoder].
+     *
+     * It exists because "the tempo was right, the tracker just never cleared the
+     * confidence gate that lets it take a phase" is a real and distinguishable
+     * failure, and [bpm]'s contract deliberately cannot express it.
+     */
+    internal val tempoBpm: Float get() = tempo.bpm
 
     /** `0..1`, combining tempo-peak sharpness with how well the phase is holding. */
     override val confidence: Float
@@ -226,7 +245,20 @@ class BeatTracker(
         beatsSinceMatchedOnset = 0
     }
 
-    private fun phaseQuality(): Float = (1f - lastPhaseError * 2f).coerceIn(0f, 1f)
+    /**
+     * How well the phase is holding, `0..1`.
+     *
+     * Two terms, because [lastPhaseError] alone is a *stale* measurement: it is
+     * only written when an onset lands inside the capture window, so through a
+     * long pad section with no onsets at all it keeps reporting the quality of
+     * the last hit before the pads started. Ageing it out by how many beats have
+     * been emitted since the last correction is what makes the confidence fall
+     * when the tracker is coasting rather than tracking.
+     */
+    private fun phaseQuality(): Float {
+        val freshness = 1f - (beatsSinceMatchedOnset / PHASE_STALENESS_BEATS.toFloat()).coerceIn(0f, 1f)
+        return ((1f - lastPhaseError * 2f) * freshness).coerceIn(0f, 1f)
+    }
 
     // --- emission ---
 
@@ -305,6 +337,14 @@ class BeatTracker(
         if (offPhaseScore <= onPhaseScore * PHASE_FLIP_MARGIN) return
 
         nextBeatFrame -= period / 2.0
+        // Half a period back can land the "next" beat at or before the current
+        // frame, and emitDueBeats would then emit an event stamped in the past —
+        // a flash the renderer can only show late. Step forward to the first
+        // crossing that is still ahead of us.
+        while (nextBeatFrame < frameIndex) {
+            nextBeatFrame += period
+            beatInBar = (beatInBar + 1) % BEATS_PER_BAR
+        }
         // The alternative becomes the incumbent; starting both scores from zero
         // stops a marginal decision from oscillating every few beats.
         onPhaseScore = 0f
@@ -374,10 +414,22 @@ class BeatTracker(
             return
         }
         quietFrames++
-        if (quietFrames > SILENCE_SECONDS * framesPerSecond) {
-            hasPhase = false
-            pendingBeats.clear()
-            barScores.fill(0f)
+        if (quietFrames < silenceFrames) return
+
+        hasPhase = false
+        pendingBeats.clear()
+        barScores.fill(0f)
+        // Drop the *tempo* too, exactly once as the threshold is crossed. A gap
+        // this long is a new piece of music, not a bar's rest, and a retained
+        // period both misreports the BPM through the silence and biases the next
+        // track's acquisition towards the last one's tempo. Once, not every
+        // frame: reset() refills the history and would otherwise never let the
+        // estimator accumulate the 3 s it needs to speak again.
+        if (quietFrames == silenceFrames) {
+            tempo.reset()
+            lastMatchedOnsetFrame = -1.0
+            beatsSinceMatchedOnset = 0
+            lastPhaseError = 0f
         }
     }
 
@@ -425,6 +477,13 @@ class BeatTracker(
 
         /** Beats to wait after a flip, so a marginal call cannot oscillate. */
         const val MIN_BEATS_BETWEEN_FLIPS = 8
+
+        /**
+         * Beats without a matching onset after which the phase measurement is
+         * considered worthless. Two bars: long enough for a sparse breakdown,
+         * short enough that a pad section stops reporting a stale certainty.
+         */
+        const val PHASE_STALENESS_BEATS = 8
 
         /** Consecutive beats a challenger bar position must lead before it takes over. */
         const val DOWNBEAT_SWITCH_BEATS = 4

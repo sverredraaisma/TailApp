@@ -33,6 +33,18 @@ import java.io.File
 class AppContainer(context: Context) {
     private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
+    /**
+     * Everything BLE runs here, off the main thread.
+     *
+     * The repository's own coroutines are the 20 Hz FF02 notification collector,
+     * the connection-setup job and the two transfer loops (image chunks, OTA), and
+     * a firmware image's CRC-32 is computed on this dispatcher too — a megabyte of
+     * that on the UI thread is an ANR, not a stutter. Nothing in the repository or
+     * the transport router touches an Android UI object; state reaches the screens
+     * as `StateFlow`s, which are safe to update from any thread.
+     */
+    private val bleScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
     val bleScanner = BleScanner(context)
     val bleConnectionManager = BleConnectionManager(context)
 
@@ -45,9 +57,9 @@ class AppContainer(context: Context) {
     private val bleTransport = RoutingBleTransport(
         real = bleConnectionManager,
         virtual = VirtualTailTransport(),
-        scope = applicationScope
+        scope = bleScope
     )
-    val deviceRepository = DeviceRepository(bleTransport, applicationScope)
+    val deviceRepository = DeviceRepository(bleTransport, bleScope)
     val fftStreamManager = FftStreamManager(context, deviceRepository, applicationScope)
     val audioPrefs: SharedPreferences = context.getSharedPreferences("audio_config", Context.MODE_PRIVATE)
 

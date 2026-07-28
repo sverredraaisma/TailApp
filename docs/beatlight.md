@@ -59,9 +59,25 @@ They share one capture now. `FeatureFrameFftEncoder` derives the device's FF05
 frame from the analysis frames the session already produces: the log-spaced
 filterbank is regrouped into the configured bin count over the configured
 frequency window (taking each group's **peak**, since a mean washes a narrow
-peak out and the device's bar effects are drawing peaks), and the same
-`AdaptivePeakNormalizer` the composer uses maps levels onto `0..255` so bars
+peak out and the device's bar effects are drawing peaks), and an
+`AdaptivePeakNormalizer` — the same *class* the composer and the CRNN source use,
+but its own instances, one for loudness and one for the spectrum, since each
+tracks a different quantity's recent peak — maps levels onto `0..255` so bars
 reach full height at conversational volume rather than only when clipping.
+
+`FftProcessor`, which builds the FF05 frame when no session is running, was
+rewritten to the same standard. It normalises against a real peak tracker (fast
+attack, slow release, with an absolute floor so a quiet room reads quiet instead
+of being normalised back up to full scale); the previous recurrence converged on
+three times the signal level, so a steady tone reported **85/255 whatever its
+actual loudness** and the top two-thirds of the range were never used. Two other
+fixes came with it: the frame is **zero-padded** up to the next power of two
+rather than truncated down to the previous one — a 1470-sample frame (30 fps at
+44.1 kHz) used to be cut to 1024, losing 30% of every frame *and* half the
+frequency resolution — and **DC is removed with bin 0 never read**, because a
+microphone's DC offset lands entirely in bin 0, and at this resolution the lowest
+output bins all resolve to bin 0, so the bottom bars *were* the DC offset and
+never moved with the bass.
 
 Each frame also carries a **beat trailer** — phase, BPM, and beat/downbeat/drop
 flags. The device has no microphone and no beat tracker, so without this its
@@ -87,29 +103,68 @@ three apart with a 0.86 ms residual — see [beat-model.md](beat-model.md).
 | Tier | Rate | Produces | Drives |
 |---|---|---|---|
 | Beat | 50 fps (441-sample hop @ 22050 Hz) | `BeatEvent` | per-beat triggers |
-| Transient | ~5-10 Hz | `DropEvent`, `SectionStateUpdate` | drop hits, build-up ramps, breakdown dimming |
-| Context | every 3 s (one 2.048 s Discogs-EffNet patch) | `GenreState` | an input effects may read; shown on the monitor |
+| Transient | 10 Hz (`TransientConfig.statsRateHz`, a fixed default, not a range) | `DropEvent`, `SectionStateUpdate` | drop hits, build-up ramps, breakdown dimming |
+| Context | every ~2.08 s (one Discogs-EffNet patch + 1.5% resampler slack) | `GenreState` | an input effects may read; shown on the monitor |
+
+The context window used to be 3 s, which fits **one** 2.048 s patch and threw the
+remaining ~32% of the mel work away: `EffnetMelSpectrogram` computed 187 frames
+and a single 128-frame patch consumed 128. Sizing the window to the patch grid
+instead means ~98% of the stream reaches the model, at a slightly higher rate,
+for less CPU per second of audio.
+
+Tempo bounds for the whole beat tier come from one place, `beat/TempoRange`, and
+there are deliberately **two** of them. `MIN_BPM`/`MAX_BPM` (55-215) are what the
+tier can *represent* — BeatNet's bounds, where 215 is what makes 128 BPM's double
+unrepresentable. `SEARCH_MIN_BPM`/`SEARCH_MAX_BPM` (60-200) are the narrower band
+`TempoEstimator` can actually *resolve*: its three-harmonic comb and log-normal
+prior centred at 120 BPM are tuned for it, and searching the full representable
+range measurably loses the lock — the whole of `BeatTrackerTest` fails at 55-215,
+a clean 128 BPM grid included, because the extra lags reshape the peak-to-average
+ratio the acquisition gate reads. Widening the search band is a comb-and-prior
+redesign with the ±2 BPM suites re-derived, not a constant change.
+
+### Two of the three tiers share a thread; the third must not
+
+`LightingEngine` confines its analysis, render and layout loops to a single
+`limitedParallelism(1)` dispatcher, because they share a `FeatureExtractor` whose
+ring buffer is not thread-safe. **Genre inference is the deliberate exception**,
+on its own `genreDispatcher`: an EffNet pass is tens of milliseconds, and running
+it inline stalled the render loop for whole frames — visible as a hitch in the
+lights every time the classifier fired. It touches nothing the loops touch, and
+its result is published back through the work dispatcher, which stays the only
+place the scene's genre field is written.
+
+### Silence is not a section
+
+`SectionStateTracker`'s energy comparisons are z-scores against recent history,
+which is what makes them work in a living room and a club without a threshold
+table — and also what makes them meaningless when there is no music at all: a
+z-score of silence against silence is noise, not a small number. So presence is
+judged separately, on raw RMS against a slowly-decaying peak, and the state
+machine is gated on it. Without that the tracker latches into DROP in an empty
+room and stays there. A breakdown is still audio; an empty room is not.
 
 ## Module map
 
 | Package | Contents |
 |---|---|
 | `com.tailapp.audio` | `AudioSource` (Oboe + `AudioRecord` fallback), `FloatRingBuffer`, `FeatureConfig`/`FeatureFrame`, `FeatureExtractor`, `BeatNetFeatureExtractor`/`BeatNetFrame`, `dsp/` (`Fft`, `BluesteinFft`, `LogFilterbank`, `Resampler`) |
-| `com.tailapp.beat` | `ActivationSource`, `SpectralFluxActivationSource`, `CrnnActivationSource`, `BeatModelStore`, `TempoEstimator`, `BeatDecoder` (`BeatTracker`, `ParticleFilterBeatDecoder`), `BeatEvent` — see [beat-model.md](beat-model.md) |
-| `com.tailapp.drop` | transient detector, section-state tracker, `DropEvent`, `SectionState` |
+| `com.tailapp.beat` | `ActivationSource`, `SpectralFluxActivationSource`, `CrnnActivationSource`, `BeatModelStore`, `TempoEstimator`, `TempoRange` (the shared bounds), `OctaveBias`, `AdaptivePeakNormalizer`, `BeatDecoder` (`BeatTracker`, `ParticleFilterBeatDecoder`), `BeatEvent` — see [beat-model.md](beat-model.md) |
+| `com.tailapp.drop` | `TransientDetector`/`TransientAnalyzer` + `TransientConfig`, `RollingStats` (O(1) trailing mean/σ — everything here is measured against recent history, never absolute levels), `SectionStateTracker`, `DropEvent`, `SectionState` |
 | `com.tailapp.genre` | `GenreState`, `GenreClassifier`, `EffnetMelSpectrogram`, `OnnxGenreClassifier`, `GenreModelStore` — see [genre-model.md](genre-model.md) |
 | `com.tailapp.effects` | `LightingEngine`, `BeatLightSession`, `BeatLightService`, `DeviceAudioStream` |
 | `com.tailapp.composer` | the effect graph: `ReactiveContext`, `ReactiveEffect`, `CompositionRenderer`, `CompositionScene`, the 25 effects — see [composer.md](composer.md) |
-| `com.tailapp.lighting` | `LightingOutput`, `TailDirectLedOutput`, preview sink |
-| `com.tailapp.led` | Kotlin port of the firmware LED engine — coordinates, effects, compositor |
+| `com.tailapp.lighting` | `LightingOutput`, `TailDirectLedOutput` (FF0A), `PreviewLightingOutput`, `CompositeLightingOutput` (fans one render loop to several sinks in order, so the preview shows the frame the LEDs actually got and the hardware sink never waits behind UI work) |
+| `com.tailapp.led` | Kotlin port of the firmware LED engine — coordinates, 18 effects, compositor, `LedOutputStage` |
 | `app/src/main/cpp` | Oboe capture + lock-free ring buffer |
 
 ## The LED engine is a firmware port, not a lookalike
 
 `com.tailapp.led` mirrors TailFirmware's rendering code file for file — the
 coordinate map from `led_matrix.cpp`, `transform_coord` from `led_effect.h`, the
-integer `hsv_to_rgb` and blend helpers from `color.h`, all six effects from
-`led/effects/`, and the compositor. That buys two things:
+integer `hsv_to_rgb` and blend helpers from `color.h`, all **eighteen** effects
+from `led/effects/` (ids `0x00`-`0x11`, ending in Animation), the compositor, and
+the output stage `LedMatrix::push` runs on the way out. That buys two things:
 
 1. **Live preview.** The app can show what the device is displaying, for the
    device's *own* effect stack, without the device sending pixels back.

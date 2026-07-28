@@ -11,6 +11,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import com.tailapp.model.MotionState
 
@@ -45,11 +47,27 @@ fun TailPositionView(
     val first = MaterialTheme.colorScheme.primary
     val second = MaterialTheme.colorScheme.tertiary
 
+    // The plot is the whole point of the card, and a canvas says nothing to a
+    // screen reader; the live numbers are spoken instead of silence.
+    val spoken = if (motionState == null) {
+        "Tail position plot. No position reported yet."
+    } else {
+        val positions = motionState.logicalPositions?.takeIf { showLogical }
+            ?: motionState.encoderPositions
+        "Tail position plot. " +
+            (if (showLogical) "Logical, pre-mix. " else "Physical, post-mix. ") +
+            "First half X ${"%.0f".format(positions.getOrElse(0) { 0f })} degrees, " +
+            "Y ${"%.0f".format(positions.getOrElse(2) { 0f })} degrees. " +
+            "Second half X ${"%.0f".format(positions.getOrElse(1) { 0f })} degrees, " +
+            "Y ${"%.0f".format(positions.getOrElse(3) { 0f })} degrees."
+    }
+
     Column(modifier = modifier) {
         Canvas(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(160.dp)
+                .semantics { contentDescription = spoken }
         ) {
             val w = size.width
             val h = size.height

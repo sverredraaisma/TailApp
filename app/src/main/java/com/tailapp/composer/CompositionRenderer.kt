@@ -14,7 +14,10 @@ import com.tailapp.model.BlendMode
  *
  * - **Same blend math.** Layers combine through [ColorMath.blend], the
  *   integer-exact transcription of the firmware's blend helpers, so a stack
- *   built here reads the way a firmware stack does.
+ *   built here reads the way a firmware stack does. Per-layer opacity and master
+ *   brightness go through the same helpers (`rgb_normal` and `rgb_scale`) rather
+ *   than through float arithmetic of their own, so there is nowhere left for the
+ *   two to round differently.
  * - **Same buffer discipline.** Scratch buffers are pooled per tree depth and
  *   reused across frames rather than allocated per layer, mirroring
  *   `temp_buffer_`'s reuse. Nothing on the render path touches the heap.
@@ -44,7 +47,15 @@ class CompositionRenderer {
     /** One reusable buffer per tree depth; index 0 is the top level's layers. */
     private val scratch = ArrayList<PixelBuffer>()
 
+    /**
+     * `@Volatile` because [currentComposition] is read from outside the render
+     * thread (the editor asks the scene what is playing), and a plain `var` gives
+     * that reader no guarantee it ever sees the write. Compositions are
+     * immutable, so publishing the reference is all the synchronisation needed.
+     */
+    @Volatile
     private var composition: Composition = Composition.EMPTY
+
     private var instances: Map<String, ReactiveEffect> = emptyMap()
 
     /** LEDs the current layout holds. */
@@ -155,35 +166,46 @@ class CompositionRenderer {
         }
     }
 
+    /**
+     * Opacity goes through [ColorMath] too, as an `0..255` alpha, rather than
+     * being cross-faded here in floats.
+     *
+     * A float cross-fade truncates the per-channel *difference* toward zero, so
+     * it rounds the opposite way from the firmware on half the values and drops
+     * any delta smaller than `1/opacity` entirely — a 10% layer over a base
+     * differing by nine counts would contribute nothing at all. Reusing
+     * `rgb_normal`'s own arithmetic is the only way the preview and the device
+     * agree.
+     */
     private fun blendInto(dest: PixelBuffer, src: PixelBuffer, mode: BlendMode, opacity: Float) {
-        val full = opacity >= 1f
+        val alpha = toByteScale(opacity)
         for (i in 0 until dest.ledCount) {
-            val base = dest.packed(i)
-            val blended = ColorMath.blend(base, src.packed(i), mode)
-            dest.setPacked(i, if (full) blended else mix(base, blended, opacity))
+            dest.setPacked(i, ColorMath.blend(dest.packed(i), src.packed(i), mode, alpha))
         }
     }
 
-    /** Cross-fades [from] toward [to] by [t], per channel. */
-    private fun mix(from: Int, to: Int, t: Float): Int {
-        val r = channel(from, 16) + ((channel(to, 16) - channel(from, 16)) * t).toInt()
-        val g = channel(from, 8) + ((channel(to, 8) - channel(from, 8)) * t).toInt()
-        val b = channel(from, 0) + ((channel(to, 0) - channel(from, 0)) * t).toInt()
-        return (r.coerceIn(0, 255) shl 16) or (g.coerceIn(0, 255) shl 8) or b.coerceIn(0, 255)
-    }
-
+    /**
+     * Master brightness is `rgb_scale` — integer `c * factor / 255` — not a float
+     * multiply, for the same reason: the output stage on the device scales this
+     * way, and a preview that rounded differently would show colours the strip
+     * never produces.
+     */
     private fun applyBrightness(buffer: PixelBuffer, brightness: Float) {
+        val factor = toByteScale(brightness)
         for (i in 0 until buffer.ledCount) {
-            buffer.set(
-                i,
-                (buffer.red(i) * brightness).toInt(),
-                (buffer.green(i) * brightness).toInt(),
-                (buffer.blue(i) * brightness).toInt()
-            )
+            buffer.setPacked(i, ColorMath.scale(buffer.packed(i), factor))
         }
     }
 
-    private fun channel(colour: Int, shift: Int): Int = (colour shr shift) and 0xFF
+    /**
+     * A `0..1` mix as the `0..255` integer the firmware's helpers take.
+     *
+     * Rounded, not truncated: `0.5` is alpha 128, the value that makes a
+     * half-opacity layer land halfway. A non-finite value cannot be clamped, and
+     * silently means "fully on" rather than "black".
+     */
+    private fun toByteScale(value: Float): Int =
+        if (!value.isFinite()) 255 else Math.round(value.coerceIn(0f, 1f) * 255f)
 
     private fun scratchAt(depth: Int): PixelBuffer {
         while (scratch.size <= depth) scratch.add(PixelBuffer(coords.size))

@@ -13,23 +13,27 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
-import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.tailapp.led.LedCoord
 import com.tailapp.led.LedLayout
 import com.tailapp.led.LedPreviewClock
 import com.tailapp.led.PixelBuffer
 import com.tailapp.model.LedState
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.withContext
 import kotlin.math.max
 import kotlin.math.min
 
@@ -53,11 +57,13 @@ fun LedPreview(
     val ledsPerRing = ledState?.ledsPerRing.orEmpty()
     val totalLeds = ledsPerRing.sum()
 
-    // Push every LedState edit into the renderer as soon as recomposition
-    // sees it, so a layer edit shows up on the very next drawn frame instead
-    // of waiting for some separate poll.
+    // Every LedState edit is queued for the render loop rather than pushed into
+    // the renderer here. The renderer is not thread-safe and the loop below owns
+    // it, so composition publishes and the loop applies — a layer edit still
+    // shows up on the very next drawn frame, without two threads in the stack.
+    val pendingState = remember(previewClock) { MutableStateFlow<LedState?>(null) }
     LaunchedEffect(previewClock, ledState) {
-        ledState?.let(previewClock::setState)
+        pendingState.value = ledState
     }
 
     if (ledState == null || totalLeds == 0) {
@@ -65,18 +71,31 @@ fun LedPreview(
         return
     }
 
-    var frame by remember(previewClock) { mutableStateOf<PixelBuffer?>(null) }
-
-    // Drives the animation from the Compose frame clock - no background
-    // thread, no polling. Leaving the screen cancels this LaunchedEffect,
-    // which is what stops the animation.
+    // The renderer is the firmware's whole effect stack, per LED, per frame.
+    // Running it inside `withFrameNanos` put that on the UI thread at display
+    // refresh rate, where a dense matrix competes with layout and input for the
+    // same 16 ms. It now runs on Dispatchers.Default and publishes finished
+    // frames; the composable only reads them.
+    //
+    // Each published frame is a *copy*: the renderer reuses one buffer, so
+    // handing the live one across threads would both tear mid-draw and compare
+    // equal to the previous value, which is a StateFlow that never emits.
+    val frames = remember(previewClock) { MutableStateFlow<PixelBuffer?>(null) }
     LaunchedEffect(previewClock) {
-        while (true) {
-            withFrameNanos { nowNanos ->
-                frame = previewClock.frameAt(nowNanos)
+        withContext(Dispatchers.Default) {
+            var applied: LedState? = null
+            while (isActive) {
+                val next = pendingState.value
+                if (next !== applied) {
+                    next?.let(previewClock::setState)
+                    applied = next
+                }
+                frames.value = previewClock.frameAt(System.nanoTime()).copy()
+                delay(PREVIEW_FRAME_INTERVAL_MS)
             }
         }
     }
+    val frame by frames.collectAsStateWithLifecycle()
 
     // Forget the wall-clock bookkeeping when the preview leaves composition,
     // so coming back to it later starts a clean dt=0 frame instead of a
@@ -104,6 +123,7 @@ fun LedStrip(
     pixels: PixelBuffer?,
     ledsPerRing: List<Int>,
     modifier: Modifier = Modifier,
+    contentDescription: String? = null,
 ) {
     // Same normalised coordinate map LedStackRenderer feeds every effect, so
     // coords[i] lines up with frame.packed(i) below.
@@ -114,12 +134,18 @@ fun LedStrip(
     val unlitColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = UNLIT_ALPHA)
     val backgroundColor = MaterialTheme.colorScheme.surfaceVariant
 
+    // A canvas of coloured dots is nothing at all to a screen reader, so it
+    // announces what it is and how big the strip is rather than staying silent.
+    val description = contentDescription
+        ?: "Live LED preview, ${coords.size} lights across $numRings rings"
+
     Canvas(
         modifier = modifier
             .fillMaxWidth()
             .aspectRatio(max(1.6f, maxRowCount.toFloat() / max(numRings, 1)))
             .clip(RoundedCornerShape(12.dp))
             .background(backgroundColor)
+            .semantics { this.contentDescription = description }
     ) {
         val f = pixels ?: return@Canvas
         drawLedStrip(coords, f, maxRowCount, numRings, unlitColor)
@@ -182,17 +208,20 @@ private fun DrawScope.drawLedStrip(
         val color = Color(r / 255f, g / 255f, b / 255f)
 
         // Soft glow behind the LED core so a bright pixel reads as a light
-        // source rather than a flat swatch.
+        // source rather than a flat swatch. Drawn as a few nested translucent
+        // circles rather than a radial-gradient brush: the brush had to be
+        // built per LED per frame (its centre and radius are per LED), which on
+        // a dense matrix is hundreds of allocations every frame for an effect
+        // that is meant to be decoration.
         val glowRadius = radius * (1.8f + brightness * 1.6f)
-        drawCircle(
-            brush = Brush.radialGradient(
-                colors = listOf(color.copy(alpha = brightness * 0.5f), color.copy(alpha = 0f)),
+        for (ring in GLOW_RINGS downTo 1) {
+            val t = ring / GLOW_RINGS.toFloat()
+            drawCircle(
+                color = color.copy(alpha = brightness * 0.5f * (1f - t) * (1f - t)),
+                radius = radius + (glowRadius - radius) * t,
                 center = center,
-                radius = glowRadius,
-            ),
-            radius = glowRadius,
-            center = center,
-        )
+            )
+        }
         drawCircle(color = color, radius = radius, center = center)
     }
 }
@@ -218,3 +247,13 @@ fun LedPreviewPlaceholder(modifier: Modifier = Modifier) {
 
 private const val DARK_THRESHOLD = 0.02f
 private const val UNLIT_ALPHA = 0.25f
+
+/** Concentric circles standing in for one radial-gradient glow. */
+private const val GLOW_RINGS = 3
+
+/**
+ * ~60 fps of preview. The renderer runs off the UI thread, so this paces the
+ * work rather than racing the display; [LedPreviewClock] clamps any longer gap
+ * anyway, so a slow frame slows the animation instead of jumping it.
+ */
+private const val PREVIEW_FRAME_INTERVAL_MS = 16L

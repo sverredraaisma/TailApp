@@ -122,10 +122,12 @@ class CommandAckTrackerTest {
     }
 
     @Test
-    fun `a jump in the counter abandons no more than the commands actually waiting`() = runTest {
-        // 199 missing answers against two waiting commands. The loop is bounded
-        // by the queue, so a stale or restarted counter costs two completions,
-        // not 255 iterations of one.
+    fun `a jump too large to be lost answers abandons nobody`() = runTest {
+        // The firmware stamps acks from two counters: `g_ack_seq` for commands it
+        // executed, and `bad_write_ack_seq` in ble_service.c for a write rejected
+        // before dispatch. One ack from the second source lands here as an
+        // arbitrary jump — and reading 199 phantom losses out of it would abandon
+        // a command the device is about to answer perfectly normally.
         val tracker = CommandAckTracker()
         val first = tracker.register(ff03, 0x01)
         val second = tracker.register(ff03, 0x01)
@@ -133,8 +135,25 @@ class CommandAckTrackerTest {
         tracker.onResult(ack(0x03, 0x01, OK, sequence = 0))
         assertEquals(CommandResultCode.OK, first.await(TIMEOUT)?.result)
 
-        assertFalse(tracker.onResult(ack(0x03, 0x01, OK, sequence = 200)))
-        assertNull(second.await(TIMEOUT))
+        // The baseline still moves; what does not happen is a completion with null.
+        assertTrue(tracker.onResult(ack(0x03, 0x01, BAD_STATE, sequence = 200)))
+        assertEquals(CommandResultCode.BAD_STATE, second.await(TIMEOUT)?.result)
+        assertEquals(0, tracker.outstanding())
+    }
+
+    @Test
+    fun `a plausible gap is still read as lost answers`() = runTest {
+        // The device's command queue is eight deep, so a burst can lose at most
+        // that many at once — inside the bound the sequence byte does its job.
+        val tracker = CommandAckTracker()
+        val waiters = List(3) { tracker.register(ff03, 0x01) }
+
+        tracker.onResult(ack(0x03, 0x01, OK, sequence = 4))
+        tracker.onResult(ack(0x03, 0x01, BAD_STATE, sequence = 6))
+
+        assertEquals(CommandResultCode.OK, waiters[0].await(TIMEOUT)?.result)
+        assertNull("the lost answer must not be invented", waiters[1].await(TIMEOUT))
+        assertEquals(CommandResultCode.BAD_STATE, waiters[2].await(TIMEOUT)?.result)
         assertEquals(0, tracker.outstanding())
     }
 

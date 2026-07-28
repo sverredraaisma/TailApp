@@ -82,6 +82,11 @@ gradlew.bat lintDebug            # Android lint (lint errors fail the build)
 
 The APK lands at `app/build/outputs/apk/debug/app-debug.apk`.
 
+GitHub Actions runs the unit suite and lint on every push to `main` and every
+pull request ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) — neither
+needs a device, an emulator or the NDK, so there is no reason for them to only
+ever run locally. Lint errors fail the build in both places.
+
 ---
 
 ## Installing on a phone
@@ -129,9 +134,20 @@ The app requests these at runtime; grant them when prompted:
 | Permission | Why | When |
 |------------|-----|------|
 | `BLUETOOTH_SCAN`, `BLUETOOTH_CONNECT` | Find and talk to the tail | Android 12+ (API 31+) |
-| `ACCESS_FINE_LOCATION` | BLE scanning on older Android | Android 8–11 (API 26–30) |
+| `ACCESS_FINE_LOCATION` | BLE scanning on older Android | Android 8–11 (API 26–30) only |
 | `RECORD_AUDIO` | Microphone analysis for BeatLight | On opening Audio config / BeatLight |
+| `POST_NOTIFICATIONS` | The ongoing notification a foreground service must post | Android 13+ (API 33+), when a session starts |
 | `FOREGROUND_SERVICE` (+ microphone) | Keep BeatLight running in the background | While a session runs |
+
+`BLUETOOTH_SCAN` is declared with `neverForLocation`, so the app does **not** ask
+for location on Android 12 and up. That assertion is honest — nothing here
+derives a location from a scan result; devices are matched on service UUID and
+address. The legacy `BLUETOOTH`/`BLUETOOTH_ADMIN` and both location permissions
+are capped at `maxSdkVersion="30"` so they are never requested on a modern phone.
+
+Backup is off (`allowBackup="false"` plus a `dataExtractionRules` file): saved
+effect stacks and paired‑device state are local session data, and restoring them
+onto a different handset would resurrect devices you no longer own.
 
 If a permission is denied the relevant screen explains what it needs; nothing
 else is blocked.
@@ -170,8 +186,10 @@ device.
 
 ```
 com.tailapp/
-  ble/            BleTransport, connection manager, scanner, protocol/ (wire format)
-  repository/     DeviceRepository — single source of truth for device state
+  ble/            BleTransport, connection manager, scanner, the virtual tail,
+                  protocol/ (wire format)
+  repository/     DeviceRepository — single source of truth for device state —
+                  plus ACK tracking, OTA and sequence upload
   model/          DeviceState, LED/Motion/System models
   audio/          Mic capture (Oboe + AudioRecord), FFT, feature extraction
   beat/ drop/ genre/   Beat, drop and genre analysis tiers
@@ -183,7 +201,7 @@ com.tailapp/
   ui/             Compose theme, screens, components
   di/AppContainer Manual dependency injection
 app/src/main/cpp/ Native Oboe capture + lock‑free ring buffer (JNI)
-docs/             Architecture, composer, beatlight, roadmap
+docs/             See the documentation index below
 ```
 
 MVVM with manual DI (no Hilt/Dagger); state flows from `DeviceRepository` into
@@ -225,12 +243,21 @@ See its own `README.md` to build the hardware and flash a board.
 | [`docs/composer.md`](docs/composer.md) | The reactive effect graph (rendering half) |
 | [`docs/beatlight.md`](docs/beatlight.md) | The audio analysis pipeline |
 | [`docs/beat-model.md`](docs/beat-model.md), [`docs/genre-model.md`](docs/genre-model.md) | The beat and genre models |
+| [`docs/beatlight-manual-checks.md`](docs/beatlight-manual-checks.md) | The checks that need a phone and a tail — what the JVM suite cannot reach |
 | [`docs/roadmap.md`](docs/roadmap.md) | Delivery status, aligned with the firmware |
+| [`docs/DevelopmentPlan.md`](docs/DevelopmentPlan.md) | The original twelve‑phase build plan; historical record, superseded by the roadmap |
+| [`docs/codebase-audit-2026-07-28.md`](docs/codebase-audit-2026-07-28.md) | The 2026‑07‑28 audit record — what was found, kept as written |
 | `CLAUDE.md` | Architecture notes and conventions |
 
 ---
 
 ## License
 
-See the repository's license file if present; otherwise treat as all‑rights‑reserved
-by the author until a license is added.
+**GNU Affero General Public License v3.0** — the full text is in
+[`LICENSE`](LICENSE).
+
+The genre and beat models are *not* covered by it and are not in this repository:
+Discogs‑EffNet and `genre_discogs400` are CC BY‑NC‑ND, BeatNet is CC BY 4.0. The
+app ships the code that runs them; `tools/` downloads and converts the weights
+onto your own device. See [`docs/genre-model.md`](docs/genre-model.md) and
+[`docs/beat-model.md`](docs/beat-model.md).

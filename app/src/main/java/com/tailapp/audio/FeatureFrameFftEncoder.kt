@@ -30,7 +30,7 @@ import com.tailapp.beat.AdaptivePeakNormalizer
  */
 class FeatureFrameFftEncoder(
     private val config: FeatureConfig = FeatureConfig(),
-    settings: FftSettings = FftSettings()
+    initialSettings: FftSettings = FftSettings()
 ) {
     /**
      * Centre frequency of each analysis band, used to find which bands fall in
@@ -47,15 +47,22 @@ class FeatureFrameFftEncoder(
     private val loudnessNormalizer = AdaptivePeakNormalizer(framesPerSecond = config.framesPerSecond)
     private val spectrumNormalizer = AdaptivePeakNormalizer(framesPerSecond = config.framesPerSecond)
 
-    @Volatile
-    var settings: FftSettings = settings
-        set(value) {
-            field = value
-            binRanges = null // recomputed lazily against the new window
-        }
+    /**
+     * The settings and the bin ranges derived from them, published as one
+     * object. They cannot be separate fields: the ranges are what the analysis
+     * thread actually reads, so a volatile `settings` whose setter invalidated a
+     * plain `binRanges` could hand that thread a bin count change it never sees.
+     */
+    private class Window(val settings: FftSettings, val ranges: Array<IntRange>)
 
-    /** `[startBand, endBandExclusive]` per output bin; null until first use. */
-    private var binRanges: Array<IntRange>? = null
+    @Volatile
+    private var window: Window = Window(initialSettings, buildBinRanges(initialSettings))
+
+    var settings: FftSettings
+        get() = window.settings
+        set(value) {
+            window = Window(value, buildBinRanges(value))
+        }
 
     fun reset() {
         loudnessNormalizer.reset()
@@ -67,8 +74,7 @@ class FeatureFrameFftEncoder(
      *   [com.tailapp.ble.protocol.FftFrameBuilder].
      */
     fun encode(frame: FeatureFrame): FftResult {
-        val s = settings
-        val ranges = binRanges ?: buildBinRanges(s).also { binRanges = it }
+        val ranges = window.ranges
 
         val loudness = (loudnessNormalizer.normalize(frame.rms) * 255f)
             .toInt().coerceIn(0, 255)

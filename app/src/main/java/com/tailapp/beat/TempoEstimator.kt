@@ -29,14 +29,17 @@ import kotlin.math.roundToInt
  * flicker between a value and its double.
  *
  * @param config front-end geometry — lags are in frames, so this converts.
- * @param minBpm slowest tempo considered.
- * @param maxBpm fastest tempo considered.
+ * @param minBpm slowest tempo considered. Defaults to [TempoRange.SEARCH_MIN_BPM],
+ *   which is deliberately narrower than what the tier can *represent* — the comb
+ *   and prior here are tuned for that band and lose the lock outside it. See
+ *   [TempoRange].
+ * @param maxBpm fastest tempo considered. Defaults to [TempoRange.SEARCH_MAX_BPM].
  * @param historySeconds activation history the autocorrelation runs over.
  */
 class TempoEstimator(
     private val config: FeatureConfig = FeatureConfig(),
-    private val minBpm: Float = 60f,
-    private val maxBpm: Float = 200f,
+    private val minBpm: Float = TempoRange.SEARCH_MIN_BPM,
+    private val maxBpm: Float = TempoRange.SEARCH_MAX_BPM,
     historySeconds: Float = 8f,
     private val octaveBias: OctaveBias = OctaveBias()
 ) {
@@ -57,6 +60,18 @@ class TempoEstimator(
     private val minLag = (framesPerSecond * 60f / maxBpm).toInt().coerceAtLeast(2)
     private val maxLag = (framesPerSecond * 60f / minBpm).roundToInt().coerceAtMost(historySize / 2)
 
+    /**
+     * The lags actually *scored*, one either side of the band that may win.
+     *
+     * [interpolatePeak] fits a parabola through the winner's two neighbours, so a
+     * peak sitting on a band edge has no neighbour on one side and falls back to
+     * the raw integer lag — which at the slow end is a whole 1.2 BPM step and
+     * made the bottom of the band unrepresentable. Scoring one guard lag past
+     * each edge costs two correlations and makes every winning lag interpolable.
+     */
+    private val lowGuardLag = (minLag - 1).coerceAtLeast(1)
+    private val highGuardLag = (maxLag + 1).coerceAtMost(historySize / 2)
+
     private var framesUntilUpdate = 0
 
     /** Beat period in frames, or 0 before the first estimate. */
@@ -75,7 +90,7 @@ class TempoEstimator(
     private var currentScore = 0f
 
     /** Per-lag scores from the latest estimate; reused so an estimate allocates nothing. */
-    private val scores = FloatArray(maxLag + 2)
+    private val scores = FloatArray(highGuardLag + 2)
 
     /**
      * Feeds one activation value.
@@ -132,7 +147,7 @@ class TempoEstimator(
 
     private fun estimate() {
         val available = minOf(framesSeen, historySize.toLong()).toInt()
-        if (available <= maxLag + 2) return
+        if (available <= highGuardLag + 2) return
 
         // Mean-remove: a constant offset correlates with everything and would
         // flatten the peak we are looking for.
@@ -145,25 +160,37 @@ class TempoEstimator(
         }
         val mean = (sum / available).toFloat()
 
+        // Zero-lag correlation is the signal's own variance, and dividing by it
+        // is what makes the scores comparable *between* estimates. Without it a
+        // percussive passage scores an order of magnitude higher than a soft one
+        // on the identical tempo, and the SWITCH_MARGIN hysteresis — which
+        // compares this estimate's best against the incumbent's, seconds and
+        // possibly a track apart — is then comparing loudness, not agreement.
+        val variance = correlation(0, available, mean)
+        val normaliser = if (variance > VARIANCE_FLOOR) 1f / variance else 0f
+
         var bestLag = -1
         var bestScore = Float.NEGATIVE_INFINITY
         var scoreSum = 0.0
         var scoreCount = 0
 
         scores.fill(0f)
-        for (lag in minLag..maxLag) {
+        for (lag in lowGuardLag..highGuardLag) {
             var score = 0f
             var weightSum = 0f
             for ((harmonic, weight) in HARMONIC_WEIGHTS.withIndex()) {
                 val harmonicLag = lag * (harmonic + 1)
                 if (harmonicLag > available - 2) break
-                score += weight * correlation(harmonicLag, available, mean)
+                score += weight * correlation(harmonicLag, available, mean) * normaliser
                 weightSum += weight
             }
             if (weightSum > 0f) score /= weightSum
             score *= tempoPrior(framesPerSecond * 60f / lag)
 
             scores[lag] = score
+            // The guard lags are scored so the peak can be interpolated against
+            // them, but they are outside the representable band and may not win.
+            if (lag < minLag || lag > maxLag) continue
             scoreSum += score
             scoreCount++
             if (score > bestScore) {
@@ -206,7 +233,11 @@ class TempoEstimator(
         }
     }
 
-    /** Normalised autocorrelation of the history at [lag]. */
+    /**
+     * Raw autocovariance of the history at [lag] — the mean product of pairs,
+     * *not* normalised. [estimate] divides the whole comb by `correlation(0)`,
+     * which is the variance, to turn these into correlation coefficients.
+     */
     private fun correlation(lag: Int, available: Int, mean: Float): Float {
         var acc = 0.0
         val pairs = available - lag
@@ -232,7 +263,7 @@ class TempoEstimator(
 
     /** Sub-frame peak position by fitting a parabola through the peak's neighbours. */
     private fun interpolatePeak(scores: FloatArray, peak: Int): Float {
-        if (peak <= minLag || peak >= maxLag) return peak.toFloat()
+        if (peak <= lowGuardLag || peak >= highGuardLag) return peak.toFloat()
         val left = scores[peak - 1]
         val centre = scores[peak]
         val right = scores[peak + 1]
@@ -269,5 +300,8 @@ class TempoEstimator(
         const val REFINE_ALPHA = 0.1f
 
         const val EPSILON = 1e-9f
+
+        /** Below this variance the history carries no shape worth correlating. */
+        const val VARIANCE_FLOOR = 1e-12f
     }
 }

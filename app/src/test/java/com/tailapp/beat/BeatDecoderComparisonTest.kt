@@ -119,7 +119,13 @@ class BeatDecoderComparisonTest {
         val precision: Float,
         val recall: Float,
         val downbeatPrecision: Float,
-        val beats: Int
+        val beats: Int,
+        /**
+         * The tempo the decoder's estimator holds, whether or not it locked on.
+         * Distinct from [bpm], which is 0 without a lock by [BeatDecoder]'s
+         * contract — the difference is exactly the syncopation case below.
+         */
+        val tempoBpm: Float
     )
 
     private class Comparison(val signal: String, val mvp: Score, val particle: Score)
@@ -185,7 +191,8 @@ class BeatDecoderComparisonTest {
                 steady.filter { it.isDownbeat }.map { it.timestampNanos },
                 trueDownbeats
             ),
-            beats = steady.size
+            beats = steady.size,
+            tempoBpm = (decoder as? BeatTracker)?.tempoBpm ?: decoder.bpm
         )
     }
 
@@ -396,7 +403,13 @@ class BeatDecoderComparisonTest {
         // The MVP's tempo is right; it simply never clears the confidence gate
         // that lets it take a phase, so it emits nothing at all. Documented rather
         // than hidden: if it starts emitting here, that is worth noticing.
-        assertTrue("the MVP's tempo estimate is fine: ${comparison.mvp.bpm}", comparison.mvp.bpmError <= 2f)
+        // Read off the estimator, not off BeatDecoder.bpm: with no phase lock the
+        // decoder reports 0 BPM by contract, which is the honest answer for a
+        // caller and useless as a diagnostic.
+        assertTrue(
+            "the MVP's tempo estimate is fine: ${comparison.mvp.tempoBpm}",
+            abs(comparison.mvp.tempoBpm - 128f) <= 2f
+        )
         assertEquals(
             "the MVP now emits beats under heavy syncopation (${comparison.mvp.beats}); " +
                 "it used to emit none, because TempoEstimator.confidence never cleared " +

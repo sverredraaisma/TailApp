@@ -239,6 +239,57 @@ class BeatEffectsTest {
         for (i in 0 until frame.ledCount) assertEquals(0, frame.packed(i))
     }
 
+    // --- drop flash ---
+
+    private fun dropContext(intensity: Float, secondsSinceDrop: Float) = testContext(
+        lastDrop = com.tailapp.drop.DropEvent(
+            timestampNanos = 0L,
+            intensity = intensity,
+            broadbandZ = 4f,
+            bassZ = 4f,
+            precededBy = com.tailapp.drop.SectionState.BUILDUP
+        ),
+        secondsSinceDrop = secondsSinceDrop
+    )
+
+    private val burstParams = mapOf(
+        "color" to 0xFFFFFF.toFloat(), "shape" to 1f,
+        "window" to 2f, "width" to 0.25f, "brightness" to 1f
+    )
+
+    /**
+     * The burst front is a position in *time*, not a reading of the envelope.
+     *
+     * `dropEnvelope` folds the detector's intensity into its level, so deriving
+     * the front from `1 - level` started a weak drop's burst halfway up the tail
+     * and let it travel only part of the way — the opposite of what the effect
+     * says it does.
+     */
+    @Test
+    fun `the burst starts at the base however weak the drop was`() {
+        val weak = render("drop_flash", burstParams, dropContext(intensity = 0f, secondsSinceDrop = 0f))
+        val strong = render("drop_flash", burstParams, dropContext(intensity = 1f, secondsSinceDrop = 0f))
+
+        for (frame in listOf(weak, strong)) {
+            assertEquals("the front did not start at the base", true, frame.packed(0) > 0)
+            assertEquals("the front was already up the tail", 0, frame.packed(4))
+        }
+    }
+
+    @Test
+    fun `the burst reaches the tip as the window expires`() {
+        val late = render(
+            "drop_flash",
+            burstParams,
+            // 90% of the way through a 2 s window: the front is at 0.9, so the
+            // tip is inside the 0.25-wide band and the base is far outside it.
+            dropContext(intensity = 1f, secondsSinceDrop = 1.8f)
+        )
+
+        assertEquals(0, late.packed(0))
+        assertEquals(true, late.packed(4) > 0)
+    }
+
     // --- sparkle ---
 
     @Test

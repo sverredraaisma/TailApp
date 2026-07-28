@@ -7,6 +7,14 @@ android {
     namespace = "com.tailapp"
     compileSdk = 34
 
+    // Pinned deliberately. Android 15+ devices with 16 KB pages refuse to load a
+    // .so linked with 4 KB alignment, and that failure only shows up at runtime,
+    // on hardware. NDK r27+ aligns to 16 KB by default — leaving this unset made
+    // a loadable libtailapp_audio.so depend on whichever NDK the build machine
+    // happened to have. (The linker flag in src/main/cpp/CMakeLists.txt asserts
+    // the same thing rather than trusting the toolchain default.)
+    ndkVersion = "27.2.12479018"
+
     defaultConfig {
         applicationId = "com.tailapp"
         minSdk = 26

@@ -49,6 +49,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 /**
  * Which beat decoder a session runs.
@@ -230,6 +233,20 @@ class LightingEngine(
     private val genreClassifier: GenreClassifier = NoGenreClassifier,
     beatModelStore: BeatModelStore? = null,
     private val workDispatcher: CoroutineDispatcher = Dispatchers.Default.limitedParallelism(1),
+    /**
+     * Where genre inference runs. **Not** [workDispatcher], deliberately: an
+     * EffNet-class forward pass is 50-150 ms on a mid-range phone, and running it
+     * inline on the single-threaded work dispatcher blocked the render loop for
+     * two to five frames every window — a visible, periodic hitch. It is already
+     * a pure function of a copied window, so it is trivially separable; the
+     * result is published back through [scope] on [workDispatcher], since the
+     * scene's genre field is otherwise only touched from there.
+     *
+     * Its own `limitedParallelism(1)` rather than the bare pool: two overlapping
+     * inferences on one ONNX session are pointless contention, and the classifier
+     * serialises them anyway.
+     */
+    private val genreDispatcher: CoroutineDispatcher = Dispatchers.Default.limitedParallelism(1),
     private val audioSourceFactory: (Int) -> AudioSource = { rate -> AudioSources.create(rate) },
     private val clock: () -> Long = System::nanoTime,
     /**
@@ -365,9 +382,22 @@ class LightingEngine(
     private val readBuffer = FloatArray(READ_BUFFER_SAMPLES)
     private var resampleBuffer = FloatArray(READ_BUFFER_SAMPLES)
 
-    /** Rolling window of analysis-rate audio for the context tier. */
+    /**
+     * Rolling window of analysis-rate audio for the context tier, plus the buffer
+     * the in-flight classification is reading.
+     *
+     * Double-buffered rather than copied: the window is 66150 floats and handing
+     * it to another thread means the analysis loop must not overwrite it, but
+     * allocating a quarter-megabyte copy every window to say so is a waste when
+     * two buffers swap for free.
+     */
     private var genreWindow = FloatArray(0)
+    private var genreSpare = FloatArray(0)
     private var genreWindowFill = 0
+
+    /** Volatile: written by the analysis loop, read by [stop] on another thread. */
+    @Volatile
+    private var genreJob: Job? = null
 
     private var latestBeat: BeatEvent? = null
     private var latestDrop: DropEvent? = null
@@ -386,9 +416,9 @@ class LightingEngine(
 
     /** Applies a tempo-octave preference live, without restarting the session. */
     fun setOctaveBias(enabled: Boolean, targetBpm: Float, strength: Float) {
-        octaveBias.enabled = enabled
-        octaveBias.targetBpm = targetBpm
-        octaveBias.strength = strength
+        // One write, so a decoder reading it mid-frame cannot see a new target
+        // against an old strength.
+        octaveBias.set(enabled, targetBpm, strength)
     }
 
     /**
@@ -405,6 +435,18 @@ class LightingEngine(
             publishComposition()
         }
 
+    /**
+     * Serialises [start] against [stop] and against itself.
+     *
+     * The guard used to be `isRunning`, which is derived from the analysis job —
+     * and the jobs are not launched until *after* the suspending microphone open.
+     * Two overlapping starts therefore both passed it, both opened an
+     * `AudioSource`, and the first was overwritten and never stopped: a leaked
+     * microphone, plus two analysis loops sharing one [FeatureExtractor], which
+     * is exactly the corruption `limitedParallelism(1)` exists to prevent.
+     */
+    private val lifecycle = Mutex()
+
     val isRunning: Boolean get() = analysisJob?.isActive == true
 
     /**
@@ -413,7 +455,9 @@ class LightingEngine(
      * @throws SecurityException when `RECORD_AUDIO` has not been granted — the
      *   caller is the one that can ask for it.
      */
-    suspend fun start() {
+    suspend fun start() = lifecycle.withLock { startLocked() }
+
+    private suspend fun startLocked() {
         if (isRunning) return
 
         reset()
@@ -466,7 +510,9 @@ class LightingEngine(
     }
 
     /** Stops both loops, closes the microphone and hands the LEDs back to the device. */
-    suspend fun stop() {
+    suspend fun stop() = lifecycle.withLock { stopLocked() }
+
+    private suspend fun stopLocked() {
         // Join, not just cancel: an in-flight iteration keeps running on the work
         // thread until it reaches a suspension point, so closing the source or the
         // output first would tear resources out from under a live pump/render —
@@ -475,12 +521,25 @@ class LightingEngine(
         analysisJob?.cancelAndJoin()
         renderJob?.cancelAndJoin()
         layoutJob?.cancelAndJoin()
+        // The genre job holds a window buffer and may be mid-inference; joining it
+        // is what makes the close() below safe to issue.
+        genreJob?.cancelAndJoin()
         analysisJob = null
         renderJob = null
         layoutJob = null
+        genreJob = null
 
         source?.stop()
         source = null
+        // Both ONNX graphs are large — EffNet brings its own arena — and neither
+        // had a production caller for close(), so a single session's models were
+        // retained for the rest of the process's life. Both reload lazily on the
+        // next session, so releasing here costs one model load per session and
+        // nothing while one is not running.
+        runCatching { genreClassifier.close() }
+            .onFailure { Log.w(TAG, "could not release the genre models", it) }
+        runCatching { crnn?.close() }
+            .onFailure { Log.w(TAG, "could not release the beat model", it) }
         output.close()
         _state.update { it.copy(isRunning = false) }
     }
@@ -502,7 +561,17 @@ class LightingEngine(
             return
         }
 
-        while (true) {
+        // Capped, not drained to exhaustion. The loop below has no suspension
+        // point and only exits on a short read, so a backlog — after a restart, a
+        // route change, or the work dispatcher having been busy — could hold the
+        // shared single thread for as long as it took to catch up, starving
+        // renderFrame. Past two seconds of that the device ages the FF0A pixel
+        // stream out and reverts to its own rendering mid-session. The poll
+        // interval is 5 ms and each read is ~93 ms of audio, so the cap still
+        // drains far faster than real time; the remainder waits for the next pump.
+        var reads = 0
+        while (reads < MAX_READS_PER_PUMP) {
+            reads++
             val read = audio.read(readBuffer)
             if (read <= 0) break
 
@@ -669,11 +738,14 @@ class LightingEngine(
     }
 
     /**
-     * Fills the context tier's window and classifies once it is full.
+     * Fills the context tier's window and hands it off once it is full.
      *
-     * Runs on the analysis thread: inference of a few tens of milliseconds once
-     * every couple of seconds is cheaper than the thread hop, and the beat tier
-     * has a whole hop of slack to absorb it.
+     * The filling runs on the analysis thread; the inference does not. It used to
+     * — on the theory that a few tens of milliseconds every couple of seconds was
+     * cheaper than a thread hop — but the analysis and render loops share one
+     * single-threaded dispatcher on purpose, so those tens of milliseconds came
+     * straight out of the render loop as a periodic run of dropped frames. See
+     * [genreDispatcher].
      */
     private fun accumulateGenreWindow(samples: FloatArray, count: Int, nowNanos: Long) {
         if (genreClassifier === NoGenreClassifier) return
@@ -681,6 +753,7 @@ class LightingEngine(
         val windowSize = (genreClassifier.windowSeconds * featureConfig.sampleRate).toInt()
         if (genreWindow.size != windowSize) {
             genreWindow = FloatArray(windowSize)
+            genreSpare = FloatArray(windowSize)
             genreWindowFill = 0
         }
 
@@ -693,16 +766,39 @@ class LightingEngine(
 
             if (genreWindowFill == windowSize) {
                 genreWindowFill = 0
-                runCatching { genreClassifier.classify(genreWindow.copyOf(), nowNanos) }
-                    .onFailure { Log.w(TAG, "genre classification failed", it) }
-                    .getOrNull()
-                    ?.let { prediction ->
-                        // Genre no longer selects anything — it is one more input
-                        // effects may read, and a label for the monitor.
-                        scene.onGenre(prediction)
-                        _state.update { it.copy(genre = prediction) }
-                    }
+                classifyGenre(nowNanos)
             }
+        }
+    }
+
+    /**
+     * Hands the finished window to the classifier, off the analysis thread.
+     *
+     * A window is skipped rather than queued when the previous inference has not
+     * finished: the whole point of a genre is that it is slowly varying, so the
+     * useful thing to do when the model cannot keep up is to classify less often,
+     * not to build a backlog whose answers describe audio that has already gone.
+     * (It should never happen — inference is a tenth of the window — but "never
+     * happens" is how a buffer ends up being read while it is written.)
+     */
+    private fun classifyGenre(nowNanos: Long) {
+        if (genreJob?.isActive == true) return
+
+        val window = genreWindow
+        genreWindow = genreSpare
+        genreSpare = window
+
+        genreJob = scope.launch(genreDispatcher) {
+            val prediction = runCatching { genreClassifier.classify(window, nowNanos) }
+                .onFailure { Log.w(TAG, "genre classification failed", it) }
+                .getOrNull() ?: return@launch
+
+            // Genre no longer selects anything — it is one more input effects may
+            // read, and a label for the monitor. The scene's genre field is
+            // written from the work dispatcher and nowhere else, so hop back
+            // rather than publishing it from here.
+            withContext(workDispatcher) { scene.onGenre(prediction) }
+            _state.update { it.copy(genre = prediction) }
         }
     }
 
@@ -771,6 +867,14 @@ class LightingEngine(
         const val READ_BUFFER_SAMPLES = 2048
 
         const val POLL_INTERVAL_MILLIS = 5L
+
+        /**
+         * Full-buffer reads one pump may consume before yielding the shared
+         * dispatcher back. Four is ~370 ms of audio against a 5 ms poll, so this
+         * never throttles a healthy stream and bounds the worst case to something
+         * the render loop can absorb.
+         */
+        const val MAX_READS_PER_PUMP = 4
 
         /** ~30 fps, matching the device's own LED refresh. */
         const val FRAME_INTERVAL_MILLIS = 33L

@@ -16,8 +16,10 @@ data class ImageData(val rgb: ByteArray, val width: Int, val height: Int)
  * Drives one full render frame from the device's reported [LedState]: builds
  * the coordinate layout ([LedLayout]), keeps one [LedEffectRenderer] per
  * occupied layer slot, and composites them ([LayerCompositor]) every frame.
- * This is what the live effect-stack preview (and, later, the FF0A direct
- * pixel streamer) drives every tick.
+ * This is what the live effect-stack preview drives every tick. It is
+ * deliberately *not* what an FF0A direct pixel streamer should drive — see the
+ * note on the output stage below: these frames have already been through
+ * brightness, the limiter and gamma, and the device applies its own.
  *
  * ### What forces a rebuild
  * Rebuilding a layer's renderer discards its running state - `time_offset_`,
@@ -36,6 +38,34 @@ data class ImageData(val rgb: ByteArray, val width: Int, val height: Int)
  * `setParam`, new flip/mirror flags by direct assignment, new blend
  * mode/enabled by updating the compositor slot - with its running state
  * intact, matching the firmware's behaviour rather than just its wire format.
+ *
+ * ### The output stage
+ * The composited frame is *not* what the strip shows. `LedMatrix::push` runs
+ * master brightness, then the current limiter, then gamma over it on the way
+ * out, so this renderer runs the same [LedOutputStage] over every frame before
+ * returning it. Without that a 500 mA budget or a brightness of 32 would look
+ * like full white on screen and brown out on the tail - the exact "preview
+ * quietly lies" failure the port exists to prevent.
+ *
+ * The config comes from the device's own reported [LedState.output] whenever it
+ * publishes one (protocol v5+), and can also be set directly via
+ * [setOutputConfig] for a preview that has no live device. Firmware older than
+ * v5 reports nothing, and the stage then falls back to a pass-through
+ * (brightness 255, no limit, no gamma) rather than guessing.
+ *
+ * **Gamma is applied when the device says it is enabled.** It is arguably the
+ * wrong call for an already-sRGB screen - the panel applies its own transfer
+ * curve on top, so a gamma-corrected preview reads darker than the tail does -
+ * but the alternative (silently dropping one of the three stages) reintroduces
+ * a smaller version of the same lie, and this way the preview tracks the
+ * device's gamma toggle visibly. Set [applyGamma] to false to opt out.
+ *
+ * One caution: a frame that comes out of here has already been through the
+ * output stage, so it is a *display* frame, not a frame to stream over FF0A -
+ * the device runs `push` over whatever it receives, and sending these pixels
+ * would apply brightness, the limiter and gamma twice. Today the only caller
+ * is the preview ([LedPreviewClock]); a direct-mode streamer would want the
+ * composite from before [outputStage] ran.
  */
 class LedStackRenderer(
     private val audio: AudioLevelSource,
@@ -51,7 +81,48 @@ class LedStackRenderer(
 
     private val compositor = LayerCompositor()
 
+    /**
+     * The output stage applied to every frame. Exposed so a caller can read
+     * [LedOutputStage.lastPowerScale] - i.e. tell the user their look is being
+     * dimmed to fit the current budget - and so tests can drive it directly.
+     */
+    val outputStage = LedOutputStage(brightness = 255, gammaEnabled = false, currentLimitMa = 0)
+
+    /** The last gamma flag the device reported, kept so [applyGamma] can re-apply it. */
+    private var deviceGammaEnabled = false
+
+    /**
+     * Whether the device's gamma flag is honoured in the preview. See the class
+     * KDoc: on by default because the preview's job is to match the tail.
+     */
+    var applyGamma: Boolean = true
+        set(value) {
+            field = value
+            outputStage.gammaEnabled = value && deviceGammaEnabled
+        }
+
+    /**
+     * Sets the output stage config explicitly, for a preview driven without a
+     * connected device. [setState] overwrites this whenever the state it is
+     * given carries an [LedState.output] block.
+     */
+    fun setOutputConfig(brightness: Int, gammaEnabled: Boolean, currentLimitMa: Int) {
+        outputStage.brightness = brightness.coerceIn(0, 255)
+        deviceGammaEnabled = gammaEnabled
+        outputStage.gammaEnabled = gammaEnabled && applyGamma
+        outputStage.currentLimitMa = currentLimitMa
+    }
+
     fun setState(state: LedState) {
+        val output = state.output
+        if (output != null) {
+            setOutputConfig(output.brightness, output.gammaEnabled, output.currentLimitMa)
+        } else {
+            // Pre-v5 firmware publishes no output block. Pass the frame through
+            // untouched rather than inventing a brightness or a budget.
+            setOutputConfig(brightness = 255, gammaEnabled = false, currentLimitMa = 0)
+        }
+
         if (state.ledsPerRing != ledsPerRing) {
             ledsPerRing = state.ledsPerRing
             coords = LedLayout.coordsFor(ledsPerRing)
@@ -72,8 +143,16 @@ class LedStackRenderer(
                 FirmwareEffectFactory.create(config, audio, motion)
             }
 
-            val blendMode = config.blend ?: BlendMode.OVERWRITE
-            newLayers.add(LayerCompositor.Layer(renderer, blendMode, config.enabled))
+            // An id outside 0x00-0x06 can't come off the wire today, but if one
+            // ever does the firmware's `switch` falls through to `default:
+            // blended = overlay` - plain overlay, then the opacity mix. NORMAL
+            // is exactly that (`rgb_normal` returns the overlay at alpha 255),
+            // so it, not OVERWRITE, is the matching fallback: OVERWRITE would
+            // additionally treat a black overlay as transparent.
+            val blendMode = config.blend ?: BlendMode.NORMAL
+            newLayers.add(
+                LayerCompositor.Layer(renderer, blendMode, config.enabled, config.opacity)
+            )
             newEffectIds.add(config.effectId)
         }
 
@@ -101,6 +180,10 @@ class LedStackRenderer(
         }
 
         compositor.render(layers, coords, dtSeconds, frameBuffer)
+        // `LedMatrix::push` runs over the composite before it reaches the
+        // strip; so does the preview, or it shows a frame the device never
+        // displays. See the class KDoc.
+        outputStage.apply(frameBuffer)
         return frameBuffer
     }
 }

@@ -4,7 +4,9 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.tailapp.model.DeviceState
 import com.tailapp.repository.DeviceRepository
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -51,6 +53,23 @@ class MotionConfigViewModel(
     private var puppetJob: Job? = null
 
     /**
+     * The pose the resend loop is currently holding. Written from the pointer
+     * thread, read from the loop, hence `@Volatile` — the loop must see the
+     * latest sample, never a torn or stale one.
+     */
+    @Volatile
+    private var puppetTarget: FloatArray? = null
+
+    private val _puppetError = MutableStateFlow<String?>(null)
+
+    /** Non-null when a drag could not be turned into a target. One-shot; cleared on read. */
+    val puppetError: StateFlow<String?> = _puppetError.asStateFlow()
+
+    fun clearPuppetError() {
+        _puppetError.value = null
+    }
+
+    /**
      * Drives the tail directly from a drag, as a fraction of each axis's travel.
      *
      * Keeps re-sending while held rather than sending once: the device ages
@@ -58,10 +77,26 @@ class MotionConfigViewModel(
      * pattern, which is what stops an abandoned stream leaving the tail holding
      * a pose. A single write would therefore be a twitch, not a hold.
      *
+     * **The resend loop is started once and then only re-aimed.** A pointer
+     * emits 60-120 samples a second; restarting the loop per sample issued an
+     * FF0B write per sample, which saturates the connection interval and starves
+     * FF0A pixels and FF09 acknowledgements. So a sample updates
+     * [puppetTarget] and returns, and the one long-lived loop keeps writing at
+     * [PUPPET_RESEND_MILLIS] whatever the finger is doing.
+     *
      * @param x left/right, `-1..1`. @param y up/down, `-1..1`.
      */
     fun startPuppet(x: Float, y: Float) {
-        val state = deviceRepository.deviceState.value.motionState ?: return
+        val state = deviceRepository.deviceState.value.motionState
+        if (state == null) {
+            // Silence here reads as a broken pad: the tail has simply not sent
+            // its first FF02 notify yet, so there are no travel limits to scale
+            // the drag against.
+            _puppetError.value =
+                "The tail has not reported its position yet, so there is nothing to steer. " +
+                    "Wait for it to connect and try again."
+            return
+        }
         // Fractions of the *configured* travel, so the pad means the same thing
         // whatever limits the user has set.
         fun scale(f: Float, min: Float, max: Float): Float {
@@ -71,12 +106,12 @@ class MotionConfigViewModel(
         }
         val tx = scale(x, state.xAxisMin, state.xAxisMax)
         val ty = scale(y, state.yAxisMin, state.yAxisMax)
-        val targets = floatArrayOf(tx, tx, ty, ty)
+        puppetTarget = floatArrayOf(tx, tx, ty, ty)
 
-        puppetJob?.cancel()
+        if (puppetJob?.isActive == true) return
         puppetJob = viewModelScope.launch {
             while (isActive) {
-                deviceRepository.streamMotionTargets(targets)
+                puppetTarget?.let { deviceRepository.streamMotionTargets(it) }
                 delay(PUPPET_RESEND_MILLIS)
             }
         }
@@ -91,6 +126,7 @@ class MotionConfigViewModel(
     fun stopPuppet() {
         puppetJob?.cancel()
         puppetJob = null
+        puppetTarget = null
     }
 
     override fun onCleared() {
@@ -110,11 +146,26 @@ class MotionConfigViewModel(
         viewModelScope.launch { deviceRepository.setImuTap(imuId, enabled) }
     }
 
-    private companion object {
+    companion object {
         /**
          * Comfortably inside the device's 500 ms target timeout, so a held pose
          * stays held even if a couple of writes are lost.
          */
-        const val PUPPET_RESEND_MILLIS = 100L
+        private const val PUPPET_RESEND_MILLIS = 100L
+
+        /**
+         * The mechanism's full angular span either side of zero, and therefore
+         * the span an axis-limit slider has to cover.
+         *
+         * Both ends of a limit run over the *whole* span rather than min being
+         * pinned to the negative half and max to the positive one: an
+         * offset-mounted tail can have its entire travel on one side of zero,
+         * and a slider that cannot represent that clamps the thumb to 0 while
+         * the label reads the real value — so any touch writes a wrong limit.
+         *
+         * A constant because the FF06 capability block does not report a travel
+         * range; if one is ever added, this is the single place to read it from.
+         */
+        const val AXIS_TRAVEL_DEG = 180f
     }
 }

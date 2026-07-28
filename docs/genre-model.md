@@ -22,8 +22,9 @@ Two frozen graphs from MTG's Essentia model zoo, stacked:
 
 The embedding model was trained on ~3.3 M tracks of Discogs editorial metadata;
 the head predicts 400 Discogs *styles* (`Electronic---Trance`,
-`Rock---Post-Punk`, `Stage & Screen---Soundtrack`, …), which is exactly the shape
-of label `EffectProfiles.forGenre` matches against.
+`Rock---Post-Punk`, `Stage & Screen---Soundtrack`, …). The `Parent---Style`
+string is what reaches `ReactiveContext` verbatim; nothing maps it to a smaller
+vocabulary, because the composer replaced the profile selector that needed one.
 
 ### Licence and attribution
 
@@ -46,13 +47,13 @@ anything commercial.
 ## The pipeline
 
 ```
- LightingEngine window            3.0 s of mono float at FeatureConfig.sampleRate (22050)
+ LightingEngine window   ~2.08 s of mono float at FeatureConfig.sampleRate (22050)
         │
         ▼  Resampler (audio/dsp)                        linear, state kept across windows
- 16 kHz mono                                            48000 samples
+ 16 kHz mono                                            ~33270 samples
         │
         ▼  EffnetMelSpectrogram
- frames        512-sample Hann, hop 256, first frame centred at 0   -> 187 frames
+ frames        512-sample Hann, hop 256, first frame centred at 0   -> ~130 frames
  spectrum      |rfft|, 257 bins
  mel           96 triangular bands, Slaney warping, linear slopes,
                unit_tri normalisation, applied to |X|^2
@@ -67,8 +68,14 @@ anything commercial.
         ▼  mean over patches, argmax + 4 runners-up
  GenreState("Electronic---Techno", 0.267, t, [...])
         │
-        ▼  GenreDebouncer (12 s rolling majority)       -> EffectProfile
+        ▼  published on ReactiveContext; any effect may read it
 ```
+
+There is no debouncer and no profile selector on the end of that chain any more.
+Both belonged to the `EffectProfile` system the composer replaced: a rolling
+majority existed to stop a *switch* flapping between whole looks. The genre is
+now one input among many on a context an effect chooses what to do with, and a
+`section_dimmer`-style consumer that wants stability can smooth it itself.
 
 ### Front-end constants, and where they come from
 
@@ -118,10 +125,16 @@ Two divergences from Essentia are deliberate and unobservable:
 `genre_discogs400` ends in a sigmoid, not a softmax. It is multi-label: the 400
 scores do not sum to 1, and sibling styles ("Techno", "Minimal Techno", "Deep
 Techno") legitimately fire together. `GenreState.confidence` is therefore the
-winner's raw activation, which is what `EffectControllerConfig.minGenreConfidence`
-(0.35) is comparing against. Renormalising to sum 1 would divide by a number that
+winner's raw activation. Renormalising to sum 1 would divide by a number that
 *grows* with how many styles fired — pushing confidence down exactly when the
 model is most certain.
+
+The only gate on it is `OnnxGenreClassifier`'s `minConfidence`, below which a
+window is reported as "nothing useful to say" — and its default is **`0f`**, i.e.
+open. It is a constructor parameter rather than a constant because a caller with
+a reason to be strict should be able to say so; nothing in the app currently
+does, since the composer hands the confidence to effects rather than acting on
+it, and gating in two places would just make the number a lie in one of them.
 
 ### Sample rates
 
@@ -132,9 +145,29 @@ model's 16 kHz itself, reusing `audio/dsp/Resampler`. The resampler's state is
 kept across windows on purpose: windows arrive back to back, and resetting per
 window would stamp a discontinuity into every one of them.
 
-3.0 s at 22050 Hz → 48000 samples at 16 kHz → 187 frames → exactly one patch
-(a patch needs 2.048 s). Enough of the window is spare that the resampler landing
-a sample short cannot cost the patch.
+The window is sized **from the patch grid**, not chosen:
+`EffnetMelSpectrogram.secondsForPatches(1)` — 2.048 s — plus 1.5% slack, so
+`DEFAULT_WINDOW_SECONDS` is about 2.08 s. The slack is the only reason it is not
+exactly one patch: it is headroom for the linear resampler landing a sample short,
+which would otherwise cost the whole patch.
+
+It used to be 3.0 s, which produced 187 frames of which a single 128-frame patch
+consumed 128 — **about a third of every window's mel work computed and thrown
+away**, every window, forever. Sizing to the grid instead means ~98% of the stream
+reaches the model, and inference runs a little more often for less CPU per second
+of audio.
+
+### It runs on its own thread
+
+`LightingEngine` confines its analysis and render loops to a single thread,
+because they share a `FeatureExtractor`. Genre inference is the deliberate
+exception and gets its own `genreDispatcher`: an EffNet pass is tens of
+milliseconds, long enough to stall the render loop for whole frames and show up
+as a hitch in the lights every time the classifier fires. It is safe because it
+shares nothing with the loops — it is handed a copied window — and its result is
+published back through the work dispatcher, which stays the only place the
+scene's genre field is written. `close()` is `@Synchronized` against `run` for
+the same reason: cancellation can land mid-inference.
 
 ## Producing the artifacts
 

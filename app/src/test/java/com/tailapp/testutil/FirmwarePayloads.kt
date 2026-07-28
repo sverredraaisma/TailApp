@@ -70,10 +70,14 @@ object FirmwarePayloads {
     )
 
     /**
-     * FF02 motion state — 77 bytes, or 81 with the MOT-6 behavior block.
+     * FF02 motion state. The current firmware's `MOTION_STATE_SIZE` is **97
+     * bytes**: the 77-byte v5 core, the 4-byte MOT-6 behavior block, then the
+     * 16-byte MOT-0 logical-position block.
      *
-     * `behavior = null` is firmware that predates the engine: the block is
-     * appended, so those devices send exactly what they always did.
+     * Both trailing blocks are appended rather than inserted, which is why the
+     * shorter forms are still worth building here: `behavior = null` is firmware
+     * that predates the engine and sends the 77 bytes it always did, and
+     * `logical = null` with a behavior block is the 81-byte intermediate.
      */
     fun motionState(
         patternId: Byte = 0x01,
@@ -189,8 +193,19 @@ object FirmwarePayloads {
     data class OtaBlock(
         val running: Triple<Int, Int, Int> = Triple(1, 0, 0),
         val pendingVerify: Boolean = false,
-        val other: Triple<Int, Int, Int>? = null
-    )
+        val other: Triple<Int, Int, Int>? = null,
+        /**
+         * Bit 1 of the flags byte: the running triplet is a zero placeholder the
+         * device could not read from a real descriptor. Set it *without*
+         * [pendingVerify] to reproduce the payload that used to be misread as an
+         * unconfirmed image, since the old parser took the whole byte as a bool.
+         */
+        val runningVersionUnknown: Boolean = false
+    ) {
+        /** The packed `flags` byte, as `OtaManager::build_info_block` writes it. */
+        val flags: Int
+            get() = (if (pendingVerify) 0x01 else 0) or (if (runningVersionUnknown) 0x02 else 0)
+    }
 
     /** One `[addr_type][addr 6 B]` bond record, as the FF06 identity block carries it. */
     data class BondRecord(
@@ -275,7 +290,7 @@ object FirmwarePayloads {
         }
         w.block(FF06_BLK_OTA) {
             u8(ota.running.first).u8(ota.running.second).u8(ota.running.third)
-            bool(ota.pendingVerify)
+            u8(ota.flags)
             val other = ota.other
             bool(other != null)
             u8(other?.first ?: 0).u8(other?.second ?: 0).u8(other?.third ?: 0)
@@ -388,6 +403,52 @@ object FirmwarePayloads {
             motors.forEach { w.u8(it.faults) }
             w.u32(driverLostWrites)
             w.u32(driverReadFailures)
+        }
+        return w.toByteArray()
+    }
+
+    /** One FF0D parameter record, before it is padded out to its fixed 26 bytes. */
+    data class ParamRecord(
+        val paramId: Int,
+        val unitCode: Int = 0x00,
+        val name: String = "param",
+        val min: Float = 0f,
+        val max: Float = 1f,
+        val default: Float = 0.5f
+    )
+
+    /**
+     * FF0D parameter descriptors, mirroring
+     * `ConfigManager::build_param_descriptors` and `write_param_record`.
+     *
+     * `[kind][id][status][count]` then `count` fixed 26-byte records. The
+     * firmware writes **no records at all** unless the status is OK, which is why
+     * the count slot is stamped after the loop device-side; that behaviour is
+     * reproduced here rather than assumed, so a `status != OK` payload is the
+     * bare 4-byte header a real device sends.
+     */
+    fun paramDescriptors(
+        kind: Int = 0x01,
+        entityId: Int = 0x06,
+        status: Int = 0x00,
+        params: List<ParamRecord> = emptyList()
+    ): ByteArray {
+        val w = Writer()
+        w.u8(kind).u8(entityId).u8(status)
+        if (status != 0x00) {
+            w.u8(0)
+            return w.toByteArray()
+        }
+        w.u8(params.size)
+        params.forEach { record ->
+            w.u8(record.paramId).u8(record.unitCode)
+            // Fixed-width and NUL-padded, so a reader can seek to record N. A
+            // name longer than the field is truncated device-side, not rejected.
+            val nameBytes = record.name.toByteArray(Charsets.UTF_8)
+            for (i in 0 until Protocol.PARAM_NAME_MAX) {
+                w.u8(if (i < nameBytes.size) nameBytes[i].toInt() else 0)
+            }
+            w.f32(record.min).f32(record.max).f32(record.default)
         }
         return w.toByteArray()
     }

@@ -28,7 +28,11 @@ class StrobeEffect : ReactiveEffect(SPEC) {
         val locked = ctx.bpm > 0f && ctx.lastBeat != null
 
         val phase = if (locked) {
-            (ctx.beatCount + ctx.beatPhase) * FLASHES_PER_BEAT[p.enumIndex("division")]
+            // Belt and braces: the bag already clamps a Choice to its options,
+            // but this subscripts a raw array from a persisted value, and an
+            // out-of-range index here would throw out of the render loop.
+            val division = p.enumIndex("division").coerceIn(FLASHES_PER_BEAT.indices)
+            (ctx.beatCount + ctx.beatPhase) * FLASHES_PER_BEAT[division]
         } else {
             ctx.timeSeconds * p.float("freeHz")
         }

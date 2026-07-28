@@ -18,7 +18,15 @@ package com.tailapp.genre
  */
 object GenreLabels {
 
-    /** Number of classes `genre_discogs400` predicts. */
+    /**
+     * Number of classes `genre_discogs400` predicts.
+     *
+     * Not merely a capacity hint for the parser: [OnnxGenreClassifier.create]
+     * rejects a metadata file that does not hold exactly this many labels,
+     * because a short list does not fail at inference — the head still returns
+     * its own 400 scores and the argmax is silently taken over a prefix of them.
+     * The parser itself stays lenient, so it can be tested on small fixtures.
+     */
     const val EXPECTED_COUNT = 400
 
     /**

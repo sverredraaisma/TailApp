@@ -139,13 +139,18 @@ object Protocol {
     const val LED_LAYER_SIZE = 40
 
     /**
-     * The largest ATT MTU worth planning for. The firmware requests a preferred
-     * MTU of 512 (`ble_att_set_preferred_mtu`), which negotiates up to 517 once
-     * the 3-byte ATT opcode+handle overhead is added back on — the same ceiling
-     * [com.tailapp.repository.DeviceRepository] requests on connect. Used as the
-     * upper bound for [DirectPixelFrame]'s packet-budget sanity check, since a
-     * single FF0A write can never carry more LEDs than this allows regardless of
-     * what the live connection actually negotiated.
+     * The largest ATT MTU worth planning for.
+     *
+     * MTU is the whole ATT packet, the 3-byte opcode+handle header included — it
+     * is not a payload figure with the header still to be added. The firmware
+     * asks for a preferred MTU of 512 (`ble_att_set_preferred_mtu(512)` in
+     * `ble_service.c`), so a real connection never negotiates above that; 517 is
+     * kept here only as a safe ceiling, since Android will not offer more and a
+     * bound that is too high can only over-reserve, never truncate a write.
+     *
+     * Used as the upper bound for [DirectPixelFrame]'s packet-budget sanity
+     * check, since a single FF0A write can never carry more LEDs than this allows
+     * regardless of what the live connection actually negotiated.
      */
     const val MAX_ATT_MTU = 517
 
@@ -189,12 +194,139 @@ object Protocol {
     const val OTA_IMAGE_HEADER_BYTES = 288
 
     /**
-     * Bytes an OTA slot holds (`ota_0`/`ota_1` in the device's partition table).
-     * An image larger than this is refused at BEGIN with `OUT_OF_RANGE`, and
-     * enlarging a slot is a cable-only change, so this is a hard ceiling rather
-     * than a current figure.
+     * A conservative *upper bound* on what an OTA slot can hold — deliberately
+     * not a claim about the connected device.
+     *
+     * Slot size is a property of the partition table the tail was flashed with,
+     * and TailFirmware ships two: `partitions.csv` (the 2 MB ESP32-C3 build)
+     * gives 0xF0000 = 960 KB per slot, `partitions_4mb.csv` (the ESP32-S3 build)
+     * gives 0x1F0000 = 1984 KB. The firmware sizes its own check at runtime from
+     * `ota_flash_slot_size()`, and **there is no FF06 field carrying that
+     * number**, so the app cannot know which table it is talking to.
+     *
+     * Hard-coding the smaller figure made the app refuse images an S3 tail would
+     * happily take, which is the worse failure: the device is the authority here
+     * and it rejects an oversized image at `SCMD_OTA_BEGIN` with a specific
+     * result code (`OUT_OF_RANGE`) that the update flow already surfaces. So this
+     * is set to the largest slot any shipped table defines and used only to catch
+     * a file that cannot fit *any* tail before spending a transfer on it.
+     *
+     * Limitation to keep in mind: an image between 960 KB and this bound passes
+     * the local check and may still be refused by a 2 MB device. That rejection
+     * is reported, so it costs one packet — whereas the reverse mistake costs an
+     * S3 owner the ability to update at all.
      */
-    const val OTA_SLOT_BYTES = 960 * 1024
+    const val OTA_SLOT_BYTES = 1984 * 1024
+
+    // Motion tuning bounds. Every one of these is *rejected* rather than clamped
+    // by the firmware (`RESULT_OUT_OF_RANGE`), deliberately: a device that
+    // silently substituted a different number would leave the app tuning against
+    // a value the tail is not using. So they are mirrored here to explain the
+    // limit where the user is, not to repair the value on the way out.
+
+    /** `MOTOR_SCALE_MIN` — zero would round every velocity command to zero. */
+    const val MOTOR_SCALE_MIN = 0.001f
+
+    /** `MOTOR_SCALE_MAX` — command units per deg/s, per motor. */
+    const val MOTOR_SCALE_MAX = 100.0f
+
+    /** `GENTLE_SCALE_MIN` — below this the profile no longer overcomes stiction. */
+    const val GENTLE_SCALE_MIN = 0.05f
+
+    /** `GENTLE_SCALE_MAX` — 1.0 is full speed; above it "gentle" would raise limits. */
+    const val GENTLE_SCALE_MAX = 1.0f
+
+    /** `IMU_TAP_SENSITIVITY_MAX` — 0 is least sensitive. */
+    const val TAP_SENSITIVITY_MAX = 7
+
+    /** `IMU_TAP_QUIET_TIME_MIN_MS` — below the mechanism's ring-down, so useless. */
+    const val TAP_QUIET_TIME_MIN_MS = 20
+
+    /** `IMU_TAP_QUIET_TIME_MAX_MS` — above it a tail stops answering taps. */
+    const val TAP_QUIET_TIME_MAX_MS = 2000
+
+    /** `AXIS_MIX_ROTATION_MAX` — the mix rotation is bounded to ±180°. */
+    const val AXIS_MIX_ROTATION_MAX = 180.0f
+
+    /** `AXIS_MIX_GAIN_MIN` — bound away from zero, which would make the mix non-invertible. */
+    const val AXIS_MIX_GAIN_MIN = 0.05f
+
+    /** `AXIS_MIX_GAIN_MAX`. */
+    const val AXIS_MIX_GAIN_MAX = 20.0f
+
+    /** `ENCODER_RATE_MIN` — first-order correction decay constant, in 1/s. */
+    const val ENCODER_RATE_MIN = 0.001f
+
+    /** `ENCODER_RATE_MAX` — a one-second time constant; past it correction fights the profile. */
+    const val ENCODER_RATE_MAX = 1.0f
+
+    /** `ENCODER_REHOME_MIN_DEG` — disagreement that triggers a re-home. */
+    const val ENCODER_REHOME_MIN_DEG = 1.0f
+
+    /** `ENCODER_REHOME_MAX_DEG`. */
+    const val ENCODER_REHOME_MAX_DEG = 180.0f
+
+    // LED render frame rate (LCMD_SET_FRAME_RATE, protocol v6). The device
+    // *rejects* an out-of-range rate with OUT_OF_RANGE rather than clamping it,
+    // so an app that clamped silently would report a rate the tail is not using.
+
+    /** `LED_FRAME_RATE_MIN` — below this the direct-mode stale-frame timeout is measured in frames. */
+    const val LED_FRAME_RATE_MIN = 5
+
+    /** `LED_FRAME_RATE_MAX` — above this the MCU cannot composite a non-trivial stack. */
+    const val LED_FRAME_RATE_MAX = 60
+
+    /** `LED_FRAME_RATE_DEFAULT` — what a device runs at until told otherwise. */
+    const val LED_FRAME_RATE_DEFAULT = 30
+
+    // Animated images (LED-5). The stored file layout is documented in
+    // TailFirmware `main/ble/ble_protocol.h` next to LCMD_BEGIN_ANIMATION; what
+    // is uploaded is the whole self-describing file, header included.
+
+    /** `ANIMATION_MAGIC` — "TANM" little-endian, bytes 0-3 of the stored file. */
+    const val ANIMATION_MAGIC = 0x4D4E4154
+
+    /** `ANIMATION_FORMAT_VERSION` — byte 4; the device refuses any other. */
+    const val ANIMATION_FORMAT_VERSION = 1
+
+    /** `ANIMATION_HEADER_SIZE` — magic, version, geometry, duration, reserved, frame CRC. */
+    const val ANIMATION_HEADER_SIZE = 16
+
+    /** `MAX_ANIMATION_SLOTS` — stored animations, addressed 0..3. */
+    const val MAX_ANIMATION_SLOTS = 4
+
+    /** `ANIMATION_MAX_DIM` — matches the FF06 `image_max_dim` capability. */
+    const val ANIMATION_MAX_DIM = 32
+
+    /** `ANIMATION_MAX_FRAMES` — the device's per-animation frame ceiling. */
+    const val ANIMATION_MAX_FRAMES = 64
+
+    /**
+     * `ANIMATION_MAX_BYTES` — the device stages the whole transfer in RAM so it
+     * can be CRC-checked before anything reaches flash, and 16 KB is what it can
+     * allocate without competing with the BLE stack. A BEGIN asking for more is
+     * rejected, not truncated.
+     */
+    const val ANIMATION_MAX_BYTES = 16384
+
+    // Parameter descriptors (FF0D). Record layout from TailFirmware
+    // `main/ble/ble_protocol.h`; see [ParamDescriptorParser].
+
+    /** `PARAM_NAME_MAX` — the fixed, NUL-padded name field inside each record. */
+    const val PARAM_NAME_MAX = 12
+
+    /** `PARAM_DESC_RECORD_SIZE` — `[id][unit][name 12][min f32][max f32][default f32]`. */
+    const val PARAM_DESC_RECORD_SIZE = 1 + 1 + PARAM_NAME_MAX + 4 + 4 + 4
+
+    /** `PARAM_DESC_HEADER_SIZE` — `[kind][id][status][count]` in front of the records. */
+    const val PARAM_DESC_HEADER_SIZE = 4
+
+    /** `PARAM_DESC_MAX_PARAMS` — the eight parameter slots FF02/FF04 report per entity. */
+    const val PARAM_DESC_MAX_PARAMS = 8
+
+    /** `PARAM_DESC_MAX_PAYLOAD` — the whole FF0D read at its longest; fits one MTU. */
+    const val PARAM_DESC_MAX_PAYLOAD =
+        PARAM_DESC_HEADER_SIZE + PARAM_DESC_MAX_PARAMS * PARAM_DESC_RECORD_SIZE
 
     /**
      * `OtaManager::CONFIRM_DWELL_US` — how long the device must hold a BLE
@@ -221,19 +353,39 @@ enum class CommandResultCode(val code: Byte) {
     BAD_STATE(0x05),
     BUSY(0x06),
 
-    // The four OTA rejections are distinct codes rather than one BAD_STATE
-    // because each has a different cause and a different thing for the user to
-    // do about it. They only ever appear for the FF06 OTA commands and in the
-    // FF0E status echo.
+    // The OTA rejections are distinct codes rather than one BAD_STATE because
+    // each has a different cause and a different thing for the user to do about
+    // it. They only ever appear for the FF06 OTA commands and in the FF0E status
+    // echo.
     OTA_BAD_IMAGE(0x07),
     OTA_WRONG_PROJECT(0x08),
     OTA_SAME_VERSION(0x09),
     OTA_FLASH_ERROR(0x0A),
 
+    /**
+     * The running image is itself still on probation, so a new transfer is
+     * refused rather than allowed to erase the one slot rollback would fall
+     * back on.
+     *
+     * This is what a second update in a row hits: the device confirms a freshly
+     * booted image only after it has held a connection for
+     * [Protocol.OTA_CONFIRM_DWELL_MS], and until then `SCMD_OTA_BEGIN` answers
+     * this. Retryable, and the wait is short and known — which is exactly why
+     * the firmware gave it its own code instead of a bare flash error.
+     */
+    OTA_VERIFY_PENDING(0x0B),
+
     UNKNOWN(0xFF.toByte());
 
-    /** True for a rejection the same command could succeed at if resent. */
-    val isRetryable: Boolean get() = this == BUSY
+    /**
+     * True for a rejection the same command could succeed at if resent.
+     *
+     * [OTA_VERIFY_PENDING] belongs here as much as [BUSY] does: both mean "not
+     * yet", not "no". The wait is longer — the confirmation dwell rather than a
+     * queue slot — but the command is unchanged and will be accepted once it
+     * elapses.
+     */
+    val isRetryable: Boolean get() = this == BUSY || this == OTA_VERIFY_PENDING
 
     val isSuccess: Boolean get() = this == OK
 
@@ -250,6 +402,9 @@ enum class CommandResultCode(val code: Byte) {
             OTA_WRONG_PROJECT -> "Firmware for a different project — it is not this tail's"
             OTA_SAME_VERSION -> "That version is already running"
             OTA_FLASH_ERROR -> "Erase, write or activation failed on the device"
+            OTA_VERIFY_PENDING ->
+                "The tail is still confirming the firmware it just booted — stay " +
+                    "connected, wait about ${Protocol.OTA_CONFIRM_DWELL_MS / 1000} s and try again"
             UNKNOWN -> "Unrecognised result code"
         }
 
@@ -294,6 +449,41 @@ enum class SystemEvent(val code: Byte) {
      */
     STALL(0x04),
 
+    // TMC2209 driver health (MOT-3), one paired appear/clear event per fault
+    // kind. The byte says *what* went wrong, not which motor — the FF07 ring
+    // carries one byte per event — so per-motor detail lives in the FF0C
+    // diagnostics read's `DRV_STATUS` masks. Each pair fires on the edge of the
+    // OR across all four drivers: a second motor developing the same fault is
+    // not a second event, and neither is one of two clearing.
+    //
+    // They are emitted whether or not an app is connected, which is what the
+    // readable event ring exists for: dropping them left a tail that had cooked
+    // itself indistinguishable from one that had simply stopped.
+
+    /** Overtemperature *prewarning* (`otpw`): still driving, but the driver is hot. */
+    DRV_OVERTEMP_WARN(0x05),
+
+    /** The overtemperature prewarning cleared on every driver that had it. */
+    DRV_OVERTEMP_WARN_CLEAR(0x06),
+
+    /** Thermal shutdown (`ot`): that driver has switched itself off. */
+    DRV_OVERTEMP(0x07),
+
+    /** Thermal shutdown cleared; the driver is cool enough to drive again. */
+    DRV_OVERTEMP_CLEAR(0x08),
+
+    /** A coil is shorted to ground (`s2ga`/`s2gb`) — wiring or a failed driver. */
+    DRV_SHORT(0x09),
+
+    /** The short-to-ground condition cleared. */
+    DRV_SHORT_CLEAR(0x0A),
+
+    /** A coil reads as not connected (`ola`/`olb`) — an unplugged or broken motor lead. */
+    DRV_OPEN_LOAD(0x0B),
+
+    /** The open-load condition cleared; the coil is reading as connected again. */
+    DRV_OPEN_LOAD_CLEAR(0x0C),
+
     /**
      * The low-battery policy engaged, tightened or released (SYS-1). Sent on the
      * crossing only, with a recovery margin either side of the threshold, so a
@@ -317,6 +507,40 @@ enum class SystemEvent(val code: Byte) {
     /** True for the three low-battery policy crossings. */
     val isBatteryPolicy: Boolean
         get() = this == BATTERY_LOW || this == BATTERY_CRITICAL || this == BATTERY_NORMAL
+
+    /** True for either half of a TMC2209 driver-health pair (MOT-3). */
+    val isDriverHealth: Boolean
+        get() = code >= DRV_OVERTEMP_WARN.code && code <= DRV_OPEN_LOAD_CLEAR.code
+
+    /**
+     * True for a driver-health event that reports a fault *appearing*. The
+     * `_CLEAR` halves are recoveries, so a log that treated the pair alike would
+     * count every fault twice and never show one ending.
+     */
+    val isDriverFault: Boolean
+        get() = this == DRV_OVERTEMP_WARN || this == DRV_OVERTEMP ||
+            this == DRV_SHORT || this == DRV_OPEN_LOAD
+
+    /** One line of plain English, for an event log the user is expected to read. */
+    val description: String
+        get() = when (this) {
+            TAP_BASE -> "Tap detected at the base"
+            TAP_TIP -> "Tap detected at the tip"
+            CONFIG_CHANGED -> "Configuration replaced on the device — re-read its state"
+            STALL -> "A motor stalled; every motor was released and latched off"
+            DRV_OVERTEMP_WARN -> "Motor driver overheating (prewarning) — still driving"
+            DRV_OVERTEMP_WARN_CLEAR -> "Motor driver overheating warning cleared"
+            DRV_OVERTEMP -> "Motor driver thermal shutdown — that driver is off"
+            DRV_OVERTEMP_CLEAR -> "Motor driver cooled down and is driving again"
+            DRV_SHORT -> "Motor coil shorted to ground — check the wiring"
+            DRV_SHORT_CLEAR -> "Motor coil short cleared"
+            DRV_OPEN_LOAD -> "Motor coil not connected — check the motor lead"
+            DRV_OPEN_LOAD_CLEAR -> "Motor coil is connected again"
+            BATTERY_LOW -> "Battery low: LEDs dimmed and motion limits reduced"
+            BATTERY_CRITICAL -> "Battery critical: the tail parked and released the motors"
+            BATTERY_NORMAL -> "Battery recovered; the low-power policy released"
+            BEHAVIOR_STATE -> "The behavior engine entered a new state"
+        }
 
     companion object {
         fun fromCode(code: Byte): SystemEvent? = entries.find { it.code == code }

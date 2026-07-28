@@ -110,13 +110,19 @@ class EffnetMelSpectrogram {
     /**
      * Computes the log-mel spectrogram of [count] samples of [samples].
      *
-     * @return row-major `[frameCount(count) * NUM_BANDS]`; empty when the input
-     *   is shorter than one frame.
+     * @param maxFrames stop after this many frames. Defaults to all of them;
+     *   [computePatches] passes the number a whole patch count needs, because the
+     *   frames past the last complete patch are computed and then thrown away —
+     *   at the shipped 3 s window that was 59 of 187 frames, a third of the mel
+     *   work, every window.
+     * @return row-major `[min(frameCount(count), maxFrames) * NUM_BANDS]`; empty
+     *   when the input is shorter than one frame.
      */
-    fun compute(samples: FloatArray, count: Int = samples.size): FloatArray {
+    fun compute(samples: FloatArray, count: Int = samples.size, maxFrames: Int = Int.MAX_VALUE): FloatArray {
         require(count >= 0 && count <= samples.size) { "count out of range: $count" }
+        require(maxFrames >= 0) { "maxFrames must not be negative" }
 
-        val frames = frameCount(count)
+        val frames = minOf(frameCount(count), maxFrames)
         val out = FloatArray(frames * NUM_BANDS)
 
         for (frame in 0 until frames) {
@@ -171,9 +177,15 @@ class EffnetMelSpectrogram {
         return out
     }
 
-    /** Convenience: [compute] then [patches]. */
-    fun computePatches(samples: FloatArray, count: Int = samples.size): FloatArray =
-        patches(compute(samples, count))
+    /**
+     * Convenience: [compute] then [patches], computing only the frames the
+     * patches will actually consume.
+     */
+    fun computePatches(samples: FloatArray, count: Int = samples.size): FloatArray {
+        val patches = patchCount(frameCount(count))
+        if (patches == 0) return FloatArray(0)
+        return patches(compute(samples, count, framesForPatches(patches)))
+    }
 
     companion object {
         /** Rate the model was trained at; anything else must be resampled first. */
@@ -205,6 +217,22 @@ class EffnetMelSpectrogram {
         /** Patches [patches] will emit for [frames] frames. */
         fun patchCount(frames: Int): Int =
             if (frames < PATCH_FRAMES) 0 else 1 + (frames - PATCH_FRAMES) / PATCH_HOP
+
+        /** Frames [patchCount] patches consume — everything past this is discarded. */
+        fun framesForPatches(patches: Int): Int =
+            if (patches <= 0) 0 else (patches - 1) * PATCH_HOP + PATCH_FRAMES
+
+        /**
+         * Shortest window, in seconds at [SAMPLE_RATE], that fills [patches]
+         * whole patches. A window longer than this and shorter than the next
+         * multiple is audio that is analysed and then never classified.
+         */
+        fun secondsForPatches(patches: Int): Float =
+            samplesForPatches(patches).toFloat() / SAMPLE_RATE
+
+        /** The same in samples. */
+        fun samplesForPatches(patches: Int): Int =
+            (framesForPatches(patches) - 1) * HOP_SIZE + FRAME_SIZE - FRAME_SIZE / 2
 
         // --- Slaney mel scale, from essentia/src/essentia/essentiamath.h -------
 

@@ -1,5 +1,8 @@
 package com.tailapp.viewmodel
 
+import android.content.Context
+import android.net.Uri
+import androidx.core.content.FileProvider
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.tailapp.composer.Composition
@@ -26,10 +29,13 @@ import com.tailapp.lighting.PreviewLightingOutput
 import com.tailapp.model.BlendMode
 import com.tailapp.model.DeviceState
 import com.tailapp.repository.DeviceRepository
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
 
 /**
  * Backs the effect composer: the editable layer/folder tree, and the edits the
@@ -194,6 +200,76 @@ class EffectComposerViewModel(
         return "$safe.tailstack.json"
     }
 
+    private val _importError = MutableStateFlow<String?>(null)
+
+    /** Why the last import or share failed, for a one-shot dialog. */
+    val importError: StateFlow<String?> = _importError.asStateFlow()
+
+    fun clearImportError() {
+        _importError.value = null
+    }
+
+    private val _shareRequest = MutableStateFlow<Uri?>(null)
+
+    /** A prepared document waiting for the share sheet. Cleared once launched. */
+    val shareRequest: StateFlow<Uri?> = _shareRequest.asStateFlow()
+
+    fun clearShareRequest() {
+        _shareRequest.value = null
+    }
+
+    /**
+     * Reads a picked document and imports it.
+     *
+     * The read happens on [Dispatchers.IO], not in the picker's result callback:
+     * that callback runs on the main thread, and a document backed by a network
+     * provider (Drive, say) downloads the whole file inside `openInputStream` —
+     * an ANR waiting for a big stack over a slow link.
+     */
+    fun importFromUri(context: Context, uri: Uri) {
+        viewModelScope.launch {
+            val text = withContext(Dispatchers.IO) {
+                runCatching {
+                    context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+                }.getOrNull()
+            }
+            _importError.value =
+                if (text == null) "Could not read that file." else importJson(text)
+        }
+    }
+
+    /**
+     * Writes the current stack to a cache file and publishes its content URI for
+     * the share sheet.
+     *
+     * A file rather than an Intent extra: a stack of any size exceeds what an
+     * extra can safely carry, and a file is what the receiving app wants anyway.
+     * The write is off the main thread for the same reason the import read is.
+     */
+    fun prepareShare(context: Context) {
+        val fileName = exportFileName()
+        val json = exportJson()
+        viewModelScope.launch {
+            val uri = withContext(Dispatchers.IO) {
+                runCatching {
+                    val dir = File(context.cacheDir, "shared").apply { mkdirs() }
+                    val file = File(dir, fileName)
+                    file.writeText(json)
+                    FileProvider.getUriForFile(
+                        context,
+                        "${context.packageName}.fileprovider",
+                        file
+                    )
+                }.getOrNull()
+            }
+            if (uri == null) {
+                _importError.value = "Could not prepare that stack for sharing."
+            } else {
+                _shareRequest.value = uri
+            }
+        }
+    }
+
     /**
      * Adds an imported stack to the library and opens it.
      *
@@ -328,6 +404,27 @@ class EffectComposerViewModel(
         engine.composition = next
         _hasUnsavedChanges.value = false
         _expandedLayerId.value = null
+    }
+
+    /**
+     * Hands the engine back the stack the library considers active.
+     *
+     * [edit] applies every change to the running session immediately, saved or
+     * not — that is the point of the screen. But leaving the editor without
+     * saving used to leave the tail rendering the unsaved tree while reopening
+     * the editor loaded the *stored* one: the two diverged, and
+     * [hasUnsavedChanges] read false because the fresh view model had never
+     * edited anything. Reverting the engine here keeps the invariant that what
+     * the tail shows is always a stack the library actually has.
+     */
+    override fun onCleared() {
+        super.onCleared()
+        restoreEngineToLibrary()
+    }
+
+    /** The body of [onCleared], separated only because `onCleared` is not callable from a test. */
+    internal fun restoreEngineToLibrary() {
+        engine.composition = library.active()
     }
 
     private fun edit(transform: (Composition) -> Composition) {

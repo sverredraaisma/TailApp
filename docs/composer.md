@@ -184,6 +184,14 @@ only keyed by name and typed by the schema.
 > `Float`/`Enum`/`Bool` because a nested class called `Float` shadows
 > `kotlin.Float` throughout the sealed class's own body.
 
+**Clamping happens once, in `ParamBag`, against the schema.** No effect has to
+defend itself against a value outside its declared range, and a `Choice` index is
+always a legal option — which matters because the schema is also what the editor
+builds controls from and what saved stacks are validated against, so three places
+would otherwise have to agree. NaN is handled explicitly rather than left to
+`coerceIn`: every comparison against NaN is false, so a plain clamp passes it
+through untouched and into the render arithmetic.
+
 ## Threading, and why edits are safe mid-session
 
 `LightingEngine` confines its analysis, render and layout loops to a **single**
@@ -191,10 +199,14 @@ thread. The composer's rule follows from that:
 
 - The tree is **immutable**. The editor rebuilds it on every change and hands the
   new snapshot to `CompositionScene.setComposition`.
-- `setComposition` is the only cross-thread entry point. It parks the tree in a
-  `@Volatile` field; the scene swaps it in at the top of the next `render`, on
-  the render thread. The loop only ever sees a finished tree, never a
-  half-applied edit.
+- `setComposition` is the only cross-thread entry point. It parks the tree in an
+  `AtomicReference`; the render thread claims it at the top of the next `render`
+  with a single `getAndSet`. The loop only ever sees a finished tree, never a
+  half-applied edit. The atomic is not ceremony: a plain `@Volatile` field
+  read-then-nulled loses an edit that lands between the read and the write, which
+  is precisely the window a user dragging a slider keeps hitting. The same
+  `getAndSet` discipline carries taps and tail telemetry in from the BLE
+  callbacks.
 - **Running state survives edits.** `CompositionRenderer.setComposition` diffs
   the incoming tree against its live effect instances by layer id: a layer whose
   effect id is unchanged keeps its instance — and therefore its decay envelopes,
@@ -206,7 +218,10 @@ thread. The composer's rule follows from that:
 Layer ids must therefore be unique across the whole tree; two layers sharing one
 would share an instance and its animation state. `duplicateNode` reassigns ids
 throughout a copied subtree for this reason, and both `CompositionEditsTest` and
-`CompositionLibraryTest` assert uniqueness.
+`CompositionLibraryTest` assert uniqueness. In-app editing cannot produce a
+collision; an imported file can, so `CompositionSerializer` re-mints on decode —
+the first occurrence keeps its id and every later duplicate gets a fresh one,
+which is also what handles a hand-written document with no ids at all.
 
 ## Normalising the audio
 
@@ -233,6 +248,15 @@ returning zeros, so a round-trip could not be tested through the platform librar
 at all — the same reason `GenreLabels` and the test-side `BeatReference` parse by
 hand. No third-party JSON dependency exists in this project either.
 
+Being hand-written does not mean being lax. Composition JSON arrives through the
+share sheet, so `Json.kt` is a parser for untrusted input: nesting is capped at
+64, unknown escapes and malformed numbers are rejected rather than guessed at,
+and writing refuses a non-finite number instead of emitting a document nothing
+can read back. The depth cap in particular is not paranoia about disk space —
+both readers recurse, so nesting is stack depth, and a `StackOverflowError` is an
+`Error`, which escapes every `catch (JsonException)` wrapped around a load. 64 is
+far past anything the editor can build.
+
 `CompositionSerializer` is **forgiving on read, strict on write**. A saved
 composition outlives the build that wrote it, so every field is optional on read,
 unknown parameter keys are dropped by `ParamBag`, and a layer naming an effect
@@ -242,7 +266,8 @@ built-in. Blend modes are stored **by name**, not by their wire id, because the
 ids belong to the BLE protocol and are free to change there without invalidating
 everything a user has saved.
 
-`CompositionLibrary` ships six built-in stacks and holds the user's. A user entry
+`CompositionLibrary` ships seven built-in stacks — Pulse, Trance Drift, Spectrum
+Lab, Hardstyle, Ember, Chill, Alive — and holds the user's. A user entry
 **shadows** a built-in with the same id, which makes the built-ins editable
 without being destructible: saving over "Pulse" stores a copy under the same id,
 and resetting deletes that copy so the original reappears. Nothing the user can
@@ -317,3 +342,15 @@ Everything outside the Compose layer is plain JVM Kotlin and runs under
   It also asserts every built-in renders *something* on a loud beat.
 - `CompositionSceneTest` covers the analysis→context bridge: the calibration
   offset, beat phase, and the audio normalisation above.
+
+The rest of the package is covered file for file, and the list is worth knowing
+before adding a test that already exists: `CompositionEditsTest` (the pure tree
+operations, including id uniqueness through duplication),
+`CompositionSerializerTest` and `JsonTest` (round-trips, the forgiving-read rules,
+the depth cap and escape/number grammar), `CompositionExchangeTest` (share-sheet
+export/import), `FirmwareExportTest` (what maps onto the device's own stack and
+what is honestly reported as unmappable), `EffectParamTest` (schema clamping,
+including NaN), `ReactiveContextTest` and `TailReactiveTest` (the context itself
+and the tail inputs), `MotionChoreographyTest`, and
+`composer/effects/AudioEffectsTest` + `BeatEffectsTest` for the behaviour that is
+specific to individual effects rather than shared by all of them.
