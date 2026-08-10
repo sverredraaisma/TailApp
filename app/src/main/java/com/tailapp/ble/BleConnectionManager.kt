@@ -9,11 +9,15 @@ import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
 import android.bluetooth.BluetoothStatusCodes
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import androidx.core.content.ContextCompat
 import com.tailapp.ble.protocol.CharacteristicUuids
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -38,6 +42,27 @@ class BleConnectionManager(private val context: Context) : BleTransport {
         private const val DEFAULT_MTU = 23
         /** How long a graceful disconnect may take before the client is force-closed. */
         private const val DISCONNECT_TIMEOUT_MS = 3000L
+
+        /**
+         * How long to wait for bonding, which is the one operation here that waits
+         * on a person: Android may put the pairing request in a notification rather
+         * than a dialog, and the user has to find it. Generous on purpose — the
+         * alternative is failing a bond that was about to succeed.
+         */
+        private const val BOND_TIMEOUT_MS = 30_000L
+
+        /**
+         * The GATT statuses that mean "this needs an encrypted link", not "this
+         * failed". Every characteristic on the tail's FF00 service is declared
+         * READ_ENC/WRITE_ENC, so on an unbonded link *every* operation returns one
+         * of these, and treating them as ordinary failures makes a device that
+         * merely needs pairing look like a device that is broken.
+         */
+        private const val GATT_INSUFFICIENT_AUTHENTICATION = 5
+        private const val GATT_INSUFFICIENT_ENCRYPTION = 15
+
+        private fun isAuthFailure(status: Int) =
+            status == GATT_INSUFFICIENT_AUTHENTICATION || status == GATT_INSUFFICIENT_ENCRYPTION
     }
 
     /**
@@ -69,6 +94,51 @@ class BleConnectionManager(private val context: Context) : BleTransport {
     private val mutex = Mutex()
     private val handler = Handler(Looper.getMainLooper())
     private var forceClose: Runnable? = null
+
+    /**
+     * The remote device of the current (or most recent) connect, kept because
+     * bonding is a property of the device and not of the GATT client: a bond has
+     * to be createable before there is a usable link, and survives the client.
+     */
+    @Volatile private var remoteDevice: BluetoothDevice? = null
+
+    /**
+     * The status of the most recent completed GATT operation.
+     *
+     * The callbacks used to collapse every non-success status into `null`/`false`,
+     * which is why an unbonded link was indistinguishable from a dead one in both
+     * the logs and the return values. Only one GATT operation is ever in flight —
+     * they all serialise on [mutex] — so a single field is enough to carry the
+     * status out to the caller that is about to decide whether to bond and retry.
+     */
+    @Volatile private var lastStatus: Int = BluetoothGatt.GATT_SUCCESS
+
+    @Volatile private var bondCompletion: Pending<Boolean>? = null
+    @Volatile private var bondReceiverRegistered = false
+
+    private val bondReceiver = object : BroadcastReceiver() {
+        override fun onReceive(ctx: Context?, intent: Intent?) {
+            if (intent?.action != BluetoothDevice.ACTION_BOND_STATE_CHANGED) return
+            val state = intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.ERROR)
+            val previous =
+                intent.getIntExtra(BluetoothDevice.EXTRA_PREVIOUS_BOND_STATE, BluetoothDevice.ERROR)
+            Log.d(TAG, "bond state: $previous -> $state")
+            when (state) {
+                BluetoothDevice.BOND_BONDED -> {
+                    bondCompletion?.also { bondCompletion = null }?.complete(true)
+                }
+                BluetoothDevice.BOND_NONE -> {
+                    // Only a *transition out of* bonding is a failure. BOND_NONE
+                    // arriving from BOND_NONE is the removal of some other device's
+                    // bond and says nothing about this one.
+                    if (previous == BluetoothDevice.BOND_BONDING) {
+                        Log.w(TAG, "bonding failed (user declined, or the device rejected it)")
+                        bondCompletion?.also { bondCompletion = null }?.complete(false)
+                    }
+                }
+            }
+        }
+    }
 
     /**
      * True once the active client has discovered its services. CONNECTED is not
@@ -160,6 +230,7 @@ class BleConnectionManager(private val context: Context) : BleTransport {
             @Suppress("DEPRECATION")
             val value = characteristic.value
             Log.d(TAG, "onCharacteristicRead(deprecated): uuid=${characteristic.uuid} status=$status len=${value?.size}")
+            noteStatus(status, "read ${characteristic.uuid}")
             completeRead(characteristic.uuid, if (status == BluetoothGatt.GATT_SUCCESS) value?.copyOf() else null)
         }
 
@@ -170,6 +241,7 @@ class BleConnectionManager(private val context: Context) : BleTransport {
             status: Int
         ) {
             Log.d(TAG, "onCharacteristicRead: uuid=${characteristic.uuid} status=$status len=${value.size}")
+            noteStatus(status, "read ${characteristic.uuid}")
             completeRead(characteristic.uuid, if (status == BluetoothGatt.GATT_SUCCESS) value.copyOf() else null)
         }
 
@@ -185,6 +257,7 @@ class BleConnectionManager(private val context: Context) : BleTransport {
                 return
             }
             writeCompletion = null
+            noteStatus(status, "write ${characteristic.uuid}")
             pending.complete(status == BluetoothGatt.GATT_SUCCESS)
         }
 
@@ -200,6 +273,7 @@ class BleConnectionManager(private val context: Context) : BleTransport {
                 return
             }
             descriptorWriteCompletion = null
+            noteStatus(status, "cccd ${descriptor.characteristic.uuid}")
             pending.complete(status == BluetoothGatt.GATT_SUCCESS)
         }
 
@@ -247,6 +321,107 @@ class BleConnectionManager(private val context: Context) : BleTransport {
         if (descriptorWriteCompletion?.uuid == uuid) descriptorWriteCompletion = null
     }
 
+    /**
+     * Records the status of a finished GATT operation, and names the one class of
+     * failure that has a remedy.
+     */
+    private fun noteStatus(status: Int, what: String) {
+        lastStatus = status
+        if (isAuthFailure(status)) {
+            Log.w(TAG, "$what failed with status=$status - the link is not encrypted; bonding is needed")
+        }
+    }
+
+    /**
+     * Makes sure the device is bonded, starting the pairing if it is not.
+     *
+     * The firmware declares every characteristic READ_ENC/WRITE_ENC and, since it
+     * initiates security itself on connect, an already-bonded phone needs nothing
+     * here. What this covers is the first connection to a device this phone has
+     * never paired with, and the case where the peripheral's pairing request goes
+     * to a notification the user never taps: calling createBond() from the app
+     * puts the request in the foreground where it belongs.
+     *
+     * Returns true if the device is bonded by the time this returns.
+     */
+    private suspend fun ensureBonded(): Boolean {
+        val device = remoteDevice ?: return false
+        when (device.bondState) {
+            BluetoothDevice.BOND_BONDED -> return true
+            BluetoothDevice.BOND_BONDING -> Log.d(TAG, "bonding already in progress; waiting")
+            else -> {
+                Log.i(TAG, "requesting bond with ${device.address}")
+                if (!device.createBond()) {
+                    Log.e(TAG, "createBond() refused to start")
+                    return false
+                }
+            }
+        }
+        val bonded = withTimeoutOrNull(BOND_TIMEOUT_MS) {
+            suspendCancellableCoroutine { cont ->
+                // Re-check under the continuation: the broadcast can land between
+                // the state check above and this registration, and then no further
+                // broadcast is coming.
+                if (device.bondState == BluetoothDevice.BOND_BONDED) {
+                    cont.resume(true)
+                    return@suspendCancellableCoroutine
+                }
+                val pending = Pending<Boolean>(null) { if (cont.isActive) cont.resume(it) }
+                bondCompletion = pending
+                cont.invokeOnCancellation { bondCompletion = null }
+            }
+        }
+        if (bonded == null) {
+            Log.w(TAG, "bonding timed out after ${BOND_TIMEOUT_MS}ms")
+            bondCompletion = null
+            return device.bondState == BluetoothDevice.BOND_BONDED
+        }
+        return bonded
+    }
+
+    /**
+     * Runs a GATT operation and, if it failed only for want of an encrypted link,
+     * bonds and runs it once more.
+     *
+     * One retry, not a loop: if the operation still fails after a successful bond
+     * the cause is something else, and retrying would only delay reporting it.
+     */
+    private suspend fun <T> withBondRetry(what: String, failed: (T) -> Boolean, op: suspend () -> T): T {
+        val first = op()
+        if (!failed(first) || !isAuthFailure(lastStatus)) return first
+        Log.i(TAG, "$what needs an encrypted link; bonding and retrying")
+        if (!ensureBonded()) {
+            Log.e(TAG, "$what cannot proceed: not bonded")
+            return first
+        }
+        return op()
+    }
+
+    private fun registerBondReceiver() {
+        if (bondReceiverRegistered) return
+        // Explicitly NOT_EXPORTED: from API 34 a receiver registered without an
+        // export flag throws unless the broadcast is a protected system one, and
+        // relying on that exemption is a crash waiting for a platform change.
+        // Nothing outside the system should be able to reach this receiver anyway.
+        ContextCompat.registerReceiver(
+            context,
+            bondReceiver,
+            IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED),
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+        bondReceiverRegistered = true
+    }
+
+    private fun unregisterBondReceiver() {
+        if (!bondReceiverRegistered) return
+        try {
+            context.unregisterReceiver(bondReceiver)
+        } catch (e: IllegalArgumentException) {
+            Log.w(TAG, "bond receiver was already unregistered", e)
+        }
+        bondReceiverRegistered = false
+    }
+
     private fun emitUpdate(uuid: UUID, value: ByteArray) {
         if (!_characteristicUpdate.tryEmit(CharacteristicUpdate(uuid, value))) {
             Log.w(TAG, "emitUpdate: dropped notification for $uuid (buffer full)")
@@ -269,12 +444,14 @@ class BleConnectionManager(private val context: Context) : BleTransport {
         if (!isCurrent) return
         this.gatt = null
         servicesReady = false
+        unregisterBondReceiver()
         _connectionState.value = ConnectionState.DISCONNECTED
         _negotiatedMtu.value = DEFAULT_MTU
         failPendingOperations()
     }
 
     private fun failPendingOperations() {
+        bondCompletion?.also { bondCompletion = null }?.complete(false)
         readCompletion?.also { readCompletion = null }?.complete(null)
         writeCompletion?.also { writeCompletion = null }?.complete(false)
         descriptorWriteCompletion?.also { descriptorWriteCompletion = null }?.complete(false)
@@ -308,6 +485,11 @@ class BleConnectionManager(private val context: Context) : BleTransport {
         }
         _connectionState.value = ConnectionState.CONNECTING
         servicesReady = false
+        remoteDevice = device
+        // Bond-state broadcasts are the only way to learn that pairing finished;
+        // registered before the connect so a bond that completes during setup is
+        // not missed.
+        registerBondReceiver()
         // Keep the handle so disconnect() works while the link is still being set up.
         val client = device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
         if (client == null) {
@@ -406,7 +588,10 @@ class BleConnectionManager(private val context: Context) : BleTransport {
         }
     }
 
-    override suspend fun readCharacteristic(uuid: UUID): ByteArray? = mutex.withLock {
+    override suspend fun readCharacteristic(uuid: UUID): ByteArray? =
+        withBondRetry("read $uuid", failed = { it == null }) { readCharacteristicOnce(uuid) }
+
+    private suspend fun readCharacteristicOnce(uuid: UUID): ByteArray? = mutex.withLock {
         withTimeoutOrNull(GATT_TIMEOUT_MS) {
             suspendCancellableCoroutine { cont ->
                 val characteristic = findCharacteristic(uuid)
@@ -434,7 +619,10 @@ class BleConnectionManager(private val context: Context) : BleTransport {
         }
     }
 
-    override suspend fun writeCharacteristic(uuid: UUID, data: ByteArray): Boolean = mutex.withLock {
+    override suspend fun writeCharacteristic(uuid: UUID, data: ByteArray): Boolean =
+        withBondRetry("write $uuid", failed = { !it }) { writeCharacteristicOnce(uuid, data) }
+
+    private suspend fun writeCharacteristicOnce(uuid: UUID, data: ByteArray): Boolean = mutex.withLock {
         withTimeoutOrNull(GATT_TIMEOUT_MS) {
             suspendCancellableCoroutine { cont ->
                 val characteristic = findCharacteristic(uuid)
@@ -523,7 +711,10 @@ class BleConnectionManager(private val context: Context) : BleTransport {
         }
     }
 
-    override suspend fun enableNotifications(uuid: UUID): Boolean = mutex.withLock {
+    override suspend fun enableNotifications(uuid: UUID): Boolean =
+        withBondRetry("subscribe $uuid", failed = { !it }) { enableNotificationsOnce(uuid) }
+
+    private suspend fun enableNotificationsOnce(uuid: UUID): Boolean = mutex.withLock {
         val characteristic = findCharacteristic(uuid)
         if (characteristic == null) {
             Log.w(TAG, "enableNotifications: characteristic $uuid not found")
